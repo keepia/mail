@@ -1,0 +1,40 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please remove passwords, real email addresses and message contents from logs before posting.
+        Security problems: please use the private vulnerability report (link on the previous page) instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+      placeholder: |
+        1. Set up … on server …
+        2. Sent a message to …
+        Expected: …
+        Actual: …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `keepia-mail --version` (from #6), or the git commit (`git rev-parse --short HEAD`).
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Docker version, which roles run on which server.
+      placeholder: Debian 13, Docker 29.4, edge and filter on server A, store on server B
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "`docker compose logs <service> --tail 100` or the command output. Pasted as code."
+      render: text
