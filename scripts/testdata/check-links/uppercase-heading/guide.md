@@ -1,0 +1,3 @@
+# Guide
+
+## Secret Scanning
