@@ -22,7 +22,7 @@ Current state only. At session end replace these sections; never append. History
 - **Operating model:** one shared instance run by the operator; customers are separated by groups.
 - **Public, MIT licence.**
 - **Brand** lives in keepia/design-system (#7, 2026-11-11).
-- **hermes** moves from mailcow to Keepia Mail with 1.0.0.
+- The reference installation moves from mailcow to Keepia Mail with 1.0.0 (#13).
 - **Coordinator autonomy** (maintainer, 2026-11-11): as in `CLAUDE.md`.
 - **Merge mechanics:** squash merge pinned to the reviewed head SHA (`expectedHeadSha`); a branch behind `main` is refused for required checks, so bring `main` in first.
 - **CI before the Go jobs:** every job in `ci.yml` counts as required for merges until the ruleset lists it. #6 adds `test`, `lint` and `vulncheck`; #5 adds `docker` and `compose`. After their first green run the maintainer adds them to the ruleset.
