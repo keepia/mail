@@ -1,0 +1,3 @@
+# Untracked runtime copies (run.sh) and the sandbox build override.
+/.run/
+/sandbox/

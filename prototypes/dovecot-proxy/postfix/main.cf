@@ -1,0 +1,23 @@
+# Postfix for the #3 prototype. Accepts mail for example.test (through
+# sendmail inside the container) and delivers it over LMTP to the edge.
+compatibility_level = 3.6
+myhostname = postfix.example.test
+mydomain = example.test
+myorigin = $mydomain
+mydestination = localhost
+inet_interfaces = loopback-only
+inet_protocols = ipv4
+maillog_file = /dev/stdout
+
+virtual_mailbox_domains = example.test
+virtual_mailbox_maps = texthash:/etc/postfix/vmailbox
+virtual_transport = lmtp:inet:172.30.3.10:24
+
+# The default, written out: a 5xx reply bounces, a 4xx reply defers.
+soft_bounce = no
+# Short retry intervals so that check 6's recovery is quick.
+queue_run_delay = 10s
+minimal_backoff_time = 10s
+maximal_backoff_time = 20s
+# lmtp_rcpt_timeout stays at its default (300 s), above the edge's 30 s
+# LMTP connect timeout, so Postfix receives the edge's 451 (finding F5).
