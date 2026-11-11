@@ -96,11 +96,11 @@ build fake credentials at runtime in tests, so nothing in the repository
 matches a rule (see `scripts/secret-scan-test.sh`).
 
 **Known fake finding.** The proof that the check fails a pull request with a
-credential was a throwaway pull request, #TBD (commit `TBD`), closed
+credential was a throwaway pull request, #12 (commit `fa639780b283a15081d58cc6fdeca130f46261d1`), closed
 unmerged. Its only commit adds `proof/fake-token.txt` with the fake GitHub
 token that `scripts/secret-scan-test.sh` builds at runtime (rule
 `github-pat`); it is not a real credential. GitHub keeps that commit as
-`refs/pull/TBD/head`, so a full-history rescan that includes `refs/pull/*`
+`refs/pull/12/head`, so a full-history rescan that includes `refs/pull/*`
 (for example after a gitleaks bump) reports it. This finding is the known
 fake: it gets no allowlist entry and no `.gitleaksignore` entry; rescans
 leave out `refs/pull/*`.
