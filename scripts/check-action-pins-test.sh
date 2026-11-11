@@ -30,16 +30,17 @@ for f in "$fixtures"/*.yml; do
 	cases=$((cases + 1))
 	mkdir "$tmp/$name"
 	cp "$f" "$tmp/$name/"
-	rc=0
+	rc=0 out= wantlines= gotlines=
 	out=$(sh "$check" "$tmp/$name" 2>&1) || rc=$?
+	if [ "$want" = 1 ]; then
+		wantlines=$(sed -n '1s/^# want-lines: *//p' "$f" | tr ' ' '\n' | grep . | sort -n | tr '\n' ' ')
+		gotlines=$(printf '%s\n' "$out" | sed -n "s|^.*/$name\.yml:\([0-9][0-9]*\): .*|\1|p" | sort -n | tr '\n' ' ')
+	fi
 	if [ "$rc" != "$want" ]; then
 		echo "FAIL $name: exit $rc, want $want:" >&2
 		printf '%s\n' "$out" >&2
 		fail=1
-	elif [ "$want" = 1 ] &&
-		wantlines=$(sed -n '1s/^# want-lines: *//p' "$f" | tr ' ' '\n' | grep . | sort -n | tr '\n' ' ') &&
-		gotlines=$(printf '%s\n' "$out" | sed -n "s|^.*/$name\.yml:\([0-9][0-9]*\): .*|\1|p" | sort -n | tr '\n' ' ') &&
-		[ -z "$wantlines" ] || [ "$gotlines" != "$wantlines" ]; then
+	elif [ "$want" = 1 ] && { [ -z "$wantlines" ] || [ "$gotlines" != "$wantlines" ]; }; then
 		echo "FAIL $name: reported lines '$gotlines', want '$wantlines' (first line '# want-lines: N ...'):" >&2
 		printf '%s\n' "$out" >&2
 		fail=1

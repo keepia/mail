@@ -44,8 +44,11 @@ backslash escape are reported whatever follows. It does not follow a value
 across lines. Known gap: a continuation line of a multi-line double-quoted
 value that starts with `#` is skipped as a comment, so a `uses:` key on that
 line is not checked. Such YAML is only written on purpose; every workflow
-change also gets the two independent reviews. A real YAML parser (zizmor's
-`unpinned-uses` or a small Go tool) is planned with #6.
+change also gets the two independent reviews. In the other direction the
+check fails closed: an end-of-line comment that mentions `uses:` (for
+example `- run: make all # uses: the Makefile`) is reported; reword the
+comment. A real YAML parser (zizmor's `unpinned-uses` or a small Go tool) is
+planned with #6.
 
 Workflows run with read-only permissions (`contents: read`) and
 `persist-credentials: false` unless a job needs more. A new action is a new
