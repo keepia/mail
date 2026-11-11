@@ -48,4 +48,3 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make workflows-test workflows
-      - run: echo "${{ github.event.pull_request.title }}"
