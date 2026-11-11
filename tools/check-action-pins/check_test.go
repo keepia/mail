@@ -12,7 +12,7 @@ import (
 
 // minFixtures guards against a fixture directory that lost files: the test
 // would otherwise pass on whatever is left.
-const minFixtures = 53
+const minFixtures = 54
 
 // TestFixtures runs Check on each fixture in testdata/. A pass-*.yml gives no
 // finding and parses. A fail-*.yml gives exactly the lines its first line
