@@ -1,7 +1,10 @@
 #!/bin/sh
 # Self-test for scripts/check-action-pins.sh. Runs the check on each fixture
 # of scripts/testdata/check-action-pins/ alone, in its own temporary
-# directory: pass-*.yml must pass, fail-*.yml must fail and name the line.
+# directory: pass-*.yml must pass; fail-*.yml must fail with exactly one
+# report per bad `uses` line, at the line numbers its first line lists
+# (`# want-lines: 8 9`, a full-line comment the check skips). So a fixture
+# with several bad lines fails the test as soon as one of them is missed.
 # No network. Run it with `make workflows-test`.
 set -eu
 
@@ -33,8 +36,11 @@ for f in "$fixtures"/*.yml; do
 		echo "FAIL $name: exit $rc, want $want:" >&2
 		printf '%s\n' "$out" >&2
 		fail=1
-	elif [ "$want" = 1 ] && ! printf '%s\n' "$out" | grep -qF "$name.yml:"; then
-		echo "FAIL $name: report does not name the file and line:" >&2
+	elif [ "$want" = 1 ] &&
+		wantlines=$(sed -n '1s/^# want-lines: *//p' "$f" | tr ' ' '\n' | grep . | sort -n | tr '\n' ' ') &&
+		gotlines=$(printf '%s\n' "$out" | sed -n "s|^.*/$name\.yml:\([0-9][0-9]*\): .*|\1|p" | sort -n | tr '\n' ' ') &&
+		[ -z "$wantlines" ] || [ "$gotlines" != "$wantlines" ]; then
+		echo "FAIL $name: reported lines '$gotlines', want '$wantlines' (first line '# want-lines: N ...'):" >&2
 		printf '%s\n' "$out" >&2
 		fail=1
 	else
@@ -48,8 +54,8 @@ rc=0
 sh "$check" "$tmp/empty" >/dev/null 2>&1 || rc=$?
 if [ "$rc" = 2 ]; then echo "ok   empty directory"; else echo "FAIL empty directory: exit $rc, want 2" >&2; fail=1; fi
 
-if [ "$cases" -lt 18 ]; then
-	echo "FAIL only $cases fixtures found, want 18" >&2
+if [ "$cases" -lt 22 ]; then
+	echo "FAIL only $cases fixtures found, want 22" >&2
 	fail=1
 fi
 exit "$fail"

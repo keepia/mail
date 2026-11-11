@@ -10,16 +10,28 @@
 #
 # Every `uses` key counts, in any YAML form: block style (`uses: x`,
 # `- uses: x`), a quoted key (`"uses": x`, `'uses': x`) and flow style
-# (`- {uses: x}`, `steps: [{uses: x}]`). The version comment must be a real
-# YAML comment at the end of that line: a `#` after whitespace and outside any
-# quoted string; `# v1.2.3` inside a quoted value does not count. Comments are
-# skipped, everything else is checked, so the check fails closed: a `uses:`
-# inside a run: script line is checked too.
+# (`- {uses: x}`, `steps: [{uses: x}]`). The key search runs on the whole
+# line, so a `uses:` inside a run: script line or after something that looks
+# like a comment is checked too. The version comment must be a real YAML
+# comment at the end of that line: a `#` after whitespace and outside any
+# quoted string (`''` inside single quotes is an escaped quote); `# v1.2.3`
+# inside a quoted value does not count. Only full-line comments are skipped.
 #
 # Lines this scanner cannot read are rejected, whatever follows:
 # - an explicit key (`? ` as the first non-space characters, also `- ? `);
 # - a quoted key that contains a backslash (an escape such as `"u\x73es":`
 #   or `"\u0075ses":`); escapes are not decoded.
+#
+# Known limits: this is a line scanner, not a YAML parser. It fails closed on
+# the forms above, but it does not follow a value across lines. Known gap: a
+# continuation line of a multi-line double-quoted value that starts with `#`
+# is skipped as a full-line comment, so a `uses:` key on that line is not
+# checked, for example
+#   - {name: "a
+#     # ", uses: actions/checkout@v7}
+# Such YAML is only written on purpose and is caught by the two reviews every
+# workflow change gets. A real YAML parser (zizmor's unpinned-uses or a small
+# Go tool) is planned with #6.
 #
 # Usage: check-action-pins.sh [directory]  (default: .github/workflows of this
 # repository). Checks every *.yml and *.yaml file directly in the directory.
@@ -43,9 +55,10 @@ local_action='^\./'
 docker='^docker://[^@[:space:]]+@sha256:[0-9a-f]{64}$'
 
 # uses_of <file>: one line per `uses` key: line number, value and the end-of-
-# line comment (empty if none), separated by tabs. The value ends at
-# whitespace, `,`, `}` or `]`. Value and comment start with `=`, so that an
-# empty field stays a field. A line the scanner cannot read gets one record
+# line comment (empty if none), separated by tabs. Keys are searched on the
+# raw line; the comment split is used only for the version comment. The
+# value ends at whitespace, `,`, `}` or `]`. Value and comment start with
+# `=`, so that an empty field stays a field. A line the scanner cannot read gets one record
 # whose value names the reason, so it is reported.
 uses_of() {
 	awk -v q="'" '
@@ -55,7 +68,8 @@ uses_of() {
 		line = $0
 		# Split off the end-of-line comment: the first # that follows
 		# whitespace and lies outside a quoted string. A quote opens a
-		# string only at the start of a token.
+		# string only at the start of a token; `''` inside single quotes
+		# is an escaped quote.
 		comment = ""; inq = ""; prev = " "
 		for (i = 1; i <= length(line); i++) {
 			c = substr(line, i, 1)
@@ -63,6 +77,7 @@ uses_of() {
 				if (c == "\\") { i++; prev = ""; continue }
 				if (c == "\"") inq = ""
 			} else if (inq == q) {
+				if (c == q && substr(line, i + 1, 1) == q) { i++; continue }
 				if (c == q) inq = ""
 			} else if ((c == "\"" || c == q) && prev ~ /^[ \t\[{,:]$/) {
 				inq = c
@@ -81,7 +96,7 @@ uses_of() {
 			printf "%d\t=(quoted key with a backslash escape, not readable)\t=\n", NR
 			next
 		}
-		rest = line
+		rest = $0
 		while (match(rest, key)) {
 			rest = substr(rest, RSTART + RLENGTH)
 			sub(/^[ \t]*/, "", rest)

@@ -36,6 +36,17 @@ The `workflows` check (`.github/workflows/ci.yml`) runs:
   `scripts/testdata/check-action-pins/`;
 - `jq empty .github/labels.json`: the label file is valid JSON.
 
+**Known limits of the pin check.** It is a line scanner, not a YAML parser.
+It finds `uses` keys in block and flow style and with quoted keys, and it
+counts the version only as a real end-of-line comment. It fails closed on
+lines it cannot read: an explicit key (`? `) and a quoted key with a
+backslash escape are reported whatever follows. It does not follow a value
+across lines. Known gap: a continuation line of a multi-line double-quoted
+value that starts with `#` is skipped as a comment, so a `uses:` key on that
+line is not checked. Such YAML is only written on purpose; every workflow
+change also gets the two independent reviews. A real YAML parser (zizmor's
+`unpinned-uses` or a small Go tool) is planned with #6.
+
 Workflows run with read-only permissions (`contents: read`) and
 `persist-credentials: false` unless a job needs more. A new action is a new
 external service and needs the maintainer's OK.
