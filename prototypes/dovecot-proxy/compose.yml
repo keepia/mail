@@ -1,0 +1,83 @@
+# Throwaway prototype for #3: one edge Dovecot 2.4 in proxy mode, two mail
+# stores and Postfix delivering over LMTP through the edge. Run it with
+# run.sh. No port is published.
+name: keepia-proto3
+
+x-dovecot: &dovecot
+  image: dovecot/dovecot:2.4.5@sha256:43c14def08a57f25107593cbcf64a0a6fbae84a7b9de7aa038513c9b21e91914
+  mem_limit: 128m
+  healthcheck:
+    test: ["CMD", "nc", "-z", "127.0.0.1", "143"]
+    # Probe every second while starting, then rarely, so that the probes'
+    # "Login aborted" lines do not flood the logs the checks read.
+    start_period: 30s
+    start_interval: 1s
+    interval: 300s
+    timeout: 2s
+    retries: 3
+
+services:
+  edge:
+    <<: *dovecot
+    volumes:
+      - ./edge/dovecot.conf:/etc/dovecot/dovecot.conf:ro
+      - ./.run/routing:/etc/dovecot/routing:ro
+      - ./.run/edge.d:/etc/dovecot/edge.d:ro
+      # The image declares VOLUME /srv/vmail; naming it avoids an anonymous
+      # volume and lets check 7 prove that it stays empty.
+      - edge-vmail:/srv/vmail
+    networks:
+      proto3:
+        ipv4_address: 172.30.3.10
+
+  store-a:
+    <<: *dovecot
+    volumes:
+      - ./store-a/dovecot.conf:/etc/dovecot/dovecot.conf:ro
+      - ./store/common.conf:/etc/dovecot/common.conf:ro
+      - ./.run/store:/etc/dovecot/users:ro
+      - store-a-mail:/srv/vmail
+    networks:
+      proto3:
+        ipv4_address: 172.30.3.21
+
+  store-b:
+    <<: *dovecot
+    volumes:
+      - ./store-b/dovecot.conf:/etc/dovecot/dovecot.conf:ro
+      - ./store/common.conf:/etc/dovecot/common.conf:ro
+      - ./.run/store:/etc/dovecot/users:ro
+      - store-b-mail:/srv/vmail
+    networks:
+      proto3:
+        ipv4_address: 172.30.3.22
+
+  postfix:
+    # Built by run.sh with `docker build` (see README, "Build"); Compose
+    # uses the existing image of this name.
+    build: ./postfix
+    mem_limit: 128m
+    volumes:
+      - postfix-spool:/var/spool/postfix
+    healthcheck:
+      test: ["CMD", "postfix", "status"]
+      start_period: 30s
+      start_interval: 1s
+      interval: 300s
+      timeout: 5s
+      retries: 3
+    networks:
+      proto3:
+        ipv4_address: 172.30.3.30
+
+networks:
+  proto3:
+    ipam:
+      config:
+        - subnet: 172.30.3.0/24
+
+volumes:
+  edge-vmail:
+  store-a-mail:
+  store-b-mail:
+  postfix-spool:

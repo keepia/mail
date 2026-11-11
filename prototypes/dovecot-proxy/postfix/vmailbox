@@ -1,0 +1,7 @@
+# Recipients Postfix accepts for example.test (the value is unused).
+alice@example.test x
+bob@example.test x
+carol@example.test x
+sender@example.test x
+# Present so that check 8 reaches the edge: the edge, not Postfix, rejects it.
+nobody@example.test x
