@@ -148,8 +148,8 @@ crypt_global_private_key main {
 
 ### F6: memory and time (this host, not a benchmark)
 
-- Peak memory of one Dovecot container per phase (cgroup `memory.max_usage_in_bytes`, master plus one doveadm or imap process): 13 MiB (2.3, A), 18 MiB (2.4, B), 14-15 MiB (2.4, C and D).
-- Reading the 2 MB message p08 in one `doveadm exec imap` session, including `docker exec` and the start of the imap process: 104-122 ms in 2.3 and 106-139 ms in 2.4 over three runs, so roughly 15-20 MB/s for decrypt + lz4 + IMAP.
+- Peak memory of one Dovecot container per phase (cgroup `memory.max_usage_in_bytes`, master plus one doveadm or imap process): 13 MiB (2.3, A), 18-19 MiB (2.4, B), 14-15 MiB (2.4, C and D).
+- Reading the 2 MB message p08 in one `doveadm exec imap` session, including `docker exec` and the start of the imap process: 104-122 ms in 2.3 and 106-139 ms in 2.4 over four runs, so roughly 15-20 MB/s for decrypt + lz4 + IMAP.
 - The whole `run.sh` takes about 40 s.
 
 ### F7: limitations

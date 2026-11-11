@@ -173,7 +173,7 @@ dirdiff() {
   local k
   for k in maildir index; do
     echo "--- directory diff $1 -> $2 ($k)"
-    diff "$W/out/dirs-$1-$k.txt" "$W/out/dirs-$2-$k.txt" | grep '^[<>]' || echo "(none)"
+    { diff "$W/out/dirs-$1-$k.txt" "$W/out/dirs-$2-$k.txt" || true; } | grep '^[<>]' || echo "(none)"
   done
 }
 
@@ -327,7 +327,7 @@ same "$W/out/status-A.txt" "$W/out/status-B.txt" "B: mailbox status equal (messa
 same "$W/out/list-A.txt" "$W/out/list-B.txt" "B: check 6: 2.4 lists the same folder names as 2.3"
 if [ "$(cat "$W/out/metadata-B.txt")" = proto4 ] || grep -qx 'value: proto4\|proto4' "$W/out/metadata-B.txt"; then ok "B: METADATA reads proto4"; else fail "B: METADATA: $(cat "$W/out/metadata-B.txt")"; fi
 printf '%s\n' '< ./.x.\7ey' '> ./.x.~y' > "$W/out/dirdiff-B-expected.txt"
-diff "$W/out/dirs-A-maildir.txt" "$W/out/dirs-B-maildir.txt" | grep '^[<>]' > "$W/out/dirdiff-B.txt"
+{ diff "$W/out/dirs-A-maildir.txt" "$W/out/dirs-B-maildir.txt" || true; } | grep '^[<>]' > "$W/out/dirdiff-B.txt"
 same "$W/out/dirdiff-B-expected.txt" "$W/out/dirdiff-B.txt" "B: maildir directory diff A->B is exactly .x.\\7ey -> .x.~y (B2)"
 
 # ------------------------------------------------------------------ phase C
