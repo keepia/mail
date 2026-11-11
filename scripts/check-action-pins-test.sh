@@ -48,8 +48,8 @@ rc=0
 sh "$check" "$tmp/empty" >/dev/null 2>&1 || rc=$?
 if [ "$rc" = 2 ]; then echo "ok   empty directory"; else echo "FAIL empty directory: exit $rc, want 2" >&2; fail=1; fi
 
-if [ "$cases" -lt 9 ]; then
-	echo "FAIL only $cases fixtures found, want 9" >&2
+if [ "$cases" -lt 15 ]; then
+	echo "FAIL only $cases fixtures found, want 15" >&2
 	fail=1
 fi
 exit "$fail"
