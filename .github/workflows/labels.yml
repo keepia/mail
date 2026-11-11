@@ -1,0 +1,33 @@
+name: Sync labels
+
+# Creates or updates the repository labels defined in .github/labels.json.
+# Labels missing from the file are left alone.
+on:
+  push:
+    branches: [main]
+    paths: [.github/labels.json]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create or update labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          jq -c '.[]' .github/labels.json | while read -r label; do
+            gh label create "$(jq -r .name <<<"$label")" \
+              --color "$(jq -r .color <<<"$label")" \
+              --description "$(jq -r .description <<<"$label")" \
+              --force
+          done

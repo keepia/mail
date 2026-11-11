@@ -1,0 +1,8 @@
+# want-lines: 8
+name: fixture
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7

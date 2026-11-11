@@ -1,0 +1,56 @@
+GO        ?= go
+# gitleaks version for secret scanning. Dependabot cannot update
+# `go install pkg@version`, so bump it here by hand and rescan the full
+# history (`make secrets`) after a bump.
+GITLEAKS_VERSION := v8.30.1
+GITLEAKS  := bin/gitleaks-$(GITLEAKS_VERSION)/gitleaks
+# Git history to scan; `make secrets` scans all refs unless SECRETS_LOG_OPTS
+# (git log options, e.g. a commit range) is set.
+SECRETS_SOURCE ?= .
+# actionlint version for the workflows check. Dependabot cannot update it
+# either, so bump it here by hand.
+ACTIONLINT_VERSION := v1.7.12
+ACTIONLINT := bin/actionlint-$(ACTIONLINT_VERSION)/actionlint
+
+.PHONY: secrets secrets-test links links-test workflows workflows-test
+
+# gitleaks is built with the project's toolchain and verified through the Go
+# checksum database.
+$(GITLEAKS):
+	GOTOOLCHAIN=$$($(GO) env GOVERSION) GOBIN=$(CURDIR)/$(dir $(GITLEAKS)) $(GO) install \
+		-ldflags=-X=github.com/zricethezav/gitleaks/v8/version.Version=$(GITLEAKS_VERSION) \
+		github.com/zricethezav/gitleaks/v8@$(GITLEAKS_VERSION)
+
+## secrets: scan the git history (all refs by default) for committed credentials
+secrets: $(GITLEAKS)
+	$(GITLEAKS) git --redact --verbose --no-banner --exit-code 1 --config .gitleaks.toml \
+		--log-opts="$$SECRETS_LOG_OPTS" $(SECRETS_SOURCE)
+
+## secrets-test: self-test of the secret scan (temporary git repos, no network)
+secrets-test: $(GITLEAKS)
+	GITLEAKS=$(CURDIR)/$(GITLEAKS) sh scripts/secret-scan-test.sh
+
+## links: every relative Markdown link and heading anchor in the repository resolves
+links:
+	sh scripts/check-links.sh
+
+## links-test: self-test of the links check (fixtures, no network)
+links-test:
+	sh scripts/check-links-test.sh
+
+# actionlint is built with the project's toolchain and verified through the Go
+# checksum database, like gitleaks.
+$(ACTIONLINT):
+	GOTOOLCHAIN=$$($(GO) env GOVERSION) GOBIN=$(CURDIR)/$(dir $(ACTIONLINT)) $(GO) install \
+		github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+
+## workflows: actionlint on all workflows, action pins, valid labels.json
+# No shellcheck/pyflakes: the result must not depend on what is installed.
+workflows: $(ACTIONLINT)
+	$(ACTIONLINT) -shellcheck= -pyflakes=
+	sh scripts/check-action-pins.sh
+	jq empty .github/labels.json
+
+## workflows-test: self-test of the action pin check (fixtures, no network)
+workflows-test:
+	sh scripts/check-action-pins-test.sh

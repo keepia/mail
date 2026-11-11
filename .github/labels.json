@@ -1,0 +1,15 @@
+[
+  { "name": "feature",       "color": "1d76db", "description": "New functionality" },
+  { "name": "bug",           "color": "d73a4a", "description": "Something is not working" },
+  { "name": "chore",         "color": "c5def5", "description": "Maintenance, refactoring, CI or tooling" },
+  { "name": "docs",          "color": "0075ca", "description": "Documentation only" },
+  { "name": "dependencies",  "color": "0366d6", "description": "Dependency updates (set by Dependabot)" },
+  { "name": "db-migration",  "color": "fbca04", "description": "Changes the database schema; back up before deploying" },
+  { "name": "breaking",      "color": "b60205", "description": "Requires manual steps when updating" },
+  { "name": "plan",          "color": "c2e0c6", "description": "Coordinator or maintainer asks for an implementation plan" },
+  { "name": "review",        "color": "d4c5f9", "description": "Plan posted as a comment; waiting for its review" },
+  { "name": "ready",         "color": "0e8a16", "description": "Plan approved by a plan reviewer or the maintainer; ready to implement" },
+  { "name": "second-review", "color": "fef2c0", "description": "Risky pull request; needs a second, independent review in a Claude session (marker only)" },
+  { "name": "security",      "color": "b60205", "description": "Security hardening (never an undisclosed vulnerability)" },
+  { "name": "followup",      "color": "bfd4f2", "description": "Non-blocking follow-up from a review or CI; the body names its source" }
+]

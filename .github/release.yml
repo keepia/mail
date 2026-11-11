@@ -1,0 +1,20 @@
+# Groups the automatically generated release notes by pull request label.
+# A pull request appears in the first matching category.
+changelog:
+  categories:
+    - title: Breaking changes (manual steps needed)
+      labels: [breaking]
+    - title: Database migrations (back up before upgrading)
+      labels: [db-migration]
+    - title: Security hardening
+      labels: [security]
+    - title: New features
+      labels: [feature]
+    - title: Bug fixes
+      labels: [bug]
+    - title: Documentation
+      labels: [docs]
+    - title: Dependencies
+      labels: [dependencies]
+    - title: Maintenance
+      labels: ["*"]
