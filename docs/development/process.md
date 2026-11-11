@@ -64,7 +64,7 @@ services, changes to the serving layer: static file serving, response
 headers, CSP, routing, mail routing and placement, the control-plane/agent
 trust boundary, encryption at rest and keys, spam, virus, rate-limit and ban
 policy, container privileges and networking, and changes to
-`.github/workflows/` or `scripts/check-action-pins*`) also get a second,
+`.github/workflows/` or `tools/check-action-pins/`) also get a second,
 independent session review by a separate reviewer agent that does not see the
 first review beforehand. The coordinator labels each of them
 **`second-review`**, every pull request that changes the schema included; the

@@ -13,7 +13,7 @@ has a `paths` filter.
 ```sh
 make secrets-test secrets     # secret scan: self-test, then the full history
 make links-test links         # Markdown links: self-test, then the repository
-make workflows-test workflows # action pins: self-test; then actionlint, pins, labels.json
+make workflows-test workflows # pin check: tests; then actionlint, pins, labels.json
 ```
 
 The tools are pinned in the [Makefile](../../Makefile) and built with the
@@ -28,27 +28,47 @@ The `workflows` check (`.github/workflows/ci.yml`) runs:
   depend on what is installed. It reports, among other things, untrusted
   input such as `${{ github.event.pull_request.title }}` used directly in a
   `run:` script;
-- [`scripts/check-action-pins.sh`](../../scripts/check-action-pins.sh): every
-  `uses:` is pinned to a full 40-character commit SHA with a `# vX.Y.Z`
+- [`tools/check-action-pins`](../../tools/check-action-pins/main.go): every
+  `uses` is pinned to a full 40-character commit SHA with a `# vX.Y.Z`
   comment (`owner/repo@<sha> # v1.2.3`); local actions (`./…`) are allowed,
-  a `docker://` image needs an `@sha256:` digest. Its self-test is
-  `scripts/check-action-pins-test.sh` with the fixtures in
-  `scripts/testdata/check-action-pins/`;
+  a `docker://` image needs an `@sha256:` digest. Its tests
+  (`make workflows-test`) run it on the fixtures in
+  `tools/check-action-pins/testdata/`;
 - `jq empty .github/labels.json`: the label file is valid JSON.
 
-**Known limits of the pin check.** It is a line scanner, not a YAML parser.
-It finds `uses` keys in block and flow style and with quoted keys, and it
-counts the version only as a real end-of-line comment. It fails closed on
-lines it cannot read: an explicit key (`? `) and a quoted key with a
-backslash escape are reported whatever follows. It does not follow a value
-across lines. Known gap: a continuation line of a multi-line double-quoted
-value that starts with `#` is skipped as a comment, so a `uses:` key on that
-line is not checked. Such YAML is only written on purpose; every workflow
-change also gets the two independent reviews. In the other direction the
-check fails closed: an end-of-line comment that mentions `uses:` (for
-example `- run: make all # uses: the Makefile`) is reported; reword the
-comment. A real YAML parser (zizmor's `unpinned-uses` or a small Go tool) is
-planned with #6.
+**How the pin check reads the files.** It is a small Go tool that parses
+YAML with `go.yaml.in/yaml/v3` and decides on the parsed node tree, not on
+the text. It checks `.github/workflows/*.y*ml`, every `action.yml` and
+`action.yaml` under `.github/actions` at any depth, and the action file of
+every local action (`uses: ./path`) that a checked file names. Its rules:
+
+- Every YAML document of a file is checked, not only the first. A file that
+  does not parse is reported.
+- Every mapping key that decodes to `uses` counts, wherever it sits: plain,
+  quoted, escaped (`"u\x73es"`), explicit (`? uses`), inside an anchor that
+  a merge key (`<<: *a`) or an alias uses, at job or step level. An anchored
+  node is checked where its anchor defines it.
+- An alias used as a mapping key (`- *k : …`) and a key with a tag other
+  than `!!str` are reported, whatever they decode to. The tool does not
+  resolve them; rejecting them fails closed.
+- **Block style only.** A `uses` inside a flow mapping or flow sequence
+  (`- {uses: …}`, `steps: [{uses: …}]`) is reported, also when it is pinned:
+  in flow style the parser does not reliably attach the trailing comment to
+  the value, so the version comment cannot be read there.
+- The value is a plain string: an alias (`uses: *x`), a block scalar
+  (`>-`, `|`), another tag than `!!str`, an empty value, a mapping or a
+  sequence is reported. The value may sit on the next line.
+- The version comment is the value's own line comment: a real YAML comment
+  after the value on its line. `# v7.0.1` inside a quoted value, on the key's
+  line above the value, or on the next line does not count.
+
+**What it does not check.** It does not check that the version comment
+matches the SHA; that needs the network, and Dependabot keeps both in step.
+A local action outside this repository, or a path that names no
+`action.y*ml`, has nothing to scan. Known false positives, which fail
+closed: any key named `uses` is checked, also one that is not an action
+reference, such as a step input under `with:` or an env variable named
+`uses`; rename it.
 
 Workflows run with read-only permissions (`contents: read`) and
 `persist-credentials: false` unless a job needs more. A new action is a new

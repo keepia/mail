@@ -1,4 +1,4 @@
-# want-lines: 7
+# want-lines: 7 7
 name: fixture
 on: push
 jobs:

@@ -34,8 +34,8 @@ jobs:
 
   # actionlint on all workflows (actionlint pinned in the Makefile, verified
   # through the Go checksum database), every `uses:` pinned to a full commit
-  # SHA with a version comment (scripts/check-action-pins.sh, after its
-  # self-test), and a valid .github/labels.json.
+  # SHA with a version comment (tools/check-action-pins, a YAML parser, after
+  # its tests), and a valid .github/labels.json.
   workflows:
     name: workflows
     runs-on: ubuntu-latest

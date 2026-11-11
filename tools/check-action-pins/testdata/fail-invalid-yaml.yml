@@ -1,0 +1,8 @@
+# want-lines: 0
+name: fixture
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo uses: foo
