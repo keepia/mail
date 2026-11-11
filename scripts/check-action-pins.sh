@@ -10,9 +10,16 @@
 #
 # Every `uses` key counts, in any YAML form: block style (`uses: x`,
 # `- uses: x`), a quoted key (`"uses": x`, `'uses': x`) and flow style
-# (`- {uses: x}`, `steps: [{uses: x}]`); in flow style the version comment
-# goes at the end of the line. Only full-line comments are skipped, so the
-# check fails closed: a `uses:` inside a run: script line is checked too.
+# (`- {uses: x}`, `steps: [{uses: x}]`). The version comment must be a real
+# YAML comment at the end of that line: a `#` after whitespace and outside any
+# quoted string; `# v1.2.3` inside a quoted value does not count. Comments are
+# skipped, everything else is checked, so the check fails closed: a `uses:`
+# inside a run: script line is checked too.
+#
+# Lines this scanner cannot read are rejected, whatever follows:
+# - an explicit key (`? ` as the first non-space characters, also `- ? `);
+# - a quoted key that contains a backslash (an escape such as `"u\x73es":`
+#   or `"\u0075ses":`); escapes are not decoded.
 #
 # Usage: check-action-pins.sh [directory]  (default: .github/workflows of this
 # repository). Checks every *.yml and *.yaml file directly in the directory.
@@ -29,21 +36,52 @@ fi
 	exit 2
 }
 
-# The value of a `uses` key, quotes removed, and the rest of its line.
+# The value of a `uses` key, quotes removed, and the comment of its line.
 action='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/[^@[:space:]]+)?@[0-9a-f]{40}$'
-version_comment='#[[:space:]]*v[0-9]+\.[0-9]+\.[0-9]+([^0-9.]|$)'
+version_comment='^#[[:space:]]*v[0-9]+\.[0-9]+\.[0-9]+([^0-9.]|$)'
 local_action='^\./'
 docker='^docker://[^@[:space:]]+@sha256:[0-9a-f]{64}$'
 
-# uses_of <file>: one line per `uses` key: line number, value and the rest of
-# the line, separated by tabs. The value ends at whitespace, `,`, `}` or `]`.
-# Value and rest start with `=`, so that an empty value stays a field.
+# uses_of <file>: one line per `uses` key: line number, value and the end-of-
+# line comment (empty if none), separated by tabs. The value ends at
+# whitespace, `,`, `}` or `]`. Value and comment start with `=`, so that an
+# empty field stays a field. A line the scanner cannot read gets one record
+# whose value names the reason, so it is reported.
 uses_of() {
 	awk -v q="'" '
 	BEGIN { key = "(^|[ \t{,])[\"" q "]?uses[\"" q "]?[ \t]*:" }
 	/^[ \t]*#/ { next }
 	{
-		rest = $0
+		line = $0
+		# Split off the end-of-line comment: the first # that follows
+		# whitespace and lies outside a quoted string. A quote opens a
+		# string only at the start of a token.
+		comment = ""; inq = ""; prev = " "
+		for (i = 1; i <= length(line); i++) {
+			c = substr(line, i, 1)
+			if (inq == "\"") {
+				if (c == "\\") { i++; prev = ""; continue }
+				if (c == "\"") inq = ""
+			} else if (inq == q) {
+				if (c == q) inq = ""
+			} else if ((c == "\"" || c == q) && prev ~ /^[ \t\[{,:]$/) {
+				inq = c
+			} else if (c == "#" && prev ~ /^[ \t]$/) {
+				comment = substr(line, i)
+				line = substr(line, 1, i - 1)
+				break
+			}
+			prev = c
+		}
+		if (line ~ /^[ \t]*(-[ \t]+)*\?([ \t]|$)/) {
+			printf "%d\t=(explicit key \"?\", not readable)\t=\n", NR
+			next
+		}
+		if (line ~ ("[\"" q "][^\"" q "]*\\\\[^\"" q "]*[\"" q "][ \t]*:")) {
+			printf "%d\t=(quoted key with a backslash escape, not readable)\t=\n", NR
+			next
+		}
+		rest = line
 		while (match(rest, key)) {
 			rest = substr(rest, RSTART + RLENGTH)
 			sub(/^[ \t]*/, "", rest)
@@ -51,7 +89,7 @@ uses_of() {
 			value = substr(rest, 1, RLENGTH)
 			rest = substr(rest, RLENGTH + 1)
 			gsub(/["\047]/, "", value)
-			printf "%d\t=%s\t=%s\n", NR, value, rest
+			printf "%d\t=%s\t=%s\n", NR, value, comment
 		}
 	}' "$1"
 }
@@ -66,13 +104,13 @@ for f in "$dir"/*.yml "$dir"/*.yaml; do
 	files=$((files + 1))
 	uses_of "$f" >"$tmp/uses"
 	tab=$(printf '\t')
-	while IFS="$tab" read -r n value rest; do
-		value=${value#=} rest=${rest#=}
+	while IFS="$tab" read -r n value comment; do
+		value=${value#=} comment=${comment#=}
 		if printf '%s\n' "$value" | grep -qE -e "$local_action" -e "$docker"; then
 			continue
 		fi
 		if printf '%s\n' "$value" | grep -qE "$action" &&
-			printf '%s\n' "$rest" | grep -qE "$version_comment"; then
+			printf '%s\n' "$comment" | grep -qE "$version_comment"; then
 			continue
 		fi
 		echo "$f:$n: not pinned to a full commit SHA with a '# vX.Y.Z' comment (or a docker:// digest): uses: $value"
