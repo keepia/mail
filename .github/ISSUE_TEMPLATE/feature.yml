@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an improvement or new feature.
+labels: [feature]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        When this issue is labelled `plan`, an implementation plan is posted here as a comment
+        and the label changes to `review`. It is implemented once an independent plan reviewer or the maintainer approves it with `ready`.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is missing or inconvenient today? A concrete example helps.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How it could work. Rough ideas are fine.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Done when
+      description: What should be true when this is finished?
+      placeholder: |
+        - …
+        - …
