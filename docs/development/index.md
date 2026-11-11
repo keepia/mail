@@ -123,3 +123,5 @@ lowercase, punctuation dropped, spaces to hyphens). Links inside code spans
 and fenced code blocks are ignored; external links are not fetched. Its
 self-test is `scripts/check-links-test.sh` with the fixtures in
 `scripts/testdata/check-links/`, which the check itself skips.
+
+Proof link: [no such heading](index.md#no-such-heading)
