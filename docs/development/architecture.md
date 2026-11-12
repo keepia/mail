@@ -132,9 +132,9 @@ flowchart LR
   end
   agent["agent (one per server)"]
 
-  internet -->|"25, 465, 587, 993, 995, 4190, 443"| postfix
-  internet --> edovecot
-  internet --> kedge
+  internet -->|"25, 465, 587"| postfix
+  internet -->|"993, 995, 4190"| edovecot
+  internet -->|"443"| kedge
   postfix -->|"socketmap"| kedge
   edovecot -->|"Lua passdb, auth policy"| kedge
   postfix -->|"milter"| rproxy
@@ -182,7 +182,7 @@ their source and the milestone test that proves them.
   `mail_path` or userdb. `lmtp_proxy` falls back to local delivery for an
   entry without `proxy`, and with storage configured that stored a test
   user's mail on the edge. The edge's `/srv/vmail` is a named, empty volume
-  ([`prototypes/dovecot-proxy/compose.yml:29-31`][proto-compose] shows the
+  ([`prototypes/dovecot-proxy/compose.yml:26-28`][proto-vmail] shows the
   named volume of the prototype). **Test:** the Compose test of #5 and 0.2.0
   asserts the volume stays empty, as #3's check 7 did.
 - **R-ROUTE-COMPLETE** ([#3 F3][p3]): the lookup code returns either "user
@@ -227,7 +227,8 @@ their source and the milestone test that proves them.
   another anchor's certificate (probe 3, measured). **Test:** section 5a's
   listener test (0.2.0).
 - **R-GATE** ([review 4, B7][rv4]): see section 5a. It replaces the per-
-  application revocation rule of earlier plan revisions.
+  application revocation rule of earlier plan revisions. **Test:** section
+  5a's listener test (0.2.0; the groupware listeners in 0.5.0).
 - **R-NO-NOPASSWORD** ([review 1][rv1], measured: with `nopassword=y`, SASL
   over the auth-client socket accepted any password): `nopassword` is never
   returned on any socket a SASL client uses, which on the edge means never at
@@ -271,7 +272,9 @@ their source and the milestone test that proves them.
   `host` is the store gate's **name** from the `stores` table (the DNS SAN of
   its server certificate; non-empty, never free text), `hostip` is the edge
   gate's fixed private address, and `port` is the egress port of a store in
-  state `active` (section 5a); all three are validated against `stores`. The
+  state `active` (section 5a). `host` and `port` are validated against
+  `stores`; `hostip` is validated against the edge's own configuration in its
+  bundle (its gate's fixed private address), which `stores` does not hold. The
   control plane validates when it builds the bundle, the agent validates again
   before writing, and `keepia-edge` validates before answering. An invalid
   entry is answered as an internal failure (4xx), never passed through.
@@ -426,7 +429,7 @@ instead are at the end of this section.
 ### Accepted risks of M1
 
 Stated for the maintainer's decision (M1).
-Default until the maintainer decides M1: these risks are accepted as written.
+Default until the maintainer decides M1: these are the risks the maintainer accepts if M1 is answered as recommended.
 
 - A compromised edge reaches every mailbox (all hashes, cleartext passwords,
   the master credential, the edge certificate).
@@ -438,6 +441,17 @@ Default until the maintainer decides M1: these risks are accepted as written.
   by the edge Dovecot container, it opens no store.
 - The `keepia-edge` front key can act as any user towards SOGo; it opens no
   store, and the `edge-dovecot` key opens no SOGo.
+- The SOGo per-session token (section 4a) is a bearer credential on the
+  public edge ports. It cannot be bound to `req.cert` or `req.local_port`,
+  which the auth-socket client asserts, so a token taken from the groupware
+  role (SOGo, or memcached if session data lands there) works on the edge's
+  IMAP, ManageSieve and submission ports (993, 4190, 465, 587). A groupware
+  compromise therefore reaches the mail of every user with a live webmail
+  session, bounded by the token lifetime.
+- A compromised store or control container can send mail with any sender
+  through the edge's internal submission, which relays for the edge gate's
+  fixed address without SASL (section 5a, "Relay on the edge's internal
+  submission").
 - A removed edge stays admitted until the gates get the new revocation list
   (seconds while control is up, predicted). During a control outage nothing
   can be revoked, and after at least 5 days (at most 7) mail is deferred until
@@ -470,10 +484,10 @@ auth path, and SOGo never sees a password hash.
   cached in memory for a short time (keyed by a hash of the credentials), so
   a sync burst does not hash the password on every request. The cache is
   dropped whenever a new replica generation is loaded, so a changed password
-  or a revoked app password stops working at once ([review 3, N10][rv3]).
+  or a revoked app password stops working at once ([review 2, N10][rv2]).
 - **Webmail:** `keepia-edge` serves the login form and its own session cookie
-  (main password only, no app passwords), checks the groupware access flag,
-  and proxies to SOGo.
+  (main password only, no app passwords), checks the mailbox's webmail access
+  flag (`mailboxes.webmail_access`, section 10), and proxies to SOGo.
 - **Towards SOGo:** the front sets SOGo's trusted-proxy user
   (`SOGoTrustProxyAuthentication`, the user in `x-webobjects-remote-user`) and
   an `Authorization: Basic` header whose password is a **per-session token**
@@ -485,7 +499,7 @@ auth path, and SOGo never sees a password hash.
   prototype.
 - **Token binding** (predicted, 0.5.0): the token is bound by what
   `keepia-edge` itself knows, not by `req.cert` or `req.local_port`, which the
-  auth-socket client asserts ([review 3][rv3], probe 3, measured). It is random,
+  auth-socket client asserts ([review 2][rv2], probe 3, measured). It is random,
   minted for one user and one front session, short-lived, revoked at logout
   or session expiry, and travels only over the front's mTLS connection to the
   groupware's gate (section 5a). A token presented for another user, or after
@@ -553,9 +567,10 @@ their distribution are as the plan recommends.
   release, so a multi-server deployment upgrades server by server.
 - **Keys:** Default until the maintainer decides M1: the control plane
   stores secrets (DKIM private keys, the mail_crypt private key, the internal
-  CA key, TOTP secrets, the quarantine key) encrypted with a key-encryption
-  key in a file on the control server, not in Postgres, so a database dump
-  alone reveals none.
+  CA key, TOTP secrets) encrypted with a key-encryption key in a file on the
+  control server, not in Postgres, so a database dump alone reveals none. The
+  quarantine key is not stored: control derives it from the key-encryption
+  key (section 12).
 
 ### Reloads without the Docker socket
 
@@ -602,7 +617,8 @@ client-certificate check.** Four review rounds found a new gap in
 per-application checks each time (Dovecot LMTP has no authentication step,
 [review 4, B7][rv4]; an expired CRL is `NO [ALERT]`, N14). Following the rule in
 `CLAUDE.md` to rebuild a heuristic on a principle after three rounds, the
-model rests on one mechanism ([coordinator decision T6][cd]).
+model rests on one mechanism: [coordinator decision T6][cd] ("TLS on every
+internal hop"), as revised by the plan in Revision 4 to one gate per role.
 
 ### Gates and networks
 
@@ -679,19 +695,22 @@ their own role's gate:
   certificate against `host`: IMAP logged in and LMTP saved end to end, and
   another anchor's client certificate was refused. With `host` set to the
   edge gate's address, every login and delivery failed the host-name check
-  (`SSL certificate doesn't match expected host name`, tempfail). Store gate
+  (`SSL certificate doesn't match expected host name`; IMAP answered
+  `NO [SERVERBUG] Account is temporarily unavailable.`, not `[UNAVAILABLE]`,
+  measured on 2.4.5 in [review 7][rv7] and the [second review of
+  PR #36][rb36]). Store gate
   certificates carry their name as a DNS SAN. The agent → control and
   `keepia-edge` → groupware passthroughs follow the same rule (the remote
   gate's name for verification, the local egress address to connect). A move
   changes the name, the port or both;
-- **SNI routing on one port** ([approval][approval], N23): with `host` a
+- **SNI routing on one port** ([review 7, N23][rv7]): with `host` a
   name, Dovecot presumably sends it as SNI, so the edge gate could route all
   stores on one port by SNI (not measured). **Decision: one port per store**
   (measured, no TLS parsing in a keyless gate, so a mis-route cannot cross
   stores through a parsing bug). **Rejected for 1.0:** SNI routing; it stays
   an option for 1.1.0 if the port count grows;
 - native certificates through passthrough are **predicted** against a gate
-  ([review 6, N19][rv6]): the Dovecot proxy's was measured against Dovecot
+  ([review 5, N19][rv5]): the Dovecot proxy's was measured against Dovecot
   ([review 4][rv4], probe 2). For SOGo → Postgres the terminating listener
   speaks Postgres's `SSLRequest` preamble (0.5.0). **Rejected:** requiring
   libpq 17 with `sslnegotiation=direct`, because SOGo's distribution decides
@@ -701,17 +720,31 @@ their own role's gate:
 
 ### Listeners behind gates
 
-The anchor each gate listener trusts is in brackets.
+Each gate listener admits one client anchor and only the purposes (URI SAN)
+named here; a certificate of the right anchor with another purpose is
+refused.
 
-| Role | Listener | Anchor |
-|---|---|---|
-| store | IMAP, POP3, ManageSieve, LMTP | store-client |
-| groupware | `groupware-web`, `sogod` | groupware-client |
-| control | agent API | agent |
-| control | join endpoint | none (join handler only) |
-| control | Postgres for SOGo, Valkey for edges and filters, quarantine intake from filters | service |
-| filter | rspamd workers for `rspamd-proxy` | service |
-| edge | internal submission for stores and control | service |
+| Role | Listener | Client anchor | Allowed purposes |
+|---|---|---|---|
+| store | IMAP, POP3, ManageSieve, LMTP | store-client | `edge-dovecot` |
+| groupware | `groupware-web`, `sogod` | groupware-client | `keepia-edge` |
+| control | agent API | agent | `agent` (certificate bound to a server id) |
+| control | join endpoint | none (join handler only) | none |
+| control | Postgres | service | `groupware` only |
+| control | Valkey | service | `edge`, `filter` |
+| control | quarantine intake | service | `filter` |
+| filter | rspamd workers for `rspamd-proxy` | service | `edge` |
+| edge | internal submission | service | `store`, `control` |
+
+**Gate server certificates.** The gates' own server certificates come from
+a fifth dedicated anchor, gate-server, with only the serverAuth EKU and the
+gate's name as DNS SAN; the four client anchors never issue server
+certificates. Every caller that checks a gate (the edge Dovecot's client CA
+file for the `host` name check, the agent, `keepia-edge`, and a gate
+originating mTLS in egress mode) trusts only the gate-server anchor for the
+server side. This is an implementer's choice within R-TRUST-ANCHORS (one
+anchor per purpose, narrowest EKUs), added after review; the plan left the
+server anchor implicit.
 
 **Not reachable from other roles at all:** the doveadm HTTP API (local agent
 on the private network only), clamd, olefy, memcached, and the edge auth
@@ -719,7 +752,8 @@ sockets (R-AUTH-SOCKET). The edge's public ports (25, 465, 587, 993, 995,
 4190, 443) are internet listeners and do not pass a gate.
 
 **Relay on the edge's internal submission:** the gate forwards to a Postfix
-listener that relays only for the gate's fixed private address (`/32`), so
+listener that relays only for the gate's fixed private addresses (`/32` and
+`/128`), so
 `mynetworks` never covers a Docker subnet (security property 1).
 
 ### Revocation and lifetimes
@@ -764,7 +798,7 @@ From [review 4, N14 to N16][rv4] and [review 5, N20][rv5].
   host kernel setup, authenticates hosts rather than purposes, and protects
   nothing on a single server where every container shares the host.
 - **A service mesh (Envoy, Linkerd, Istio):** Kubernetes-oriented, a new
-  external image, and more configuration than four anchors need.
+  external image, and more configuration than five anchors need.
 - **An off-the-shelf TLS proxy such as ghostunnel:** a new external image
   whose revocation and purpose checks would still need our own wrapping; the
   Go gate shares the image, the anchors and the tests.
@@ -826,9 +860,9 @@ the groupware listeners to the same test.
 - **Bans on Valkey loss.** Default until the maintainer decides M2: bans fail
   open with a per-edge in-memory counter. Bans keep working per edge, logins
   are otherwise allowed, and the outage is logged. Dovecot's default
-  `auth_policy_reject_on_fail = no` is fail-open (upstream). **Rejected (the
-  M2 alternative):** fail closed (`auth_policy_reject_on_fail = yes`), which
-  allows no login on any edge while Valkey is down.
+  `auth_policy_reject_on_fail = no` is fail-open (upstream). **Alternative
+  (M2):** fail closed (`auth_policy_reject_on_fail = yes`), which allows no
+  login on any edge while Valkey is down.
 - **Consequence: control is in the mail path.** With Valkey on the control
   role and inbound mail deferred on Valkey loss, a control-server outage
   defers all inbound mail. This qualifies sections 3 and 5a: edges keep
@@ -974,7 +1008,7 @@ predicted values in this table ([coordinator decision T9][cd]).
 | edge | dovecot proxy | measured idle 9.7–11.0 MiB ([#3 F7][p3]), plus login processes per connection | 256 MiB |
 | edge | keepia-edge | predicted (replica of all mailboxes in memory) | 128 MiB |
 | edge | rspamd-proxy | predicted | 128 MiB |
-| store | dovecot | measured idle 9.8–10.3 MiB ([#3 F7][p3]), peak 13–19 MiB for one session ([#4 F6][p4]), so at most about 8 MiB per session (an upper bound: the peak includes the fetch of a 2 MB message) | 128 MiB + 8 MiB × concurrent sessions; 512 MiB covers about 48 |
+| store | dovecot | measured idle 9.8–10.3 MiB ([#3 F7][p3]), peak 13–19 MiB for one session in another configuration ([#4 F6][p4]); per session about 9.2 MiB (19 − 9.8, predicted until 0.2.0 measures it; an upper bound: the peak includes the fetch of a 2 MB message) | 128 MiB + about 9.2 MiB × concurrent sessions; 512 MiB covers about 42 (predicted) |
 | filter | rspamd | predicted | 512 MiB |
 | filter | clamd + freshclam | upstream: 1.2 GiB for the engine, about 2.4 GiB during the daily concurrent reload; 3 GiB minimum, 4 GiB preferred | 3 GiB |
 | filter | olefy | predicted | 128 MiB |
@@ -999,12 +1033,14 @@ control 768 MiB, edge 640 MiB, store 512 MiB, filter 3712 MiB, groupware
   the reference server is assumed to meet this minimum. The answer is a plain
   yes or no; no values of the installation go into this repository or onto
   GitHub.
-- **The store limit scales with sessions** ([review 3, N8][rv3]): IDLE clients
+- **The store limit scales with sessions** ([review 1, N8][rv1]): IDLE clients
   hold sessions, which an idle measurement does not show. Sessions are
   bounded by `mail_max_userip_connections` and `process_limit`, and 0.2.0
-  measures the per-session cost. The all-roles minimum assumes about 48
-  concurrent sessions; each further 100 sessions add up to 800 MiB
-  (predicted).
+  measures the per-session cost. The all-roles minimum assumes about 42
+  concurrent sessions; each further 100 sessions add up to about 920 MiB
+  (predicted until 0.2.0; the per-session figure subtracts #3's idle value
+  from #4's peak, which ran in another configuration, [second review of
+  PR #36][rb36], N4).
 - **Without ClamAV** (clamd and freshclam left out) the same server needs
   about 3.7 GiB (3808 MiB, predicted from the limits). Option kept here:
   `ConcurrentDatabaseReload no` saves about 1.2 GiB (upstream) but blocks
@@ -1026,7 +1062,7 @@ shared instance run by the operator, with customers separated by groups.
 | `customer_groups` | Customer (name). |
 | `domains` | Domain: `group_id`, active, MTA-STS mode, DKIM selector, journaling target. |
 | `alias_domains` | Alias domain → target domain (same group, enforced by trigger). |
-| `mailboxes` | Mailbox: `domain_id`, local part, password hash, quota, allowed protocols (IMAP, POP3, SMTP, ManageSieve, DAV), **`store_id` NOT NULL**, state (`active`, `disabled`, `deleting` with `delete_after`). |
+| `mailboxes` | Mailbox: `domain_id`, local part, password hash, quota, allowed protocols (IMAP, POP3, SMTP, ManageSieve, DAV), `webmail_access` (groupware webmail flag, section 4a), **`store_id` NOT NULL**, state (`active`, `disabled`, `deleting` with `delete_after`). |
 | `app_passwords` | App password: mailbox, hash, exactly one protocol, name, last use. |
 | `aliases` | Alias or catch-all (`@domain`): domain, targets. |
 | `send_as` | Address or domain a mailbox may send as; only within its group (trigger). |
@@ -1148,6 +1184,30 @@ Outbound MTA-STS policy fetches would go to the recipients' own domains, like
 SMTP itself. Default until the maintainer decides M3: 1.0 only publishes
 MTA-STS policies, so 1.0 makes no such fetches.
 
+### Known gaps
+
+The approved plan leaves these open; the reviews of PR #36 ([first
+review][ra36], F1 and F2; [second review][rb36], follow-up) found them. This
+document does not design the fixes. The plan of the milestone named in each
+entry must close it.
+
+- **SOGo has no gated path to the edge's IMAP, ManageSieve and submission**
+  (0.5.0). Section 4a has SOGo log in "through the edge" with tokens, but the
+  groupware role has no egress network, the edge's public ports pass no gate,
+  and the edge gate's only listener is internal submission (section 5a).
+  0.5.0's plan must add a path and must not route SOGo's submission through
+  the unauthenticated internal relay, which would let any groupware container
+  send with any sender (security property 1).
+- **`keepia-edge` has no gated path to the control admin UI** (0.4.0, which
+  builds the admin login). Section 1 has the edge's HTTPS front reverse-proxy
+  the admin UI, but control's gate lists no admin UI listener (section 5a).
+- **Mailbox deletion has no mechanism that fits the stated privileges**
+  (0.6.0, security property 5). Section 12 has the store's agent delete after
+  `delete_after`, but role containers mount the agent's volumes read-only,
+  the agent writes only configuration volumes (section 5), and
+  `doveadm_allowed_commands` allows no delete command. 0.6.0's plan must
+  choose and justify a mechanism.
+
 <!-- Link targets. Comments are external links; prototype files are permalinks to 46ebffe. -->
 
 [plan]: https://github.com/keepia/mail/issues/2#issuecomment-6809505346
@@ -1166,10 +1226,13 @@ MTA-STS policies, so 1.0 makes no such fetches.
 [p4dec]: https://github.com/keepia/mail/issues/4#issuecomment-6807158047
 [p13hash]: https://github.com/keepia/mail/issues/13#issuecomment-6808912017
 [r18]: https://github.com/keepia/mail/pull/18#pullrequestreview-5866592327
+[ra36]: https://github.com/keepia/mail/pull/36#pullrequestreview-5869201825
+[rb36]: https://github.com/keepia/mail/pull/36#pullrequestreview-5869239949
 [d1]: https://github.com/keepia/mail/issues/1#issuecomment-6806042899
 [p5plan]: https://github.com/keepia/mail/issues/5#issuecomment-6811730209
 [p5ok]: https://github.com/keepia/mail/issues/5#issuecomment-6812459586
 [proto-compose]: https://github.com/keepia/mail/blob/46ebffe/prototypes/dovecot-proxy/compose.yml#L29-L31
+[proto-vmail]: https://github.com/keepia/mail/blob/46ebffe/prototypes/dovecot-proxy/compose.yml#L26-L28
 [proto-crypt]: https://github.com/keepia/mail/blob/46ebffe/prototypes/mail-crypt/conf24/dovecot.conf#L33-L36
 [reviewer]: https://github.com/keepia/mail/blob/46ebffe/.claude/agents/reviewer.md#L24-L29
 [ma-arch]: https://github.com/pklnx/mail-archive/blob/d10e688/docs/development/architecture.md#L3
