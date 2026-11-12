@@ -1,0 +1,610 @@
+# Keepia Mail: one Compose file for every role (architecture section 7),
+# here as the template "all roles on one server" (#5 plan, part 3):
+#
+#   COMPOSE_PROFILES=control,edge,store,filter,groupware
+#
+# Copy .env.example to .env and fill it in first. The own images
+# (ghcr.io/keepia/mail*) come from `make images` locally, with the tag
+# KEEPIA_VERSION, or from a release; nothing here builds or pulls them
+# (start with `docker compose up -d --no-build`, run commands with ./km).
+# The upstream images are pinned by digest (tools/check-image-pins).
+#
+# Every container:
+# - drops every capability and runs with no-new-privileges; only Postfix
+#   (five) and Dovecot (SYS_CHROOT) get any back (#5 plan, C13, C14);
+# - runs as a fixed non-root uid, except Postfix's master;
+# - has a memory limit (architecture section 9) and a protocol
+#   healthcheck (an SMTP greeting, PONG, an HTTP reply; never only a port);
+# - listens only on its fixed private address or on loopback
+#   (R-BIND-PRIVATE); programs that cannot read the address from the
+#   environment get it from a small config below (configs:);
+# - has a read-only root file system where the program allows it. A
+#   service with a configs: content cannot have one ("'file' is the sole
+#   supported option" for read-only services): Postfix, Dovecot, ClamAV
+#   and Unbound.
+#
+# Networks: one internal network per role (<role>-private), plus
+# filter-olefy, an internal network for rspamd and olefy only, and
+# edge-public, the only network with a way out: Postfix on port 25, which
+# is the only published port. In 0.1.0 no traffic crosses roles (the gates
+# come with 0.2.0), and every unbound refuses everything but its health
+# zone, so nothing resolves names outside the host.
+#
+# Subnets: KEEPIA_SUBNET4 is the first two octets of the IPv4 /24s
+# (<prefix>.<n>.0/24), KEEPIA_SUBNET6 the first three groups of the IPv6
+# /64s (<prefix>:<n>::/64); <n> is the network's number below, and every
+# container has a fixed host part on each network it joins.
+
+name: keepia-mail
+
+x-service: &service
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  # journald with the host's 30-day retention (architecture section 7);
+  # KEEPIA_LOG_DRIVER=local where the host has no journald.
+  logging:
+    driver: ${KEEPIA_LOG_DRIVER:-journald}
+
+# One probe a minute once healthy, one a second while starting (#5 plan,
+# "Healthchecks").
+x-health: &health
+  interval: 60s
+  timeout: 5s
+  retries: 2
+  start_period: 60s
+  start_interval: 1s
+
+services:
+  # ---- control (network 1: control-private) ----
+
+  keepia:
+    <<: *service
+    profiles: [control]
+    # KEEPIA_IMAGE replaces the name with an image ID: the CI compose job
+    # sets the verified ID of the loaded image (.claude/rules/docker.md).
+    image: ${KEEPIA_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail:${KEEPIA_VERSION:-dev}}
+    # The definition `make images` builds (docker-bake.hcl); this file is
+    # only ever used with --no-build.
+    build: .
+    user: "65532:65532"
+    read_only: true
+    mem_limit: 128m
+    environment:
+      KEEPIA_LISTEN: ${KEEPIA_SUBNET4:-172.29}.1.10:8080
+      # The password must be URL-safe (letters, digits, - . _ ~).
+      KEEPIA_DATABASE_URL: postgres://keepia:${KEEPIA_POSTGRES_PASSWORD:-}@${KEEPIA_SUBNET4:-172.29}.1.11:5432/keepia?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    dns: ["${KEEPIA_SUBNET4:-172.29}.1.53"]
+    networks:
+      control-private:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.1.10
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:1::10
+
+  postgres:
+    <<: *service
+    profiles: [control]
+    image: postgres:18.6-trixie@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+    user: "999:999"
+    read_only: true
+    mem_limit: 384m
+    command: ["postgres", "-c", "listen_addresses=${KEEPIA_SUBNET4:-172.29}.1.11"]
+    environment:
+      POSTGRES_USER: keepia
+      POSTGRES_DB: keepia
+      # Unset, the image refuses to create the database (fail-safe).
+      POSTGRES_PASSWORD: ${KEEPIA_POSTGRES_PASSWORD:-}
+    tmpfs:
+      - /var/run/postgresql:uid=999,gid=999,mode=0755,size=1m
+      - /tmp:uid=999,gid=999,mode=0700,size=16m
+    volumes:
+      # The image's VOLUME; PGDATA is /var/lib/postgresql/18/docker.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      <<: *health
+      test: ["CMD", "pg_isready", "-q", "-t", "3", "-h", "${KEEPIA_SUBNET4:-172.29}.1.11", "-U", "keepia", "-d", "keepia"]
+    # Docker's default 10 s before SIGKILL; SIGINT is a fast shutdown.
+    stop_grace_period: 30s
+    dns: ["${KEEPIA_SUBNET4:-172.29}.1.53"]
+    networks:
+      control-private:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.1.11
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:1::11
+
+  valkey:
+    <<: *service
+    profiles: [control]
+    image: valkey/valkey:9.0.7-trixie@sha256:7e1deda01b64ece3167d370ab5be3452d29734feec22cbcbc69b3a64f6859d6d
+    user: "999:999"
+    read_only: true
+    mem_limit: 256m
+    # Protected mode stays on: without a password Valkey answers only
+    # loopback and gives every other client DENIED (measured). No client
+    # uses it in 0.1.0; its first one comes with its password.
+    command: ["valkey-server", "--bind", "${KEEPIA_SUBNET4:-172.29}.1.12 127.0.0.1", "--protected-mode", "yes"]
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      <<: *health
+      # Over loopback, the only address protected mode serves. The reply
+      # is compared, so a DENIED or a later NOAUTH cannot pass.
+      test: ["CMD-SHELL", "test \"$$(timeout 3 valkey-cli -h 127.0.0.1 ping)\" = PONG"]
+    dns: ["${KEEPIA_SUBNET4:-172.29}.1.53"]
+    networks:
+      control-private:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.1.12
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:1::12
+
+  control-unbound:
+    <<: *service
+    profiles: [control]
+    image: ${KEEPIA_UNBOUND_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-unbound:${KEEPIA_VERSION:-dev}}
+    build:
+      context: images
+      dockerfile: unbound/Dockerfile
+    user: "10053:10053"
+    mem_limit: 128m
+    # The image's configuration plus this container's address (configs).
+    command: ["unbound", "-d", "-p", "-c", "/etc/keepia/unbound.conf"]
+    configs:
+      - source: control-unbound
+        target: /etc/keepia/unbound.conf
+    networks:
+      control-private:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.1.53
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:1::53
+
+  # ---- edge (networks 2: edge-private, 3: edge-public) ----
+
+  edge-postfix:
+    <<: *service
+    profiles: [edge]
+    image: ${KEEPIA_POSTFIX_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-postfix:${KEEPIA_VERSION:-dev}}
+    build:
+      context: images
+      dockerfile: postfix/Dockerfile
+    # The master runs as root, which Postfix needs, with exactly these
+    # five capabilities; every master.cf service runs with chroot = n (C14).
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    mem_limit: 128m
+    environment:
+      KEEPIA_HEALTH_ADDR: ${KEEPIA_SUBNET4:-172.29}.2.10
+    configs:
+      - source: edge-postfix-main
+        target: /etc/postfix/main.cf
+    volumes:
+      - postfix-spool:/var/spool/postfix
+    # Only to the edge addresses. Unset, they are documentation addresses
+    # (RFC 5737, RFC 3849) that no host has, so nothing is published by
+    # accident, never on every interface.
+    ports:
+      - "${EDGE_IPV4:-192.0.2.10}:25:25"
+      - "[${EDGE_IPV6:-2001:db8::10}]:25:25"
+    dns: ["${KEEPIA_SUBNET4:-172.29}.2.53"]
+    networks:
+      edge-private:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.2.10
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:2::10
+      edge-public:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.3.10
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:3::10
+
+  edge-dovecot:
+    <<: *service
+    profiles: [edge]
+    image: dovecot/dovecot:2.4.5@sha256:43c14def08a57f25107593cbcf64a0a6fbae84a7b9de7aa038513c9b21e91914
+    # The login, LMTP and anvil binaries carry cap_sys_chroot+ep: without
+    # SYS_CHROOT in the bounding set their execv fails (C13, M13).
+    cap_add: [SYS_CHROOT]
+    user: "1000:1000"
+    mem_limit: 256m
+    configs:
+      - source: edge-dovecot
+        target: /etc/dovecot/dovecot.conf
+      - source: edge-dovecot-tempfail
+        target: /etc/dovecot/keepia-tempfail.lua
+      - source: edge-dovecot-listen
+        target: /etc/dovecot/keepia-listen.conf
+    volumes:
+      # The image's VOLUME /srv/vmail; it stays empty (R-EDGE-NO-STORAGE).
+      - edge-vmail:/srv/vmail
+    healthcheck:
+      <<: *health
+      # The IMAP and LMTP greetings, through the image's traditional
+      # netcat (nc -q 1, N15).
+      test:
+        - CMD-SHELL
+        - >-
+          r=$$(nc -q 1 -w 2 ${KEEPIA_SUBNET4:-172.29}.2.11 143 </dev/null) &&
+          case $$r in "* OK"*) ;; *) echo "IMAP: $$r"; exit 1 ;; esac &&
+          r=$$(nc -q 1 -w 2 ${KEEPIA_SUBNET4:-172.29}.2.11 24 </dev/null) &&
+          case $$r in "220 "*) echo ok ;; *) echo "LMTP: $$r"; exit 1 ;; esac
+    dns: ["${KEEPIA_SUBNET4:-172.29}.2.53"]
+    networks:
+      edge-private:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.2.11
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:2::11
+
+  edge-unbound:
+    <<: *service
+    profiles: [edge]
+    image: ${KEEPIA_UNBOUND_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-unbound:${KEEPIA_VERSION:-dev}}
+    build:
+      context: images
+      dockerfile: unbound/Dockerfile
+    user: "10053:10053"
+    mem_limit: 128m
+    command: ["unbound", "-d", "-p", "-c", "/etc/keepia/unbound.conf"]
+    configs:
+      - source: edge-unbound
+        target: /etc/keepia/unbound.conf
+    networks:
+      edge-private:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.2.53
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:2::53
+
+  # ---- store (network 4: store-private) ----
+
+  store-dovecot:
+    <<: *service
+    profiles: [store]
+    image: dovecot/dovecot:2.4.5@sha256:43c14def08a57f25107593cbcf64a0a6fbae84a7b9de7aa038513c9b21e91914
+    cap_add: [SYS_CHROOT]
+    user: "1000:1000"
+    mem_limit: 512m
+    configs:
+      - source: store-dovecot
+        target: /etc/dovecot/dovecot.conf
+      - source: store-dovecot-listen
+        target: /etc/dovecot/keepia-listen.conf
+    volumes:
+      # Exactly the image's VOLUME /srv/vmail, so mail lands in the named
+      # volume and never in an anonymous one (architecture section 8).
+      - store-mail:/srv/vmail
+      - store-index:/var/lib/dovecot
+      - store-users:/etc/dovecot/users:ro
+    healthcheck:
+      <<: *health
+      test:
+        - CMD-SHELL
+        - >-
+          r=$$(nc -q 1 -w 2 ${KEEPIA_SUBNET4:-172.29}.4.10 143 </dev/null) &&
+          case $$r in "* OK"*) ;; *) echo "IMAP: $$r"; exit 1 ;; esac &&
+          r=$$(nc -q 1 -w 2 ${KEEPIA_SUBNET4:-172.29}.4.10 24 </dev/null) &&
+          case $$r in "220 "*) echo ok ;; *) echo "LMTP: $$r"; exit 1 ;; esac
+    networks:
+      store-private:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.4.10
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:4::10
+
+  # ---- filter (networks 5: filter-private, 7: filter-olefy) ----
+
+  filter-rspamd:
+    <<: *service
+    profiles: [filter]
+    image: rspamd/rspamd:4.2.3@sha256:47e00f62105f8a60009a30a590ebcf3bfd0b992d45468222d34afa5ca2103690
+    user: "11333:11333"
+    read_only: true
+    mem_limit: 512m
+    environment:
+      # The normal and proxy workers' address (the image's rspamd.conf);
+      # the controller stays on loopback (override.d/worker-controller.inc).
+      RSPAMD_LOCAL_ADDR: ${KEEPIA_SUBNET4:-172.29}.5.10
+      RSPAMD_LOG_TYPE: console
+      RSPAMD_OLEFY_SERVER: ${KEEPIA_SUBNET4:-172.29}.7.11:10050
+      RSPAMD_CLAMD_SERVER: ${KEEPIA_SUBNET4:-172.29}.5.11:3310
+    configs:
+      - source: filter-rspamd-controller
+        target: /etc/rspamd/override.d/worker-controller.inc
+      - source: filter-rspamd-external-services
+        target: /etc/rspamd/local.d/external_services.conf
+      - source: filter-rspamd-antivirus
+        target: /etc/rspamd/local.d/antivirus.conf
+    tmpfs:
+      - /tmp:uid=11333,gid=11333,mode=0700,size=64m
+    volumes:
+      - rspamd-data:/var/lib/rspamd
+    healthcheck:
+      <<: *health
+      # Replaces the image's check, which asks the controller on
+      # 127.0.0.1: GET /ping on the normal worker's private address must
+      # answer pong.
+      test:
+        - CMD
+        - bash
+        - -c
+        - exec 3<>"/dev/tcp/$$0/11333" && printf 'GET /ping HTTP/1.0\r\n\r\n' >&3 && timeout 4 cat <&3 | grep -q '^pong'
+        - ${KEEPIA_SUBNET4:-172.29}.5.10
+    dns: ["${KEEPIA_SUBNET4:-172.29}.5.53"]
+    networks:
+      filter-private:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.5.10
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:5::10
+      filter-olefy:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.7.10
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:7::10
+
+  filter-clamd:
+    <<: *service
+    profiles: [filter]
+    image: clamav/clamav-debian:1.4.6@sha256:aedee9daad6b069b26adad61af7ec50a41efe33fd8eff7f985c1f31e3a6ae9de
+    user: "1000:1000"
+    # clamd itself, not the image's root /init (#5 plan, C3); the
+    # signatures are in the image, freshclam comes with 0.3.0.
+    entrypoint: ["clamd", "--foreground", "--config-file=/etc/keepia/clamd.conf"]
+    mem_limit: 2944m
+    configs:
+      - source: filter-clamd
+        target: /etc/keepia/clamd.conf
+    healthcheck:
+      <<: *health
+      # The raw zPING must get PONG; clamdscan --ping printed PONG while
+      # clamd was stopped (M15). Loading the signatures takes about 12 s.
+      test: ["CMD-SHELL", "test \"$$(printf 'zPING\\0' | nc -q 1 -w 3 ${KEEPIA_SUBNET4:-172.29}.5.11 3310 | tr -d '\\0')\" = PONG"]
+      start_period: 300s
+    dns: ["${KEEPIA_SUBNET4:-172.29}.5.53"]
+    networks:
+      filter-private:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.5.11
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:5::11
+
+  filter-olefy:
+    <<: *service
+    profiles: [filter]
+    image: ${KEEPIA_OLEFY_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-olefy:${KEEPIA_VERSION:-dev}}
+    build:
+      context: images
+      dockerfile: olefy/Dockerfile
+    user: "10055:10055"
+    read_only: true
+    # One 20 MB attachment OOM-killed it at 128 MiB; 256 MiB handled it
+    # (#44). rspamd sends parts up to 10 MB (local.d/external_services.conf).
+    mem_limit: 256m
+    environment:
+      # Explicit: an empty value would bind every interface (#44).
+      OLEFY_BINDADDRESS: ${KEEPIA_SUBNET4:-172.29}.7.11
+      KEEPIA_HEALTH_ADDR: ${KEEPIA_SUBNET4:-172.29}.7.11
+    # Every scan writes the attachment here; without it every scan fails
+    # while the healthcheck stays green (#44).
+    tmpfs:
+      - /tmp:uid=10055,gid=10055,mode=0700,size=32m
+    networks:
+      filter-olefy:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.7.11
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:7::11
+
+  filter-unbound:
+    <<: *service
+    profiles: [filter]
+    image: ${KEEPIA_UNBOUND_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-unbound:${KEEPIA_VERSION:-dev}}
+    build:
+      context: images
+      dockerfile: unbound/Dockerfile
+    user: "10053:10053"
+    mem_limit: 128m
+    command: ["unbound", "-d", "-p", "-c", "/etc/keepia/unbound.conf"]
+    configs:
+      - source: filter-unbound
+        target: /etc/keepia/unbound.conf
+    networks:
+      filter-private:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.5.53
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:5::53
+
+  # ---- groupware (network 6: groupware-private) ----
+
+  groupware-sogo:
+    <<: *service
+    profiles: [groupware]
+    image: ${KEEPIA_SOGO_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-sogo:${KEEPIA_VERSION:-dev}}
+    build:
+      context: images
+      dockerfile: sogo/Dockerfile
+    user: "10060:10060"
+    read_only: true
+    mem_limit: 512m
+    # The image's whole command with the private address as WOPort: the
+    # address is part of the argument list (#25).
+    command: ["/usr/local/bin/keepia-sogod", "/usr/sbin/sogod", "-WONoDetach", "YES", "-WOPort", "${KEEPIA_SUBNET4:-172.29}.6.10:20000", "-WOLogFile", "-", "-WOPidFile", "/tmp/sogod.pid"]
+    environment:
+      KEEPIA_HEALTH_ADDR: ${KEEPIA_SUBNET4:-172.29}.6.10
+      # keepia-sogod gives sogod's workers this long after SIGTERM, then
+      # kills them; stop_grace_period must stay above it, or Docker's
+      # SIGKILL comes first (#55).
+      KEEPIA_SOGOD_GRACE: "10"
+    stop_grace_period: 20s
+    tmpfs:
+      - /tmp:uid=10060,gid=10060,mode=0700,size=16m
+      - /var/lib/sogo:uid=10060,gid=10060,mode=0750,size=16m
+    volumes:
+      - sogo-spool:/var/spool/sogo
+    # SOGo's database is control's Postgres, which the groupware role
+    # reaches through the gate from 0.5.0 on; until then sogod starts
+    # without one and logs that nobody can log in. On one server it still
+    # starts after Postgres; on a server without the control role the
+    # dependency is dropped (required: false).
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    networks:
+      groupware-private:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.6.10
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:6::10
+
+  groupware-memcached:
+    <<: *service
+    profiles: [groupware]
+    image: memcached:1.6.45-trixie@sha256:a395a1bcf5e0e2b0fa4a0142e12b4e24a2320ba4b7c6ffa8655a1a86e8f29dee
+    user: "11211:11211"
+    read_only: true
+    mem_limit: 64m
+    command: ["memcached", "-l", "${KEEPIA_SUBNET4:-172.29}.6.11", "-U", "0", "-m", "48"]
+    healthcheck:
+      <<: *health
+      test:
+        - CMD
+        - bash
+        - -c
+        - exec 3<>"/dev/tcp/$$0/11211" && printf 'version\r\n' >&3 && IFS= read -r -t 3 l <&3 && [[ $$l == VERSION* ]]
+        - ${KEEPIA_SUBNET4:-172.29}.6.11
+    networks:
+      groupware-private:
+        ipv4_address: ${KEEPIA_SUBNET4:-172.29}.6.11
+        ipv6_address: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:6::11
+
+networks:
+  control-private:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: ${KEEPIA_SUBNET4:-172.29}.1.0/24
+        - subnet: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:1::/64
+  edge-private:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: ${KEEPIA_SUBNET4:-172.29}.2.0/24
+        - subnet: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:2::/64
+  # The only network with a way out. Outbound mail leaves from the edge
+  # addresses (SNAT to EDGE_IPV4/EDGE_IPV6, which PTR and SPF name), and
+  # IPv6 clients are DNATed, so Postfix sees their address (architecture
+  # section 7).
+  edge-public:
+    enable_ipv6: true
+    driver_opts:
+      com.docker.network.host_ipv4: ${EDGE_IPV4:-192.0.2.10}
+      com.docker.network.host_ipv6: ${EDGE_IPV6:-2001:db8::10}
+    ipam:
+      config:
+        - subnet: ${KEEPIA_SUBNET4:-172.29}.3.0/24
+        - subnet: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:3::/64
+  store-private:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: ${KEEPIA_SUBNET4:-172.29}.4.0/24
+        - subnet: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:4::/64
+  filter-private:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: ${KEEPIA_SUBNET4:-172.29}.5.0/24
+        - subnet: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:5::/64
+  groupware-private:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: ${KEEPIA_SUBNET4:-172.29}.6.0/24
+        - subnet: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:6::/64
+  # olefy has no authentication: rspamd is its only client (#44).
+  filter-olefy:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: ${KEEPIA_SUBNET4:-172.29}.7.0/24
+        - subnet: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:7::/64
+
+volumes:
+  postgres-data:
+  valkey-data:
+  postfix-spool:
+  edge-vmail:
+  store-mail:
+  store-index:
+  store-users:
+  rspamd-data:
+  sogo-spool:
+
+configs:
+  # Unbound: the image's configuration (no recursion, the health zone)
+  # plus the container's address. Unbound reads no environment.
+  control-unbound:
+    content: |
+      include: "/etc/unbound/unbound.conf"
+      server:
+        interface: ${KEEPIA_SUBNET4:-172.29}.1.53
+        access-control: ${KEEPIA_SUBNET4:-172.29}.1.0/24 allow
+  edge-unbound:
+    content: |
+      include: "/etc/unbound/unbound.conf"
+      server:
+        interface: ${KEEPIA_SUBNET4:-172.29}.2.53
+        access-control: ${KEEPIA_SUBNET4:-172.29}.2.0/24 allow
+  filter-unbound:
+    content: |
+      include: "/etc/unbound/unbound.conf"
+      server:
+        interface: ${KEEPIA_SUBNET4:-172.29}.5.53
+        access-control: ${KEEPIA_SUBNET4:-172.29}.5.0/24 allow
+
+  # Postfix reads no environment and has no include, so main.cf is here
+  # whole. It replaces the image's, whose inet_interfaces is loopback-only
+  # (a fail-safe default).
+  edge-postfix-main:
+    content: |
+      # Keepia Mail, edge role (#5 plan, "Compose template").
+      compatibility_level = 3.10
+      myhostname = ${KEEPIA_HOSTNAME:-mail.example.org}
+      myorigin = $$myhostname
+      smtpd_banner = $$myhostname ESMTP
+      biff = no
+      maillog_file = /dev/stdout
+      # R-BIND-PRIVATE: the edge-private address and the two edge-public
+      # addresses that port 25 is published to, never a wildcard.
+      inet_interfaces = ${KEEPIA_SUBNET4:-172.29}.2.10, ${KEEPIA_SUBNET4:-172.29}.3.10, [${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:3::10]
+      inet_protocols = all
+      # No domains yet (#2, property 1): nothing is local, nothing relays,
+      # and only loopback counts as a trusted network. A recipient gets
+      # 454 4.7.1, so mail is deferred, never bounced.
+      mydestination =
+      relay_domains =
+      mynetworks = 127.0.0.0/8 [::1]/128
+      smtpd_relay_restrictions = permit_mynetworks defer_unauth_destination
+      alias_maps =
+      alias_database =
+      local_recipient_maps =
+      # TLS comes with the certificates in a later milestone.
+      smtpd_tls_security_level = none
+      smtp_tls_security_level = none
+      maximal_queue_lifetime = 7d
+
+  edge-dovecot:
+    file: ./deploy/edge/dovecot/dovecot.conf
+  edge-dovecot-tempfail:
+    file: ./deploy/edge/dovecot/keepia-tempfail.lua
+  edge-dovecot-listen:
+    content: |
+      listen = ${KEEPIA_SUBNET4:-172.29}.2.11
+  store-dovecot:
+    file: ./deploy/store/dovecot/dovecot.conf
+  store-dovecot-listen:
+    content: |
+      listen = ${KEEPIA_SUBNET4:-172.29}.4.10
+
+  filter-rspamd-controller:
+    file: ./deploy/filter/rspamd/override.d/worker-controller.inc
+  filter-rspamd-external-services:
+    file: ./deploy/filter/rspamd/local.d/external_services.conf
+  filter-rspamd-antivirus:
+    file: ./deploy/filter/rspamd/local.d/antivirus.conf
+
+  # clamd reads no environment and has no include, so clamd.conf is here
+  # whole. No LogFile: with /dev/stdout clamd exits (M2); in the
+  # foreground it logs to stderr.
+  filter-clamd:
+    content: |
+      Foreground yes
+      DatabaseDirectory /var/lib/clamav
+      TCPSocket 3310
+      TCPAddr ${KEEPIA_SUBNET4:-172.29}.5.11
+      LocalSocket /tmp/clamd.sock
+      LogTime yes

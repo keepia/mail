@@ -16,7 +16,7 @@ import (
 // counts.
 var minFixtures = map[string]int{
 	"dockerfile": 33,
-	"compose":    16,
+	"compose":    18,
 	"workflow":   9,
 	"repos":      41,
 }

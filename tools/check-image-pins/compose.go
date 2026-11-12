@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -143,8 +144,8 @@ func checkService(line int, name string, svc map[string]any, add func(int, strin
 		}
 		return ""
 	}
-	if !strings.HasPrefix(imageStr, registryPrefix) {
-		add(line, "service %s builds an image; name it under %s...}", name, registryPrefix)
+	if !strings.HasPrefix(ownImageName(imageStr), registryPrefix) {
+		add(line, "service %s builds an image; name it under %s...} (or as ${KEEPIA_<NAME>_IMAGE:-<that name>})", name, registryPrefix)
 	}
 	context, dockerfile := ".", "Dockerfile"
 	switch b := build.(type) {
@@ -189,6 +190,23 @@ func checkService(line int, name string, svc map[string]any, add func(int, strin
 		return ""
 	}
 	return context + "/" + dockerfile
+}
+
+// ownImageOverride is an own image's name behind a variable that can
+// replace it as a whole: ${KEEPIA_<NAME>_IMAGE:-<default>}, or
+// ${KEEPIA_IMAGE:-<default>}. The CI compose job sets it to the verified
+// image ID of the loaded image, so nothing goes by tag after the
+// verification (#26; .claude/rules/docker.md). The default is checked as
+// the name.
+var ownImageOverride = regexp.MustCompile(`^\$\{KEEPIA_(?:[A-Z0-9]+_)?IMAGE:-(.+)\}$`)
+
+// ownImageName is the name rule 4 checks for a service that builds: the
+// default of an ownImageOverride, or image itself.
+func ownImageName(image string) string {
+	if m := ownImageOverride.FindStringSubmatch(image); m != nil {
+		return m[1]
+	}
+	return image
 }
 
 // composeBuildKeys are the build keys a Compose service may use. Anything
