@@ -295,7 +295,7 @@ func (s *Store) withMigrations(ctx context.Context, locked bool, fn func(*goose.
 		return withCtxErr(ctx, err)
 	}
 	sqlDB := stdlib.OpenDBFromPool(gp)
-	defer closeMigrationPool(ctx, gp, sqlDB)
+	defer closeMigrationPool(ctx, gp, sqlDB, nil)
 	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, sub, opts...)
 	if err != nil {
 		return err
@@ -337,13 +337,20 @@ const migrationPoolUnlockLimit = 5 * time.Second
 // within migrationPoolUnlockLimit. A failed or timed-out unlock is ignored:
 // gp.Close closes the connection anyway, and the server then frees the
 // lock when the backend exits.
-func closeMigrationPool(ctx context.Context, gp *pgxpool.Pool, sqlDB *sql.DB) {
+//
+// beforeClose is a test seam and nil outside tests: if set, it runs after
+// the unlock and before gp.Close, while gp's connections are still open,
+// so a test can see that the unlock, not the close, freed the lock.
+func closeMigrationPool(ctx context.Context, gp *pgxpool.Pool, sqlDB *sql.DB, beforeClose func()) {
 	_ = sqlDB.Close()
 	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), migrationPoolUnlockLimit)
 	defer cancel()
 	for _, c := range gp.AcquireAllIdle(uctx) {
 		_, _ = c.Exec(uctx, "SELECT pg_advisory_unlock_all()")
 		c.Release()
+	}
+	if beforeClose != nil {
+		beforeClose()
 	}
 	gp.Close()
 }
