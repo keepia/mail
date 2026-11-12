@@ -1,0 +1,8 @@
+# Alinto/sogo at tag SOGo-5.12.13: commit e2ce2bdb6ee01e875da40744f23b3e17008e36e2,
+# tree 421628d93984c90a8f04095740829846499b0964 (#25). A digest manifest
+# (images/common/check-source): the sha256 of the listing of every file of
+# the tag's tree as "<sha256>  <path>", sorted by path (C locale), and the
+# number of files. The submodule UI/WebServerResources/angular-material is
+# not in the tree's files and not in GitHub's archive (an empty directory).
+# To regenerate it from a clone, see docs/development/index.md.
+listing 8c04cd016bb3cb8a80d28180e4baf35594f53e6b01f8c53e1201a419f963447d 3291

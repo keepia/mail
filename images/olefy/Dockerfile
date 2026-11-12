@@ -18,7 +18,7 @@
 # check-source ties the archive to that commit's tree.
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS source
 ADD --checksum=sha256:ad84687d875a1e4a8687224e9c97907e3711a730fc468482c06172a4ea500b2e https://github.com/HeinleinSupport/olefy/archive/9c01c571f11da1a41dda33b75e46d45d303270e4.tar.gz /tmp/olefy.tar.gz
-RUN --mount=type=bind,source=olefy/check-source,target=/tmp/check-source --mount=type=bind,source=olefy/olefy-source.sha256,target=/tmp/olefy-source.sha256 \
+RUN --mount=type=bind,source=common/check-source,target=/tmp/check-source --mount=type=bind,source=olefy/olefy-source.sha256,target=/tmp/olefy-source.sha256 \
     sh /tmp/check-source /tmp/olefy.tar.gz /tmp/olefy-source.sha256 /src/olefy
 
 # The wheels, in their own stage so they never reach a layer of the image.
