@@ -72,6 +72,11 @@ target "unbound" {
   }
 }
 
+# olefy and the two wheels (#44). Their licences, not Keepia's MIT, apply to
+# the image's content (#55): olefy at 9c01c571 is Apache-2.0 (its LICENSE
+# and olefy.py's header), oletools 0.60.2 BSD-2-Clause (LICENSE.md), and
+# pcodedmp 1.2.6 GPL-3.0 (its LICENSE and classifier; it grants no "or
+# later").
 target "olefy" {
   inherits   = ["_common"]
   context    = "images"
@@ -80,6 +85,7 @@ target "olefy" {
   labels = {
     "org.opencontainers.image.title"       = "Keepia Mail olefy"
     "org.opencontainers.image.description" = "olefy (oletools for rspamd) for the Keepia Mail filter role"
+    "org.opencontainers.image.licenses"    = "Apache-2.0 AND BSD-2-Clause AND GPL-3.0-only"
   }
 }
 
