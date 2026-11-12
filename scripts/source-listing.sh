@@ -9,7 +9,8 @@
 #   d 755 - <path>          a tree, or a submodule (GitHub's archive holds
 #                           an empty directory for it)
 #
-# A symlink, any other mode, or a path with a newline or a backslash fails.
+# A symlink, any other mode, or a path with a newline, a carriage return or
+# a backslash fails, as in check-source (sha256sum escapes them, #59).
 # The archive equals the tree only without export-ignore or export-subst in
 # .gitattributes; check-source fails closed otherwise.
 #
@@ -28,7 +29,7 @@ git --git-dir="$git_dir" ls-tree -r -t -z "$rev" |
 		meta=${entry%%$'\t'*}
 		path=${entry#*$'\t'}
 		case $path in
-		*$'\n'* | *\\*)
+		*$'\n'* | *$'\r'* | *\\*)
 			echo "source-listing: unsupported path name: ${path@Q}" >&2
 			exit 1
 			;;

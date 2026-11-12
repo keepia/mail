@@ -21,8 +21,10 @@
 #                              a submodule's in GitHub's archive
 #
 # scripts/source-listing.sh writes the same listing from a clone; see
-# docs/development/index.md. Paths with a newline or a backslash are
-# rejected on both sides. The manifest has one of two forms:
+# docs/development/index.md. Paths with a newline, a carriage return or a
+# backslash are rejected on both sides (sha256sum escapes them, #59). The
+# manifest is read before the check changes into DIR, so a relative path
+# works, and an unreadable one fails. It has one of two forms:
 #
 # - the listing itself, after comment lines (#) (olefy). DIR's listing must
 #   equal it; a mismatch prints a diff.
@@ -45,6 +47,13 @@ lists=$(mktemp -d)
 trap 'rm -rf "$lists"' EXIT
 trap 'exit 1' HUP INT TERM
 
+# The manifest's lines without comments, read before the cd below (#59).
+if [ ! -f "$manifest" ] || [ ! -r "$manifest" ]; then
+	echo "check-source: cannot read the manifest $manifest" >&2
+	exit 1
+fi
+grep -v '^#' "$manifest" >"$lists/want" || [ $? -eq 1 ]
+
 umask 022
 mkdir -p "$dir"
 tar -xzf "$archive" -C "$dir" --strip-components=1 --no-same-owner --no-same-permissions
@@ -56,9 +65,10 @@ if [ -n "$other" ]; then
 fi
 nl='
 '
-odd=$(find . -name "*$nl*" -o -name '*\\*')
+cr=$(printf '\r')
+odd=$(find . -name "*$nl*" -o -name "*$cr*" -o -name '*\\*')
 if [ -n "$odd" ]; then
-	echo "check-source: the archive holds a path with a newline or a backslash" >&2
+	echo "check-source: the archive holds a path with a newline, a carriage return or a backslash" >&2
 	exit 1
 fi
 
@@ -83,7 +93,6 @@ if [ "$count" -eq 0 ]; then
 fi
 have_sum=$(sha256sum <"$lists/listing" | cut -d' ' -f1)
 
-grep -v '^#' "$manifest" >"$lists/want" || true
 digest=$(grep -E '^listing [0-9a-f]{64} [0-9]+$' "$lists/want" || true)
 if [ -n "$digest" ]; then
 	if [ "$(wc -l <"$lists/want")" -ne 1 ]; then

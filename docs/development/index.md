@@ -163,27 +163,31 @@ To move a pin, compute the archive's sha256 and the tree's listing offline
 from a clone of the public repository, never from a download, and update
 the Dockerfile and the manifest together. GitHub's archives are
 `git archive` with GitHub's prefix, compressed by an external
-`gzip -cn` (git's internal gzip gives other bytes). For olefy at a new
-commit `<c>`:
+`gzip -cn` (git's internal gzip gives other bytes). Run the commands in a
+scratch directory outside the work tree, so the clone and the archive do
+not land untracked in it; `<repo>` stands for the work tree's path. For
+olefy at a new commit `<c>`:
 
 ```sh
+cd "$(mktemp -d)"
 git clone --bare https://github.com/HeinleinSupport/olefy.git olefy.git
 git --git-dir=olefy.git -c tar.tar.gz.command="gzip -cn" archive --format=tar.gz \
   --prefix=olefy-<c>/ -o olefy.tar.gz <c>
-sha256sum olefy.tar.gz                              # the ADD --checksum
-bash scripts/source-listing.sh olefy.git <c>        # the manifest's lines, after its comments
+sha256sum olefy.tar.gz                                   # the ADD --checksum
+bash <repo>/scripts/source-listing.sh olefy.git <c>      # the manifest's lines, after its comments
 ```
 
 For SOPE and SOGo at a new release `<v>`, for each of `sope SOPE` and
-`sogo SOGo` (shown for SOGo):
+`sogo SOGo` (shown for SOGo), also in a scratch directory:
 
 ```sh
+cd "$(mktemp -d)"
 git clone --bare https://github.com/Alinto/sogo.git sogo.git
 git --git-dir=sogo.git -c tar.tar.gz.command="gzip -cn" archive --format=tar.gz \
   --prefix=sogo-SOGo-<v>/ -o sogo.tar.gz SOGo-<v>
-sha256sum sogo.tar.gz                               # the ADD --checksum
-bash scripts/source-listing.sh sogo.git SOGo-<v> >sogo-listing.txt
-sha256sum sogo-listing.txt; wc -l <sogo-listing.txt # the manifest's "listing <sha256> <count>"
+sha256sum sogo.tar.gz                                    # the ADD --checksum
+bash <repo>/scripts/source-listing.sh sogo.git SOGo-<v> >sogo-listing.txt
+sha256sum sogo-listing.txt; wc -l <sogo-listing.txt      # the manifest's "listing <sha256> <count>"
 ```
 
 `--git-dir` keeps `-o` relative to the current directory (`git -C` would
@@ -200,6 +204,7 @@ below.
 make images                       # every image into the local Docker store, tag $(VERSION)
 make image-test IMAGE=postfix     # smoke, health and reload tests of one built image
 make image-pins-test image-pins   # the pin check: tests, then the repository
+make image-scripts-test           # check-source, source-listing.sh and keepia-sogod (no Docker, no network)
 ```
 
 - **Pins.** Base images and the `# syntax=` frontend are pinned by tag and
@@ -374,7 +379,9 @@ in CI, to put the edge addresses on loopback.
 
 The `lint` job also runs `scripts/check-go-toolchain-test.sh`; the
 Dockerfile runs `scripts/check-go-toolchain.sh`, so the golang tag cannot
-drift from `go.mod`'s `toolchain`.
+drift from `go.mod`'s `toolchain`. It then runs `make image-scripts-test`,
+the tests of `images/common/check-source`, `scripts/source-listing.sh` and
+`images/sogo/keepia-sogod`, without Docker or network.
 
 `scripts/ci-docker-mirror.sh`, `scripts/ci-pull-images.sh` and
 `scripts/check-go-toolchain.sh` (with its test) are byte-identical copies of
