@@ -125,7 +125,8 @@ jobs:
   # a native GitHub-hosted runner (no QEMU). A row builds its image into the
   # runner's Docker store, then runs scripts/image-test.sh: the smoke command,
   # the package list, user and capabilities, the healthcheck green and red,
-  # for Postfix and Unbound the reload watcher, and for olefy a scan. CI never logs in to a
+  # for Postfix and Unbound the reload watcher, for olefy a scan, and for SOGo
+  # sogod's start without a database. CI never logs in to a
   # registry and never pushes; release.yml (#5 part 4) is the only publisher.
   docker-build:
     name: docker-build (${{ matrix.image }}, ${{ matrix.arch }})
@@ -135,7 +136,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [keepia, postfix, unbound, olefy]
+        image: [keepia, postfix, unbound, olefy, sogo]
         arch: [amd64, arm64]
     # The build's bake inputs, defined once for the check step and the Build
     # step (tools/check-image-pins rule 5 allows no other env here and
@@ -145,15 +146,16 @@ jobs:
     #   platforms);
     # - BAKE_SET: the layer cache in the GitHub Actions cache, one scope per
     #   image and platform. Only pushes to main write it (mode=max: every
-    #   stage), so pull requests cannot crowd main's entries out of the
-    #   10 GB cache; on a pull request cache-to is empty, which exports
-    #   nothing.
+    #   stage; mode=min for sogo, whose build stage holds the compiler and
+    #   the whole SOPE and SOGo build, #5 plan), so pull requests cannot
+    #   crowd main's entries out of the 10 GB cache; on a pull request
+    #   cache-to is empty, which exports nothing.
     env:
       BAKE_TARGET: ${{ matrix.image }}
       PLATFORM: linux/${{ matrix.arch }}
       BAKE_SET: |
         ${{ matrix.image }}.cache-from=type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
-        ${{ matrix.image }}.cache-to=${{ github.event_name == 'push' && format('type=gha,mode=max,scope={0}-{1}', matrix.image, matrix.arch) || '' }}
+        ${{ matrix.image }}.cache-to=${{ github.event_name == 'push' && format('type=gha,mode={2},scope={0}-{1}', matrix.image, matrix.arch, matrix.image == 'sogo' && 'min' || 'max') || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

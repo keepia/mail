@@ -23,7 +23,7 @@ variable "PLATFORM" {
 }
 
 group "default" {
-  targets = ["keepia", "postfix", "unbound", "olefy"]
+  targets = ["keepia", "postfix", "unbound", "olefy", "sogo"]
 }
 
 target "_common" {
@@ -80,5 +80,19 @@ target "olefy" {
   labels = {
     "org.opencontainers.image.title"       = "Keepia Mail olefy"
     "org.opencontainers.image.description" = "olefy (oletools for rspamd) for the Keepia Mail filter role"
+  }
+}
+
+# SOGo and SOPE built from Alinto's release tags (#25). Their licences, not
+# Keepia's MIT, apply to the image's content.
+target "sogo" {
+  inherits   = ["_common"]
+  context    = "images"
+  dockerfile = "sogo/Dockerfile"
+  tags       = ["${REGISTRY}/mail-sogo:${VERSION}"]
+  labels = {
+    "org.opencontainers.image.title"       = "Keepia Mail SOGo"
+    "org.opencontainers.image.description" = "SOGo groupware for the Keepia Mail groupware role"
+    "org.opencontainers.image.licenses"    = "GPL-2.0-or-later AND LGPL-2.0-or-later"
   }
 }

@@ -1,0 +1,48 @@
+#!/bin/bash
+# keepia-health: the SOGo image's health probe (#5 plan, "Healthchecks":
+# GET /SOGo/ on <addr>:20000, needing an HTTP status line). It needs an
+# HTTP reply from sogod, not only an open port or a running process: it
+# connects to $KEEPIA_HEALTH_ADDR:$KEEPIA_HEALTH_PORT (defaults 127.0.0.1
+# and 20000; Compose sets the container's private address), sends
+# GET /SOGo/ and requires an HTTP/1.x status line within 4 s, below the
+# image's 5 s healthcheck timeout. It reads only the status line. Any status counts: without a database
+# sogod still answers.
+#
+# Measured red (#25, scripts/image-test.sh): every process of the
+# container stopped with SIGSTOP. The kernel still accepts the connection
+# then, so a port check would stay green; this probe gets no status line.
+#
+# The probe runs as a child under timeout(1): with sogod stopped, its
+# listen queue fills and the connect itself blocks, which read -t cannot
+# bound.
+set -u
+
+addr=${KEEPIA_HEALTH_ADDR:-127.0.0.1}
+port=${KEEPIA_HEALTH_PORT:-20000}
+
+if [ "${1:-}" != --probe ]; then
+	rc=0
+	out=$(timeout 4 "$0" --probe) || rc=$?
+	if [ "$rc" = 124 ]; then
+		out="no HTTP status line from $addr:$port within 4 s"
+	fi
+	echo "$out"
+	[ "$rc" = 0 ] || exit 1
+	exit 0
+fi
+
+if ! exec 3<>"/dev/tcp/$addr/$port"; then
+	echo "no connection to $addr:$port"
+	exit 1
+fi
+printf 'GET /SOGo/ HTTP/1.1\r\nHost: %s\r\nUser-Agent: keepia-health\r\nConnection: close\r\n\r\n' "$addr" >&3
+if ! IFS= read -r line <&3; then
+	echo "no HTTP status line from $addr:$port"
+	exit 1
+fi
+line=${line%$'\r'}
+if [[ ! $line =~ ^HTTP/1\.[01]\ [1-5][0-9][0-9]( |$) ]]; then
+	echo "unexpected reply from $addr:$port: ${line:0:80}"
+	exit 1
+fi
+echo "GET /SOGo/ on $addr:$port: $line"

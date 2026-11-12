@@ -6,10 +6,13 @@
 # - smoke: the image's own check command, and its package list
 #   (/usr/share/keepia/packages.txt) printed;
 # - user and capabilities as the plan sets them (Compose sets the same in
-#   part 3): Keepia as 65532, Unbound as 10053, olefy as 10055, all with no
-#   capabilities; Postfix's root master with exactly CHOWN, DAC_OVERRIDE,
-#   FOWNER, SETUID and SETGID; no-new-privileges everywhere;
+#   part 3): Keepia as 65532, Unbound as 10053, olefy as 10055, SOGo as
+#   10060, all with no capabilities; Postfix's root master with exactly
+#   CHOWN, DAC_OVERRIDE, FOWNER, SETUID and SETGID; no-new-privileges
+#   everywhere;
 # - olefy: a scan over olefy's protocol, answered by olevba;
+# - SOGo: sogod starts without a database or configuration and answers
+#   GET /SOGo/, logging that nobody can log in;
 # - healthcheck: green, then red with every process of the container
 #   stopped (SIGSTOP from the host); for Postfix also red with Debian's
 #   chroot = y, where `postfix status` still says running; for Keepia the
@@ -22,12 +25,12 @@
 # Every wait reads a signal (docker events, a log line, docker wait), bounded
 # by a timeout. No network: the containers run with --network none.
 #
-# Usage: scripts/image-test.sh <keepia|postfix|unbound|olefy> <image reference>
+# Usage: scripts/image-test.sh <keepia|postfix|unbound|olefy|sogo> <image reference>
 # Needs root or sudo for kill on the container's host processes.
 set -euo pipefail
 
 if [ $# -ne 2 ]; then
-	echo "usage: $0 <keepia|postfix|unbound|olefy> <image reference>" >&2
+	echo "usage: $0 <keepia|postfix|unbound|olefy|sogo> <image reference>" >&2
 	exit 2
 fi
 name=$1 ref=$2
@@ -322,6 +325,36 @@ print(reply.decode("utf-8", "replace"))
 	done
 	pass "scan over olefy's protocol: olevba 0.60.2 answered (${#out} bytes)"
 	docker rm -f "$prefix-scan" >/dev/null
+	health_cycle "$prefix-health" 0000000000000000 --cap-drop ALL
+	stop_test "$prefix-stop" --cap-drop ALL
+	;;
+sogo)
+	# sogod has no --help (it detaches and exits 0); sogo-tool loads the
+	# same SOGo and SOPE libraries and prints its usage.
+	out=$(docker run --rm --name "$prefix-smoke" --network none --cap-drop ALL "$ref" sogo-tool --help 2>&1)
+	[[ $out == *"sogo-tool [-v|--verbose] [-h|--help] command"* ]] || fail "sogo-tool --help printed: ${out:0:400}"
+	pass "smoke: sogo-tool --help prints its usage"
+	print_packages
+	check_config 10060:10060
+	# sogod without a database and without any configuration (#5 plan,
+	# Risks): it starts, loads every SOGo product, listens, and answers
+	# GET /SOGo/ (healthy), while it logs that nobody can log in.
+	start "$prefix-nodb" "${health_flags[@]}" --cap-drop ALL "$ref"
+	wait_health "$prefix-nodb" healthy 60
+	logs=$(docker logs "$prefix-nodb" 2>&1)
+	for want in "version 5.12.13" "All products loaded" "listening on 127.0.0.1:20000" \
+		"No authentication sources defined - nobody will be able to login"; do
+		[[ $logs == *"$want"* ]] || {
+			printf '%s\n' "$logs" | head -30 >&2
+			fail "sogod's log lacks '$want'"
+		}
+	done
+	echo "---- sogod's log without a database (first 16 lines)"
+	printf '%s\n' "$logs" | head -16
+	echo "----"
+	pass "sogod runs as: $(docker exec "$prefix-nodb" id)"
+	pass "sogod without a database: $(docker top "$prefix-nodb" -eo pid,user,comm | awk 'NR > 1 { printf "%s%s(%s)", s, $3, $2; s = ", " }') up, $(last_probe "$prefix-nodb")"
+	docker rm -f "$prefix-nodb" >/dev/null
 	health_cycle "$prefix-health" 0000000000000000 --cap-drop ALL
 	stop_test "$prefix-stop" --cap-drop ALL
 	;;

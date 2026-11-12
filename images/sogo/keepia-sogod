@@ -1,0 +1,72 @@
+#!/bin/bash
+# keepia-sogod: runs sogod (its arguments) under tini and stops it within a
+# bounded time (#25).
+#
+# sogod's watchdog (the master) answers SIGTERM by sending SIGTERM to its
+# workers and waiting for them. A worker only sets a flag on SIGTERM and
+# checks it when its run loop next wakes; once the master stops handing it
+# connections, only its next timer wakes it (SOGo's cache cleanup, every
+# 300 s). Measured in #25: an idle worker kept a `docker stop -t 20` hanging
+# until SIGKILL in 5 of 6 runs (exit 137).
+#
+# So on SIGTERM or SIGINT this script forwards SIGTERM to the master, waits
+# up to $KEEPIA_SOGOD_GRACE seconds (default 5, below Docker's default stop
+# timeout of 10 s) for it to exit, then sends SIGKILL to the workers still
+# running. A worker in the middle of a request finishes it within the grace
+# time or loses it, as it would at Docker's SIGKILL. The master then sees
+# its workers gone and exits by itself; this script exits with its status.
+set -u
+
+grace=${KEEPIA_SOGOD_GRACE:-5}
+if [ $# -eq 0 ]; then
+	echo "usage: keepia-sogod SOGOD-COMMAND..." >&2
+	exit 2
+fi
+
+"$@" &
+master=$!
+
+# workers: the pids whose parent is the master (no procps in the image).
+workers() {
+	local stat rest
+	for stat in /proc/[0-9]*/stat; do
+		read -r rest <"$stat" 2>/dev/null || continue
+		# Field 4 (ppid) follows the command in parentheses, which may
+		# contain spaces: cut at the last ") ".
+		rest=${rest##*) }
+		set -- $rest
+		if [ "${2:-}" = "$master" ]; then
+			stat=${stat#/proc/}
+			echo "${stat%/stat}"
+		fi
+	done
+}
+
+stop() {
+	trap '' TERM INT
+	interrupted=1
+	echo "keepia-sogod: stopping sogod (pid $master)"
+	kill -TERM "$master" 2>/dev/null || return 0
+	local i
+	for ((i = 0; i < grace * 10; i++)); do
+		kill -0 "$master" 2>/dev/null || return 0
+		sleep 0.1
+	done
+	local pids
+	pids=$(workers)
+	if [ -n "$pids" ]; then
+		echo "keepia-sogod: worker(s) $(echo $pids) still running ${grace} s after SIGTERM, sending SIGKILL"
+		# shellcheck disable=SC2086 # one pid per word
+		kill -KILL $pids 2>/dev/null || true
+	fi
+}
+trap stop TERM INT
+
+# wait returns early when a trapped signal arrives (stop sets
+# interrupted); then it waits again, for the master's own exit status.
+while :; do
+	interrupted=0
+	rc=0
+	wait "$master" || rc=$?
+	[ "$interrupted" = 1 ] || exit "$rc"
+done

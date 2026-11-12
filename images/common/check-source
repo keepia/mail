@@ -1,0 +1,72 @@
+#!/bin/sh
+# check-source: unpacks a pinned source archive and checks that it holds
+# exactly the files of the pinned git tree (#44, #25). ADD --checksum pins
+# the archive's bytes; this check ties those bytes to the reviewed tree,
+# taken from a clone of the upstream repository at the pinned commit or tag.
+#
+# Usage: check-source ARCHIVE MANIFEST DIR
+# Unpacks ARCHIVE into DIR (without the archive's top directory) and fails
+# unless DIR holds exactly the files the manifest pins and nothing but
+# files and directories. The manifest has one of two forms:
+#
+# - a listing: every file as "<sha256>  <path>", the way sha256sum writes
+#   it (olefy, 12 files). Every sum is checked, and DIR holds no other file.
+# - a digest, for trees of thousands of files (SOPE, SOGo): comment lines
+#   (#) and one line "listing <sha256> <count>". <sha256> is the sha256 of
+#   that same listing, sorted by path in the C locale, with one "\n" after
+#   each line; <count> is its number of files. The check computes the
+#   listing of DIR and compares both. On a mismatch it prints the listing,
+#   so a diff against one generated from the clone names the file.
+#
+# A path may contain spaces. The Dockerfiles bind-mount this script for one
+# RUN, so it is not in an image.
+set -eu
+
+if [ $# -ne 3 ]; then
+	echo "usage: check-source ARCHIVE MANIFEST DIR" >&2
+	exit 2
+fi
+archive=$1 manifest=$2 dir=$3
+
+mkdir -p "$dir"
+tar -xzf "$archive" -C "$dir" --strip-components=1 --no-same-owner
+cd "$dir"
+other=$(find . ! -type f ! -type d)
+if [ -n "$other" ]; then
+	echo "check-source: the archive holds entries that are not files: $other" >&2
+	exit 1
+fi
+
+lists=$(mktemp -d)
+find . -type f | sed 's|^\./||' | LC_ALL=C sort >"$lists/have"
+count=$(wc -l <"$lists/have")
+
+digest=$(grep -v '^#' "$manifest" | grep -E '^listing [0-9a-f]{64} [0-9]+$' || true)
+if [ -n "$digest" ]; then
+	if [ "$(grep -v '^#' "$manifest" | wc -l)" -ne 1 ]; then
+		echo "check-source: a digest manifest has exactly one line besides comments" >&2
+		exit 1
+	fi
+	want_sum=$(echo "$digest" | cut -d' ' -f2)
+	want_count=$(echo "$digest" | cut -d' ' -f3)
+	tr '\n' '\0' <"$lists/have" | xargs -0 -r sha256sum -- >"$lists/listing"
+	have_sum=$(sha256sum <"$lists/listing" | cut -d' ' -f1)
+	if [ "$have_sum" != "$want_sum" ] || [ "$count" -ne "$want_count" ]; then
+		cat "$lists/listing" >&2
+		echo "check-source: the archive's listing (above) has sha256 $have_sum and $count files;" \
+			"the pinned tree's has $want_sum and $want_count" >&2
+		exit 1
+	fi
+	rm -rf "$lists"
+	echo "check-source: $count files match the pinned tree (listing sha256 $have_sum)"
+	exit 0
+fi
+
+sha256sum --strict --quiet -c "$manifest"
+sed 's/^[0-9a-f]\{64\}  //' "$manifest" | LC_ALL=C sort >"$lists/want"
+if ! diff -u "$lists/want" "$lists/have" >&2; then
+	echo "check-source: the archive's files differ from the pinned tree's (- manifest, + archive)" >&2
+	exit 1
+fi
+rm -rf "$lists"
+echo "check-source: $count files match the pinned tree"

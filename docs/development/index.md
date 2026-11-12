@@ -96,6 +96,7 @@ release (#5):
 | `ghcr.io/keepia/mail-postfix` | [`images/postfix/Dockerfile`](../../images/postfix/Dockerfile) | root master with `CHOWN DAC_OVERRIDE FOWNER SETUID SETGID`, `chroot = n` everywhere | SMTP `220 ` greeting |
 | `ghcr.io/keepia/mail-unbound` | [`images/unbound/Dockerfile`](../../images/unbound/Dockerfile) | 10053, no capabilities | `unbound-control status` |
 | `ghcr.io/keepia/mail-olefy` | [`images/olefy/Dockerfile`](../../images/olefy/Dockerfile) | 10055, no capabilities | olefy's `PING` answered by `PONG` |
+| `ghcr.io/keepia/mail-sogo` | [`images/sogo/Dockerfile`](../../images/sogo/Dockerfile) | 10060, no capabilities | `GET /SOGo/` answered by an HTTP status line |
 
 Each Debian-based image lists its installed packages in
 `/usr/share/keepia/packages.txt`; the Keepia image has none, because it is
@@ -108,8 +109,33 @@ commit's files ([`images/olefy/olefy-source.sha256`](../../images/olefy/olefy-so
 To move the pin, update the commit in the Dockerfile, the archive's
 sha256 and the file list together.
 
-SOGo and the Compose template "all roles on one server" follow in
-the next parts of #5; the upstream images (Dovecot, rspamd, ClamAV,
+SOGo is built from Alinto's release tags: SOPE and SOGo of the same
+release, each fetched as GitHub's tag archive with `ADD --checksum`, then
+compiled in a build stage with Debian's build dependencies. Their trees
+have thousands of files, so their manifests
+([`images/sogo/sope-source.sha256`](../../images/sogo/sope-source.sha256),
+[`images/sogo/sogo-source.sha256`](../../images/sogo/sogo-source.sha256))
+pin the sha256 of the file listing instead of the listing itself
+([`images/common/check-source`](../../images/common/check-source)). To move
+the pin to a new release `<v>`, from bare clones of `Alinto/sope` and
+`Alinto/sogo`, for each of `sope SOPE` and `sogo SOGo`:
+
+```sh
+git -C sogo.git -c tar.tar.gz.command="gzip -cn" archive --format=tar.gz \
+  --prefix=sogo-SOGo-<v>/ -o sogo.tar.gz SOGo-<v>   # sha256sum: the ADD --checksum
+git -C sogo.git ls-tree -r SOGo-<v> | LC_ALL=C sort -t "$(printf '\t')" -k2 |
+  while IFS="$(printf '\t')" read -r meta path; do
+    set -- $meta; [ "$2" = blob ] || continue
+    printf '%s  %s\n' "$(git -C sogo.git cat-file blob "$3" | sha256sum | cut -d' ' -f1)" "$path"
+  done >sogo-listing.txt
+sha256sum sogo-listing.txt; wc -l sogo-listing.txt   # both go in the manifest's "listing" line
+```
+
+On a mismatch the build prints the archive's listing, so a `diff` against
+`sogo-listing.txt` names the file.
+
+The Compose template "all roles on one server" follows in
+the next part of #5; the upstream images (Dovecot, rspamd, ClamAV,
 Postgres, Valkey, memcached) are used unchanged, pinned by digest in the
 template.
 
