@@ -354,10 +354,13 @@ jobs:
           grep -E '^00001_baseline\.sql +applied ' <<<"$status"
       # Test 7's counter-case: with a wrong database password km must fail.
       # Compose recreates postgres (same volume, so the old password
-      # stays) and keepia, whose serve then cannot log in. km's exec fails
-      # because that keepia keeps restarting, not on migrate's own error
-      # (#61): the step asserts each link of that chain, in the new
-      # keepia container only.
+      # stays) and keepia, whose serve then cannot log in, so Docker
+      # restarts keepia again and again. km's exec meets that loop (#61):
+      # the step asserts each link of that chain, in the new keepia
+      # container only. How the exec fails depends on where it lands in
+      # the loop (#69), so scripts/km-failure-cause.sh decides by what
+      # does not: km reached its exec (its sh -x trace), and keepia-mail's
+      # own error, if it printed one, is SQLSTATE 28P01.
       - name: ./km with a wrong database password fails (test 7)
         env:
           KEEPIA_IMAGE: ${{ steps.keepia.outputs.image }}
@@ -367,24 +370,32 @@ jobs:
           KEEPIA_SOGO_IMAGE: ${{ steps.sogo.outputs.image }}
           KEEPIA_POSTGRES_PASSWORD: wrong-password
         run: |
+          since=$(date +%s)
           rc=0
-          out=$(./km migrate status 2>&1) || rc=$?
+          out=$(PS4='+ ' sh -x ./km migrate status 2>&1) || rc=$?
           echo "km exited $rc: $out"
-          test "$rc" != 0
-          # Why km failed: normally its exec found keepia restarting; if
-          # the exec caught keepia between two restarts, migrate's own
-          # login failed. Anything else fails the step.
-          case $out in
-          *'is restarting'*) echo "cause: km's exec found keepia restarting" ;;
-          *'password authentication failed'*) echo "cause: migrate's own login failed" ;;
-          *) echo "km failed for another reason"; exit 1 ;;
-          esac
-          # keepia restarts because serve cannot log in: the recreated
-          # container has restarted, and its own log names the wrong
-          # password (SQLSTATE 28P01).
+          # Why km failed: at its exec, because of keepia's restart loop.
+          # Anything else, also before the exec, fails the step.
+          sh scripts/km-failure-cause.sh "$rc" "$out"
+          # keepia restarts because serve cannot log in. Docker counts a
+          # restart, after the run's log is copied, before it reports the
+          # run's "die"; the exec may have met the first run's exit before
+          # that, so wait for the first "die" if none is counted yet.
           c=$(docker compose ps -aq keepia)
-          docker inspect -f 'keepia: {{.State.Status}}, restarts {{.RestartCount}}' "$c"
-          test "$(docker inspect -f '{{.RestartCount}}' "$c")" -gt 0
+          if [ "$(docker inspect -f '{{.RestartCount}}' "$c")" = 0 ]; then
+            timeout 120 docker events --since "$since" --filter "container=$c" --filter event=die \
+              --format 'keepia exited {{index .Actor.Attributes "exitCode"}}' | head -n 1 || true
+          fi
+          # In the loop Docker shows keepia as running or restarting (never
+          # exited): the recreated container has restarted, and its own
+          # log names the wrong password (SQLSTATE 28P01).
+          read -r status restarts < <(docker inspect -f '{{.State.Status}} {{.RestartCount}}' "$c")
+          echo "keepia: $status, restarts $restarts"
+          case $status in
+          running | restarting) ;;
+          *) echo "keepia is out of its restart loop"; exit 1 ;;
+          esac
+          test "$restarts" -gt 0
           logs=$(docker logs "$c" 2>&1)
           grep -m1 'password authentication failed.*28P01' <<<"$logs"
       - name: Stop and remove the template

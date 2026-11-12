@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -36,12 +37,15 @@ const (
 // pullExit is its exit status on `pull`, execExit on `compose ... exec`,
 // withDockerfile puts a Dockerfile next to km, as in a source checkout,
 // and noDaemon fails every call that needs a Docker daemon with a
-// connection error.
+// connection error. execOut is what `compose ... exec` prints on stderr,
+// and trace runs km as `PS4='+ ' sh -x km`, as test 7's counter-case does.
 type fakeDocker struct {
 	withDockerfile     bool
 	noDaemon           bool
+	trace              bool
 	images, missing    []string
 	pullExit, execExit string
+	execOut            string
 }
 
 // imageList returns the images the fake prints.
@@ -99,7 +103,7 @@ func runKm(t *testing.T, fake fakeDocker, args ...string) (int, string, [][]stri
 		"\techo 'Error response from daemon: manifest unknown' >&2; exit " + orZero(fake.pullExit) + "\nfi\n" +
 		"case \"$1 $4\" in\n" +
 		"'compose config') printf '%s\\n' '" + strings.Join(fake.imageList(), "' '") + "' ;;\n" +
-		"'compose exec') exit " + orZero(fake.execExit) + " ;;\n" +
+		"'compose exec') [ -n \"$FAKE_EXEC_OUT\" ] && printf '%s\\n' \"$FAKE_EXEC_OUT\" >&2; exit " + orZero(fake.execExit) + " ;;\n" +
 		"esac\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(shim), 0o700); err != nil { //nolint:gosec // an executable test script
 		t.Fatal(err)
@@ -107,7 +111,11 @@ func runKm(t *testing.T, fake fakeDocker, args ...string) (int, string, [][]stri
 	ctx, cancel := context.WithTimeout(context.Background(), testwait.Limit(t))
 	defer cancel()
 	cmd := exec.CommandContext(ctx, km, args...) //nolint:gosec // a copy of the repository's own script
-	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if fake.trace {
+		cmd = exec.CommandContext(ctx, "sh", append([]string{"-x", km}, args...)...) //nolint:gosec // a copy of the repository's own script
+	}
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PS4=+ ", "FAKE_EXEC_OUT="+fake.execOut)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	code := 0
@@ -259,5 +267,49 @@ func TestKmNoDaemon(t *testing.T) {
 		!slices.EqualFunc(calls, want, slices.Equal) {
 		t.Errorf("exit %d\n%s\ndocker calls:\n%swant a non-zero exit, docker's error, no %q, and only:\n%s",
 			code, out, show(calls), "make images", show(want))
+	}
+}
+
+// Test 7's counter-case (#69) runs `PS4='+ ' sh -x ./km migrate status`
+// and gives its exit status and output to scripts/km-failure-cause.sh,
+// which accepts a failure only at km's exec, found by its traced exec
+// line. Here the real km, traced, with a fake docker: the exec's answers
+// to a crash-looping keepia are accepted, every other failure is not.
+func TestKmFailureCause(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	cases := []struct {
+		name string
+		fake fakeDocker
+		ok   bool
+	}{
+		{"exec found keepia restarting", fakeDocker{execExit: "1",
+			execOut: "Error response from daemon: Container " + id + " is restarting, wait until the container is running"}, true},
+		{"exec met the exit of keepia's run", fakeDocker{execExit: "128",
+			execOut: "OCI runtime exec failed: exec failed: cannot exec in a stopped container"}, true},
+		{"migrate killed with keepia's run", fakeDocker{execExit: "137"}, true},
+		{"migrate's own login failed", fakeDocker{execExit: "1",
+			execOut: `error: connect to database: failed SASL auth: FATAL: password authentication failed for user "keepia" (SQLSTATE 28P01)`}, true},
+		{"migrate failed for another reason", fakeDocker{execExit: "1",
+			execOut: "error: connect to database: dial tcp 172.29.1.11:5432: connect: connection refused"}, false},
+		{"km succeeded", fakeDocker{}, false},
+		{"no daemon", fakeDocker{noDaemon: true}, false},
+		{"image missing", fakeDocker{missing: []string{testDep}}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.fake.trace = true
+			code, out, _ := runKm(t, c.fake, "migrate", "status")
+			ctx, cancel := context.WithTimeout(context.Background(), testwait.Limit(t))
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "sh", "../../scripts/km-failure-cause.sh", strconv.Itoa(code), out)
+			verdict, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if err != nil && !errors.As(err, &exit) {
+				t.Fatal(err)
+			}
+			if got := err == nil; got != c.ok {
+				t.Errorf("accepted %v, want %v: %s\nkm exited %d:\n%s", got, c.ok, verdict, code, out)
+			}
+		})
 	}
 }

@@ -114,7 +114,10 @@ because the image has no curl. The tests use a fake `docker`
   `<project>-keepia` and never matches: `km` then reports it missing.
 - **A crash-looping `keepia`:** `exec` needs a running container. If
   `keepia` keeps restarting (for example, `serve` exits on a failed
-  migration), `km` fails with "Container … is restarting". Read `docker
+  migration), `km` fails, mostly with "Container … is restarting". When
+  its exec meets a run of `keepia` just as that run exits, the message
+  comes from the runtime instead (for example "cannot exec in a stopped
+  container", or exit 137 and none at all). Read `docker
   compose logs keepia`, fix the cause, then start it again with `docker
   compose up -d --no-build --pull never keepia`.
 
@@ -204,7 +207,7 @@ below.
 make images                       # every image into the local Docker store, tag $(VERSION)
 make image-test IMAGE=postfix     # smoke, health and reload tests of one built image
 make image-pins-test image-pins   # the pin check: tests, then the repository
-make image-scripts-test           # check-source, source-listing.sh and keepia-sogod (no Docker, no network)
+make image-scripts-test           # check-source, source-listing.sh, keepia-sogod, edge guard, km failure cause (no Docker, no network)
 ```
 
 - **Pins.** Base images and the `# syntax=` frontend are pinned by tag and
@@ -387,17 +390,22 @@ in CI, to put the edge addresses on loopback.
   `KEEPIA_SOGO_IMAGE`), so nothing after the verification goes by tag. Then
   `scripts/compose-test.sh` (tests 6 and 8–14), `./km migrate` and `./km
   migrate status` (test 7: version 1 applied), `./km` with a wrong database
-  password (it must fail, and the step names why: km's exec found the
-  recreated keepia restarting, or migrate's own login failed; that
-  keepia has restarted and its log has SQLSTATE 28P01), and `docker
+  password (it must fail at its exec, and `scripts/km-failure-cause.sh`
+  names why: the exec found the recreated keepia restarting, met a run of
+  it as that run exited, or migrate's own login failed with SQLSTATE
+  28P01; a failure before the exec or any other keepia-mail error fails
+  the step. That keepia is still running or restarting, has restarted,
+  and its log has SQLSTATE 28P01), and `docker
   compose down --volumes`. The step
   summary lists each container's health, memory and CPU.
 
 The `lint` job also runs `scripts/check-go-toolchain-test.sh`; the
 Dockerfile runs `scripts/check-go-toolchain.sh`, so the golang tag cannot
 drift from `go.mod`'s `toolchain`. It then runs `make image-scripts-test`,
-the tests of `images/common/check-source`, `scripts/source-listing.sh` and
-`images/sogo/keepia-sogod`, without Docker or network.
+the tests of `images/common/check-source`, `scripts/source-listing.sh`,
+`images/sogo/keepia-sogod`, the edge address guard and
+`scripts/km-failure-cause.sh` (test 7's counter-case), without Docker or
+network.
 
 `scripts/ci-docker-mirror.sh`, `scripts/ci-pull-images.sh` and
 `scripts/check-go-toolchain.sh` (with its test) are byte-identical copies of
