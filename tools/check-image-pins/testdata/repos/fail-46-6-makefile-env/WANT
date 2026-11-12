@@ -1,0 +1,6 @@
+Makefile:4: a Makefile may not set or export PATH
+Makefile:5: a Makefile may not set or export HOME
+Makefile:6: a Makefile may not name DOCKER_CONFIG
+Makefile:7: a Makefile may not name DOCKER_HOST
+Makefile:8: a Makefile may not name DOCKER_CONTEXT
+Makefile:10: a Makefile may not set or export PATH

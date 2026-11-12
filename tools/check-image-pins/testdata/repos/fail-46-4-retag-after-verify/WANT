@@ -1,0 +1,2 @@
+job build: step 4 tests the image; it must test the verified image ID
+job build: step 6 runs docker save: save the image with

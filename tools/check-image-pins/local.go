@@ -100,6 +100,13 @@ func planLocal(root string, o localOptions) localPlan {
 	p.names, bad = plainNames(names)
 	p.problem = append(p.problem, bad...)
 	p.b = bake{dir: root, files: rootBakeFiles(root), env: cleanEnv(vars)}
+	// One docker binary for the resolve and the build (#46, B N3): its
+	// absolute path, looked up once in this process's PATH.
+	if bin, err := exec.LookPath("docker"); err != nil {
+		p.problem = append(p.problem, "cannot find the docker CLI: "+err.Error())
+	} else if p.b.bin, err = filepath.Abs(bin); err != nil {
+		p.problem = append(p.problem, "cannot resolve the docker CLI's path: "+err.Error())
+	}
 	if len(p.b.files) == 0 {
 		p.problem = append(p.problem, "no bake file at the repository root")
 	}
@@ -140,11 +147,11 @@ func runLocal(root string, o localOptions, stdout, stderr io.Writer) int {
 	buildArgs = append(buildArgs, "--load", "--")
 	buildArgs = append(buildArgs, p.names...)
 	argv := p.b.argv(buildArgs...)
-	fmt.Fprintf(stdout, "check-image-pins: the definition is pinned; running docker %s\n", strings.Join(argv, " "))
+	fmt.Fprintf(stdout, "check-image-pins: the definition is pinned; running %s %s\n", p.b.bin, strings.Join(argv, " "))
 	if o.dryRun {
 		return 0
 	}
-	cmd := exec.Command("docker", argv...) //nolint:gosec // the argv checked above: default files, typed --set lines, plain target names
+	cmd := exec.Command(p.b.bin, argv...) //nolint:gosec // the docker CLI resolved once in planLocal, with the argv checked above: default files, typed --set lines, plain target names
 	cmd.Dir = root
 	cmd.Env = p.b.env
 	cmd.Stdout = stdout

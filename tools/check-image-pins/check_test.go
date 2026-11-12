@@ -18,7 +18,7 @@ var minFixtures = map[string]int{
 	"dockerfile": 33,
 	"compose":    16,
 	"workflow":   9,
-	"repos":      22,
+	"repos":      28,
 }
 
 // fixtureKind maps a testdata directory of single files to the rules its
@@ -38,7 +38,7 @@ func checkFixture(k kind, src []byte) ([]Finding, error) {
 		f, _, err := CheckCompose(src)
 		return f, err
 	case kindWorkflow:
-		f, _, err := CheckWorkflow(src, false)
+		f, _, err := CheckWorkflow(src, false, nil)
 		return f, err
 	}
 	return nil, nil
@@ -321,7 +321,7 @@ func TestBakeLocal(t *testing.T) {
 		code int
 		want string
 	}{
-		{"clean", []string{"-root", repo, "-dry-run", "-version", "1.0.0"}, nil, 0, "running docker buildx bake --file docker-bake.hcl --load -- default"},
+		{"clean", []string{"-root", repo, "-dry-run", "-version", "1.0.0"}, nil, 0, " buildx bake --file docker-bake.hcl --load -- default"},
 		{"proxy options", []string{"-root", repo, "-dry-run", "-ca", ca, "-host-network", "-https-proxy", "http://127.0.0.1:3128"}, nil, 0,
 			"--allow network.host --set *.secrets=id=ca,src=" + ca + " --set *.network=host --set *.args.HTTPS_PROXY=http://127.0.0.1:3128 --load -- default"},
 		// V1: a free --file is not an option of the tool.
@@ -382,7 +382,7 @@ func TestVerifyBuilt(t *testing.T) {
 				}
 				return id, nil
 			}
-			findings, _ := verifyBuilt([]byte(c.meta), inspect)
+			findings, _, _ := verifyBuilt([]byte(c.meta), inspect)
 			if len(findings) != c.findings || (c.want != "" && !strings.Contains(strings.Join(findings, "\n"), c.want)) {
 				t.Fatalf("findings %q, want %d with %q", findings, c.findings, c.want)
 			}

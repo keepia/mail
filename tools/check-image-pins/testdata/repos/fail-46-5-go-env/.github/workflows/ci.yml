@@ -1,0 +1,33 @@
+# #46 point 5 (review B delta 3, N2): steps that reroute the tool's own
+# go run through GITHUB_ENV (GOFLAGS -overlay, GOWORK) or GITHUB_PATH, in
+# the run text and in a script it names; and the check and verify steps
+# in their old form, without GOENV=off GOFLAGS= GOWORK=off. The commit
+# time line is the one write that stays allowed.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - name: Commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
+      - run: echo "GOFLAGS=-overlay=$PWD/tools/ov.json" >> "$GITHUB_ENV"
+      - run: sh scripts/env.sh
+      - run: go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - id: verify
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: go run ./tools/check-image-pins -verify-built
+      - env:
+          VERIFIED_IMAGE: ${{ steps.verify.outputs.image }}
+        run: bash scripts/image-test.sh postfix "$VERIFIED_IMAGE"

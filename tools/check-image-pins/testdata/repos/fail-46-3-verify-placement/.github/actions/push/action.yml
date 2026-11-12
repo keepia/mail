@@ -1,0 +1,6 @@
+name: push
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: docker push ghcr.io/keepia/mail-postfix:dev

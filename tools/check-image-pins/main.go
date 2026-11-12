@@ -148,6 +148,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	build := flags.String("build", "", "build mode: the bake targets one build step builds (space or comma separated)")
 	buildSet := flags.String("build-set", "", "build mode: that step's --set values, one per line")
 	verify := flags.Bool("verify-built", false, "verify mode: the local images are the output in $BAKE_METADATA")
+	save := flags.String("save", "", "verify mode: save the verified images to this tar file and check the tar")
 	local := flags.Bool("bake-local", false, "local mode: check, then build the given targets (default: the default group)")
 	var lo localOptions
 	flags.StringVar(&lo.version, "version", "", "local mode: the bake variable VERSION")
@@ -164,10 +165,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch {
 	case *verify:
 		if *local || *build != "" || flags.NArg() > 0 {
-			fmt.Fprintln(stderr, "usage: check-image-pins -verify-built")
+			fmt.Fprintln(stderr, "usage: check-image-pins -verify-built [-save FILE]")
 			return 2
 		}
-		return runVerify(stdout)
+		return runVerify(*save, realVerifyDeps, stdout)
+	case *save != "":
+		fmt.Fprintln(stderr, "check-image-pins: -save needs -verify-built")
+		return 2
 	case *local:
 		if *build != "" || *buildSet != "" {
 			fmt.Fprintln(stderr, "check-image-pins: -bake-local takes no -build or -build-set")
@@ -337,7 +341,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 				r.add(p, 0, err.Error())
 				continue
 			}
-			findings, runs, err := CheckWorkflow(src, k == kindReleaseWorkflow)
+			findings, runs, err := CheckWorkflow(src, k == kindReleaseWorkflow, func(text string) []refText {
+				return referencedTexts(root, text)
+			})
 			if err != nil {
 				r.add(p, 0, "does not parse: "+err.Error())
 				continue

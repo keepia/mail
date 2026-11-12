@@ -171,15 +171,19 @@ jobs:
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
       # Layer timestamps from the commit, so a rebuild of the same commit
-      # gives the same layers where the inputs are the same.
+      # gives the same layers where the inputs are the same. The check
+      # allows no other GITHUB_ENV or GITHUB_PATH write in this job (the
+      # mirror script's DOCKER_CONFIG aside).
       - name: Commit time
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
       # Rule 5 in build mode: resolves exactly what the next step builds
       # (BAKE_TARGET, BAKE_SET and this job's environment, including what
       # earlier steps wrote to GITHUB_ENV) and checks it, the cache
       # included (only type=gha with this row's scope). The check requires
-      # this exact command right before Build.
-      - run: go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      # this exact command right before Build. GOENV=off GOFLAGS=
+      # GOWORK=off: the tool is built from the module alone, whatever the
+      # job's environment holds.
+      - run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
       # bake-action exposes the GitHub Actions cache runtime to BuildKit; a
       # plain `docker buildx bake` in a run step could not use type=gha.
       - name: Build
@@ -192,35 +196,34 @@ jobs:
           set: ${{ env.BAKE_SET }}
       # The image tested and the image saved are the checked build's output:
       # the local image ID must equal the digest in the build's metadata.
-      # The check requires this step right before every step that tests or
-      # saves the image.
-      - env:
+      # The check requires this step right before every step that tests,
+      # saves, pushes or tags the image. It puts out the verified image ID
+      # (steps.verify.outputs.image), and the test runs that ID, so a
+      # re-tag after this step cannot change what is tested.
+      - id: verify
+        env:
           BAKE_METADATA: ${{ steps.build.outputs.metadata }}
-        run: go run ./tools/check-image-pins -verify-built
+        run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built
       - name: Smoke, health and reload tests
         env:
           IMAGE: ${{ matrix.image }}
-        run: make image-test IMAGE="$IMAGE" VERSION=dev
-      - if: matrix.arch == 'amd64'
-        env:
-          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
-        run: go run ./tools/check-image-pins -verify-built
+          VERIFIED_IMAGE: ${{ steps.verify.outputs.image }}
+        run: bash scripts/image-test.sh "$IMAGE" "$VERIFIED_IMAGE"
       # The compose job (#5 part 3) loads the amd64 images from here instead
-      # of building them again.
+      # of building them again. Verify saves the image itself and checks the
+      # tar it wrote (every blob, and the build's config under every name)
+      # before it moves it to image.tar.
       - name: Save the image
         if: matrix.arch == 'amd64'
         env:
-          IMAGE: ${{ matrix.image }}
-        run: |
-          case $IMAGE in keepia) repo=mail ;; *) repo=mail-$IMAGE ;; esac
-          docker save "ghcr.io/keepia/$repo:dev" | zstd -q -T0 -o "$RUNNER_TEMP/image-$IMAGE.tar.zst"
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built -save "$RUNNER_TEMP/image.tar"
       - if: matrix.arch == 'amd64'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-${{ matrix.image }}
-          path: ${{ runner.temp }}/image-${{ matrix.image }}.tar.zst
+          path: ${{ runner.temp }}/image.tar
           retention-days: 1
-          compression-level: 0
           if-no-files-found: error
 
   # The docker check: every docker-build row passed (a failed, cancelled or

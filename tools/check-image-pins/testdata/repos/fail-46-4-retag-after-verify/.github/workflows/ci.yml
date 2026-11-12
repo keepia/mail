@@ -1,0 +1,38 @@
+# #46 point 4 (review B delta 3, N1): each step comes right after a
+# verify step, then re-tags another image over the verified name inside
+# the same step and tests or saves by tag. Verify passed, so the test and
+# the artifact would be the other image. Tests must run the verified
+# image ID, and a save goes through verify's own -save.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - id: verify
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built
+      - name: Smoke, health and reload tests
+        run: |
+          docker pull mirror.gcr.io/library/busybox:latest
+          docker tag mirror.gcr.io/library/busybox:latest ghcr.io/keepia/mail-postfix:dev
+          make image-test IMAGE=postfix VERSION=dev
+      - env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built
+      - name: Save the image
+        run: |
+          docker tag mirror.gcr.io/library/busybox:latest ghcr.io/keepia/mail-postfix:dev
+          docker save ghcr.io/keepia/mail-postfix:dev | zstd -q -T0 -o "$RUNNER_TEMP/image-postfix.tar.zst"

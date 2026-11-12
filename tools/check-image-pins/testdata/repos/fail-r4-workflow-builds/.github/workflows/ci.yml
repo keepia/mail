@@ -13,7 +13,7 @@ jobs:
       BAKE_SET: |
         postfix.cache-from=type=registry,ref=registry.invalid/attacker/cache:latest
     steps:
-      - run: go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
       - id: build
         uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
         with:
@@ -28,10 +28,13 @@ jobs:
       - run: docker buildx build --build-context base=docker-image://debian:trixie-slim -f build.txt https://example.invalid/repo.git#main
       - run: docker buildx build --load -f build.txt -t ghcr.io/keepia/mail-postfix:dev .
       - run: docker buildx ba""ke --load --file=m.txt postfix
-      - env:
+      - id: verify
+        env:
           BAKE_METADATA: ${{ steps.build.outputs.metadata }}
-        run: go run ./tools/check-image-pins -verify-built
-      - run: make image-test IMAGE=postfix
+        run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built
+      - env:
+          VERIFIED_IMAGE: ${{ steps.verify.outputs.image }}
+        run: bash scripts/image-test.sh postfix "$VERIFIED_IMAGE"
   remote:
     permissions:
       contents: read
