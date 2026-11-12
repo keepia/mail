@@ -64,8 +64,9 @@ services, changes to the serving layer: static file serving, response
 headers, CSP, routing, mail routing and placement, the control-plane/agent
 trust boundary, encryption at rest and keys, spam, virus, rate-limit and ban
 policy, container privileges and networking, and changes to
-`.github/workflows/` or `tools/check-action-pins/`) also get a second,
-independent session review by a separate reviewer agent that does not see the
+`.github/workflows/`, `tools/check-action-pins/`, the Makefile's
+`workflows`/`workflows-test` targets or the `go.yaml.in/yaml/v3` line in
+`go.mod`) also get a second, independent session review by a separate reviewer agent that does not see the
 first review beforehand. The coordinator labels each of them
 **`second-review`**, every pull request that changes the schema included; the
 label is a marker and triggers nothing. Pull requests without app code that
