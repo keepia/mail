@@ -126,6 +126,11 @@ services:
     command: ["valkey-server", "--bind", "${KEEPIA_SUBNET4:-172.29}.1.12 127.0.0.1", "--protected-mode", "yes"]
     volumes:
       - valkey-data:/data
+    healthcheck:
+      <<: *health
+      # Over loopback, the only address protected mode serves. The reply
+      # is compared, so a DENIED or a later NOAUTH cannot pass.
+      test: ["CMD-SHELL", "test \"$$(timeout 3 valkey-cli -h 127.0.0.1 ping)\" = PONG"]
     dns: ["${KEEPIA_SUBNET4:-172.29}.1.53"]
     networks:
       control-private:
@@ -162,8 +167,7 @@ services:
       dockerfile: postfix/Dockerfile
     # The master runs as root, which Postfix needs, with exactly these
     # five capabilities; every master.cf service runs with chroot = n (C14).
-    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SYS_ADMIN]
-    command: ["sh", "-c", "postconf -F '*/*/chroot = y' && exec postfix start-fg"]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
     mem_limit: 128m
     environment:
       KEEPIA_HEALTH_ADDR: ${KEEPIA_SUBNET4:-172.29}.2.10
@@ -193,6 +197,7 @@ services:
     image: dovecot/dovecot:2.4.5@sha256:43c14def08a57f25107593cbcf64a0a6fbae84a7b9de7aa038513c9b21e91914
     # The login, LMTP and anvil binaries carry cap_sys_chroot+ep: without
     # SYS_CHROOT in the bounding set their execv fails (C13, M13).
+    cap_add: [SYS_CHROOT]
     user: "1000:1000"
     mem_limit: 256m
     configs:
@@ -257,7 +262,7 @@ services:
     volumes:
       # Exactly the image's VOLUME /srv/vmail, so mail lands in the named
       # volume and never in an anonymous one (architecture section 8).
-      - store-mail:/srv
+      - store-mail:/srv/vmail
       - store-index:/var/lib/dovecot
       - store-users:/etc/dovecot/users:ro
     healthcheck:
@@ -583,7 +588,7 @@ configs:
     file: ./deploy/store/dovecot/dovecot.conf
   store-dovecot-listen:
     content: |
-      listen = *
+      listen = ${KEEPIA_SUBNET4:-172.29}.4.10
 
   filter-rspamd-controller:
     file: ./deploy/filter/rspamd/override.d/worker-controller.inc

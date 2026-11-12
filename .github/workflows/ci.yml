@@ -286,7 +286,7 @@ jobs:
     # addresses, put on the runner's loopback by compose-test.sh; the
     # database password exists only for this run.
     env:
-      COMPOSE_PROFILES: control,edge,store,filter
+      COMPOSE_PROFILES: control,edge,store,filter,groupware
       KEEPIA_POSTGRES_PASSWORD: compose-ci-only
       EDGE_IPV4: 192.0.2.10
       EDGE_IPV6: 2001:db8::10
