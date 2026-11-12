@@ -202,7 +202,7 @@ func TestServeErrorHidesPassword(t *testing.T) {
 		// atPassword has an unescaped '@'; secrets lists its parts.
 		atPassword = "test-pass@word-not-real"
 	)
-	secrets := []string{password, atPassword, "test-pass", "word-not-real"}
+	secrets := []string{password, atPassword, "test-pass", "word-not-real", "pa-one", "pa-two", "pa-three"}
 	well := url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword("keepia", password),
@@ -220,6 +220,18 @@ func TestServeErrorHidesPassword(t *testing.T) {
 		"at, connect": "postgres://keepia:" + atPassword + "@" + closedPort(t) + "/keepia?sslmode=disable&connect_timeout=5",
 		// An unescaped '@' with an invalid port: the parse error.
 		"at, bad port": "postgres://keepia:" + atPassword + "@127.0.0.1:x/keepia",
+		// An unescaped '@' and then '/', '?' or '#': without the check
+		// the rest lands in the database name or the query, and pgx's
+		// errors print it (database=word-not-real@…, lookup test-pass).
+		"at, slash": "postgres://keepia:pa-one@pa-two/pa-three@" + closedPort(t) + "/keepia?connect_timeout=5",
+		"at, query": "postgres://keepia:pa-one@pa-two?x=pa-three@" + closedPort(t) + "/keepia",
+		"at, hash":  "postgres://keepia:pa-one@pa-two#pa-three@" + closedPort(t) + "/keepia",
+		// Only a '/' in the password, after a number: the rest lands in
+		// the database name.
+		"slash, port-like": "postgres://keepia:5432/pa-three@" + closedPort(t) + "/keepia?connect_timeout=5",
+		// Percent-encoded as it must be: the URL is used, and the
+		// connect fails without showing the password.
+		"encoded": "postgres://keepia:pa-one%40pa-two%2Fpa-three@" + closedPort(t) + "/keepia?sslmode=disable&connect_timeout=5",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv(config.EnvDatabaseURL, dbURL)
@@ -227,6 +239,14 @@ func TestServeErrorHidesPassword(t *testing.T) {
 				out, log, err := execute(t.Context(), options{}, args...)
 				if err == nil {
 					t.Fatalf("%v succeeded with %s", args, name)
+				}
+				if strings.HasPrefix(name, "at, ") || strings.HasPrefix(name, "slash, ") {
+					if !strings.Contains(err.Error(), "%40") {
+						t.Errorf("%v: %v, want the percent-encoding error", args, err)
+					}
+				}
+				if name == "encoded" && !strings.Contains(err.Error(), "connect to database") {
+					t.Errorf("%v: %v, want a connect error: the encoded URL must be used", args, err)
 				}
 				for _, s := range secrets {
 					if strings.Contains(err.Error(), s) || strings.Contains(log, s) || strings.Contains(out, s) {

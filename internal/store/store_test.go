@@ -127,13 +127,16 @@ func TestMigrationsHaveDown(t *testing.T) {
 	}
 }
 
-// Open rejects a URL with an '@' in its host or in a fallback host (an
-// unescaped '@' in the password) before it connects, with a text that
-// names no part of the URL.
+// Open rejects a connection string with a stray '@' (an unescaped '@' in
+// the password, or in a host) before it connects, with a text that names
+// no part of it: URLs (strayAt) and the keyword/value form, whose host
+// and fallback hosts hostHasAt checks.
 func TestOpenRejectsAtInHost(t *testing.T) {
 	for _, dbURL := range []string{
 		"postgres://keepia:sec@ret-not-real@127.0.0.1:1/keepia",
 		"postgres://keepia:sec@127.0.0.1:1,ret@not-real:2/keepia",
+		"host=sec@ret-not-real port=1 user=keepia dbname=keepia",
+		"host=127.0.0.1,sec@ret-not-real port=1,2 user=keepia dbname=keepia",
 	} {
 		_, err := store.Open(context.Background(), dbURL)
 		if err == nil || !strings.Contains(err.Error(), "%40") {
