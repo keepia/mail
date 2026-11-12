@@ -125,7 +125,7 @@ jobs:
   # a native GitHub-hosted runner (no QEMU). A row builds its image into the
   # runner's Docker store, then runs scripts/image-test.sh: the smoke command,
   # the package list, user and capabilities, the healthcheck green and red,
-  # and for Postfix and Unbound the reload watcher. CI never logs in to a
+  # for Postfix and Unbound the reload watcher, and for olefy a scan. CI never logs in to a
   # registry and never pushes; release.yml (#5 part 4) is the only publisher.
   docker-build:
     name: docker-build (${{ matrix.image }}, ${{ matrix.arch }})
@@ -135,7 +135,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [keepia, postfix, unbound]
+        image: [keepia, postfix, unbound, olefy]
         arch: [amd64, arm64]
     # The build's bake inputs, defined once for the check step and the Build
     # step (tools/check-image-pins rule 5 allows no other env here and

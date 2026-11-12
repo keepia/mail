@@ -23,7 +23,7 @@ variable "PLATFORM" {
 }
 
 group "default" {
-  targets = ["keepia", "postfix", "unbound"]
+  targets = ["keepia", "postfix", "unbound", "olefy"]
 }
 
 target "_common" {
@@ -69,5 +69,16 @@ target "unbound" {
   labels = {
     "org.opencontainers.image.title"       = "Keepia Mail Unbound"
     "org.opencontainers.image.description" = "Unbound resolver for the Keepia Mail roles"
+  }
+}
+
+target "olefy" {
+  inherits   = ["_common"]
+  context    = "images"
+  dockerfile = "olefy/Dockerfile"
+  tags       = ["${REGISTRY}/mail-olefy:${VERSION}"]
+  labels = {
+    "org.opencontainers.image.title"       = "Keepia Mail olefy"
+    "org.opencontainers.image.description" = "olefy (oletools for rspamd) for the Keepia Mail filter role"
   }
 }
