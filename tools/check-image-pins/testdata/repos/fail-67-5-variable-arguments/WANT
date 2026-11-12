@@ -1,0 +1,5 @@
+job build: step 3: it forwards its arguments as a command (${1+"$@"}, through the function main), which the check cannot resolve; call the command directly; in a job that builds with bake
+job build: step 4: it forwards its arguments as a command (${@+"$@"}, through the function retry), which the check cannot resolve; call the command directly; in a job that builds with bake
+job build: step 5: it forwards its arguments as a command (${1?usage: first.sh command}, through the function run_one), which the check cannot resolve; call the command directly; in a job that builds with bake
+job build: step 6: it passes ${args[@]} to the function retry, which runs its arguments as a command; the check cannot resolve what it holds; call the command directly; in a job that builds with bake
+job build: step 7: it passes $cmd to the function main, which runs its arguments as a command; the check cannot resolve what it holds; call the command directly; in a job that builds with bake

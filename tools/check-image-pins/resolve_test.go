@@ -73,6 +73,81 @@ func TestReferencedTexts(t *testing.T) {
 	}
 }
 
+// TestFunctionForwarding (#67): a top-level call that passes positional
+// parameters to a function that runs them as a command (directly or
+// through more functions) is reported like top-level forwarding; a
+// function that takes them as arguments, or a forwarding function called
+// with literal words or from inside another function, is not.
+func TestFunctionForwarding(t *testing.T) {
+	root := t.TempDir()
+	fwd := func(arg, fn string) string {
+		return "it forwards its arguments as a command (" + arg + ", through the function " + fn + "), which the check cannot resolve; call the command directly"
+	}
+	pass := func(arg, fn string) string {
+		return "it passes " + arg + " to the function " + fn + ", which runs its arguments as a command; the check cannot resolve what it holds; call the command directly"
+	}
+	for _, c := range []struct{ text, want string }{
+		{"main() { for i in 1 2 3; do \"$@\" && return 0; done; return 1; }\nmain \"$@\"", fwd("$@", "main")},
+		{"function main { while ! \"$@\"; do sleep 1; done; }\nmain \"$@\"", fwd("$@", "main")},
+		{"main()\n{\n\texec \"${@}\"\n}\nmain \"${@}\"", fwd("${@}", "main")},
+		{"r() { sudo -E \"$1\"; }\nr \"$1\"", fwd("$1", "r")},
+		{"r() { \"$@\"; }\nr --verbose \"${@:2}\"", fwd("${@:2}", "r")},
+		{"r() { n=$1; shift; timeout 5 \"$@\"; }\nr \"$*\"", fwd("$*", "r")},
+		{"S=sudo\nr() { $S \"$@\"; }\nr \"$@\"", fwd("$@", "r")},
+		{"main() { inner() { \"$@\"; }; inner \"$@\"; }\nmain \"$@\"", fwd("$@", "main")},
+		{"a() { \"$@\"; }\nb() { a \"$@\"; }\nc() { b \"$1\" x; }\nif c \"$@\"; then :; fi", fwd("$@", "c")},
+		{"main() { \"$@\"; }\neval 'main \"$@\"'", fwd("$@", "main")},
+		{"main() { \"$@\"; }\nout=$(main \"$@\")", fwd("$@", "main")},
+		// #68 review B, B1: any operator, and any variable at the top level.
+		{"main() { \"$@\"; }\nmain ${1+\"$@\"}", fwd("${1+\"$@\"}", "main")},
+		{"main() { \"$@\"; }\nmain \"${1=x}\"", fwd("${1=x}", "main")},
+		{"inner() { \"$@\"; }\nmain() { inner ${1+\"$@\"}; }\nmain \"$@\"", fwd("$@", "main")},
+		{"main() { \"$@\"; }\nargs=(\"$@\")\nmain \"${args[@]}\"", pass("${args[@]}", "main")},
+		{"main() { \"$@\"; }\ncmd=\"$*\"\nmain $cmd", pass("$cmd", "main")},
+		{"main() { \"$@\"; }\nmain \"$(cat cmd.txt)\"", pass("$(cat cmd.txt)", "main")},
+		{"main() { \"$@\"; }\nmain \"$HOME\" \"$@\"", fwd("$@", "main")},
+		// #68 review A, A1 / review B, B2: a copy of the arguments made in
+		// a body and passed on makes that function forwarding.
+		{"retry() { \"$@\"; }\nmain() { local args=(\"$@\"); retry \"${args[@]}\"; }\nmain \"$@\"", fwd("$@", "main")},
+		{"retry() { \"$@\"; }\nmain() { declare -a a; a+=(\"$@\"); retry \"${a[*]:0}\"; }\nmain \"$@\"", fwd("$@", "main")},
+		{"run() { \"$@\"; }\nmain() { local c=\"$*\"; run $c; }\nmain \"$@\"", fwd("$@", "main")},
+		{"run() { \"$@\"; }\nmain() { c=\"${@:2}\"; run \"${c}\"; }\nmain \"$@\"", fwd("$@", "main")},
+		{"run() { \"$@\"; }\nmain() { local a; read -r -a a <<< \"$*\"; run \"${a[@]}\"; }\nmain \"$@\"", fwd("$@", "main")},
+		{"run() { \"$@\"; }\nmain() { read -r line <<<\"$@\"; run $line; }\nmain \"$@\"", fwd("$@", "main")},
+		{"run() { \"$@\"; }\nmain() { mapfile -t a <<< \"$*\"; run \"${a[@]}\"; }\nmain \"$@\"", fwd("$@", "main")},
+	} {
+		_, problems := referencedTexts(root, c.text, "", true)
+		if !slices.Contains(problems, c.want) {
+			t.Errorf("referencedTexts(%q): problems %q, want %q", c.text, problems, c.want)
+		}
+	}
+	for _, text := range []string{
+		"say() { echo \"$1\"; }\nsay \"$@\"",
+		"flag() { git log --format \"$1\"; }\nflag \"$1\"",
+		"stamp() { date -u; }\nstamp \"$@\"",
+		"each() { for a in \"$@\"; do echo \"$a\"; done; }\neach \"$@\"",
+		"quietly() { \"$@\" >/dev/null; }\nquietly date -u",
+		"run() { \"$@\"; }\nouter() { run \"$@\"; }\nouter make --version",
+		"run() { \"$@\"; }\necho run \"$@\"",
+		"inner() { \"$@\"; }\nmain() { inner date; }\nmain \"$@\"",
+		// A body that passes a variable on does not make its function
+		// forwarding; only the top-level call is held to that.
+		"inner() { \"$@\"; }\nmain() { x=date; inner \"$x\"; }\nmain \"$@\"",
+		"say() { echo \"$1\"; }\nsay \"$HOME\" `date`",
+		// Data passed on in a body is not a copy of the arguments: $1
+		// copies, values without $@/$*, and arrays to a function that
+		// does not forward (image-test.sh's "${health_flags[@]}").
+		"inner() { \"$@\"; }\nmain() { local c=$1 want=$2; inner \"$c\" $want; }\nmain \"$@\"",
+		"inner() { \"$@\"; }\nmain() { local n=\"$#\"; inner $n; }\nmain \"$@\"",
+		"inner() { \"$@\"; }\nmain() { read -r x <<< \"$1\"; inner $x; }\nmain \"$@\"",
+		"start() { docker run -d \"$@\"; }\nf=(--rm)\nmain() { start \"${f[@]}\" \"$@\"; }\nmain \"$@\"",
+	} {
+		if _, problems := referencedTexts(root, text, "", true); len(problems) > 0 {
+			t.Errorf("referencedTexts(%q): problems %q, want none", text, problems)
+		}
+	}
+}
+
 // TestShellCommands: quotes, substitutions and comments.
 func TestShellCommands(t *testing.T) {
 	got := shellCommands("a \"b c\" 'd e' $(f g)/h # i\nj ${K:-x}/l `m n`; o")
