@@ -658,7 +658,7 @@ func (w *refWalk) command(words []string, lit map[string][]string, inFunc bool, 
 				w.command(replace(nil), lit, inFunc, dirs, file, depth+1)
 				return
 			}
-			w.problem("it forwards its arguments as a command (%s), which the check cannot resolve; call the command directly or wrap it in a function", words[i])
+			w.problem("it forwards its arguments as a command (%s), which the check cannot resolve; call the command directly", words[i])
 			return
 		}
 	}

@@ -332,7 +332,7 @@ lives, also under a skipped path.
          it forwards the caller's arguments as a command, which the check
          does not model (`shift`, `set --`, forwarding through more
          scripts): it is reported, and the fix is to call the command
-         directly or wrap it in a function;
+         directly;
        - no step of the job writes `GITHUB_ENV` or `GITHUB_PATH` (in what it
          runs, as above, or with `core.exportVariable`/`core.addPath` in a
          github-script), except the commit time (`SOURCE_DATE_EPOCH`) and
