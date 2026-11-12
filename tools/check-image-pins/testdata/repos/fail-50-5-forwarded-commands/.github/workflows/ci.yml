@@ -1,0 +1,33 @@
+# #50 delta review B, findings 1 and 2 (and review A delta, finding 2):
+# commands round 2's exceptions skipped whole. scripts/ci.sh runs
+# `make publish`, and publish pushes by tag. Each step runs after the
+# build with no verify step before it.
+# - a command word in a variable that holds a plain command name: $SUDO
+#   is a prefix, "$shell" an interpreter;
+# - "$@" at the top level of a retry wrapper: it runs the caller's words
+#   (`make publish`), or a variable the caller passes ("$SAVE");
+# - control: "$@" inside a function body, and $SUDO set to nothing.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - run: SUDO=sudo; $SUDO sh scripts/ci.sh
+      - run: shell=bash; "$shell" scripts/ci.sh
+      - run: sh scripts/retry.sh make publish
+      - env:
+          SAVE: scripts/ci.sh
+        run: sh scripts/retry.sh "$SAVE"
+      - run: SUDO=; $SUDO true && sh scripts/quiet.sh "$RUNNER_TEMP"

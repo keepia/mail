@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -74,6 +75,7 @@ type refItem struct {
 	file  string   // absolute path of the file the text is from; "" for a step's text
 	shell bool     // a shell text: its commands are read
 	depth int
+	args  []string // the words its caller passed after the script's path
 }
 
 type refWalk struct {
@@ -140,7 +142,7 @@ func (w *refWalk) run() {
 			}
 		}
 		if it.shell {
-			w.commands(text, dirs, it.file, it.depth)
+			w.commands(text, dirs, it.file, it.depth, it.args)
 		}
 	}
 }
@@ -264,8 +266,12 @@ func isActionFile(p string) bool {
 // follow adds a file: its text, and the item that resolves what it runs
 // or names. script is set when a command runs it, and shell when its
 // commands are read as shell. A file that is not text (a binary) is not
-// read; running one is a problem (#50 review A, finding 2e).
-func (w *refWalk) follow(p string, script, shell bool, dirs []string, depth int) {
+// read; running one is a problem (#50 review A, finding 2e). args are
+// the words a command passed after the script's path: a script's
+// commands are read once per distinct args, because "$@" at its top level
+// runs them.
+func (w *refWalk) follow(p string, script, shell bool, dirs []string, depth int, args ...string) {
+	key := p + "\x00" + strings.Join(args, "\x00")
 	p = filepath.Clean(p)
 	rel := filepath.ToSlash(mustRel(w.root, p))
 	if _, seen := w.src[p]; !seen {
@@ -293,8 +299,8 @@ func (w *refWalk) follow(p string, script, shell bool, dirs []string, depth int)
 			return
 		}
 		w.out = append(w.out, refText{rel, string(src), script})
-		w.scanned[p] = script && shell
-		w.queue = append(w.queue, refItem{text: string(src), dirs: dirs, file: p, shell: script && shell, depth: depth})
+		w.scanned[key] = script && shell
+		w.queue = append(w.queue, refItem{text: string(src), dirs: dirs, file: p, shell: script && shell, depth: depth, args: args})
 		if script {
 			w.ran[p] = true
 		}
@@ -312,9 +318,9 @@ func (w *refWalk) follow(p string, script, shell bool, dirs []string, depth int)
 			}
 		}
 	}
-	if script && shell && !w.scanned[p] && !isActionFile(p) {
-		w.scanned[p] = true
-		w.queue = append(w.queue, refItem{text: w.src[p], dirs: dirs, file: p, shell: true, depth: depth})
+	if script && shell && !w.scanned[key] && !isActionFile(p) {
+		w.scanned[key] = true
+		w.queue = append(w.queue, refItem{text: w.src[p], dirs: dirs, file: p, shell: true, depth: depth, args: args})
 	}
 }
 
@@ -447,20 +453,20 @@ func dropRedirects(words []string) []string {
 }
 
 // commandTarget returns what a command runs: the script file it names
-// (script), an inline command (inline, shell or not), or make's
-// arguments (isMake).
-func commandTarget(words []string) (script string, lang int, inline string, inlineShell bool, makeArgs []string, isMake bool) {
+// (script, with the words after it in args), an inline command (inline,
+// shell or not), or make's arguments (isMake).
+func commandTarget(words []string) (script string, lang int, args []string, inline string, inlineShell bool, makeArgs []string, isMake bool) {
 	words = dropRedirects(words)
 	i := commandStart(words)
 	if i >= len(words) {
-		return "", 0, "", false, nil, false
+		return "", 0, nil, "", false, nil, false
 	}
 	w0, base := words[i], path.Base(words[i])
 	switch base {
 	case "eval":
-		return "", 0, strings.Join(words[i+1:], " "), true, nil, false
+		return "", 0, nil, strings.Join(words[i+1:], " "), true, nil, false
 	case "make", "gmake":
-		return "", 0, "", false, words[i+1:], true
+		return "", 0, nil, "", false, words[i+1:], true
 	}
 	name := base
 	if a, ok := interpAlias[name]; ok {
@@ -475,32 +481,37 @@ func commandTarget(words []string) (script string, lang int, inline string, inli
 			a := words[j]
 			switch {
 			case a == "-":
-				return "", 0, "", false, nil, false // the program comes from stdin
+				return "", 0, nil, "", false, nil, false // the program comes from stdin
 			case in.inline[a] || (in.inlineDash && len(a) > 2 && a[0] == '-' && a[1] != '-' && strings.HasSuffix(a, "c")):
 				if j+1 < len(words) {
-					return "", 0, words[j+1], in.shell, nil, false
+					return "", 0, nil, words[j+1], in.shell, nil, false
 				}
-				return "", 0, "", false, nil, false
+				return "", 0, nil, "", false, nil, false
 			case in.values[a] || (in.shell && len(a) > 2 && (a[0] == '-' || a[0] == '+') && a[1] != '-' && strings.ContainsAny(a[len(a)-1:], "oO")):
 				j++ // -o pipefail, -euo pipefail: the flag takes the next word
 			case strings.HasPrefix(a, "-") || strings.HasPrefix(a, "+"):
 			default:
-				return a, lang, "", false, nil, false
+				return a, lang, words[j+1:], "", false, nil, false
 			}
 		}
-		return "", 0, "", false, nil, false
+		return "", 0, nil, "", false, nil, false
 	}
 	if looksLikeScript(w0) || strings.ContainsAny(w0, "$`") {
-		return w0, langDirect, "", false, nil, false
+		return w0, langDirect, words[i+1:], "", false, nil, false
 	}
-	return "", 0, "", false, nil, false
+	return "", 0, nil, "", false, nil, false
 }
 
 // literalCommands returns the variables a shell text assigns only literal
 // command names (no $, `, / or space), such as sudo=sudo: running "$sudo"
 // runs a command on PATH, not a script.
-func literalCommands(text string) map[string]bool {
-	out := map[string]bool{}
+//
+// It returns each such variable with the values it is assigned ("" for
+// sudo=). commands substitutes them into the command word and reads the
+// command again, so `$SUDO sh x` still runs x (#50 delta review B,
+// finding 1).
+func literalCommands(text string) map[string][]string {
+	out := map[string][]string{}
 	bad := map[string]bool{}
 	for _, words := range shellCommands(text) {
 		for _, wd := range words {
@@ -510,8 +521,8 @@ func literalCommands(text string) map[string]bool {
 			}
 			if strings.ContainsAny(m[2], "$`/ \t") {
 				bad[m[1]] = true
-			} else {
-				out[m[1]] = true
+			} else if !slices.Contains(out[m[1]], m[2]) {
+				out[m[1]] = append(out[m[1]], m[2])
 			}
 		}
 	}
@@ -519,6 +530,30 @@ func literalCommands(text string) map[string]bool {
 		delete(out, n)
 	}
 	return out
+}
+
+// shellFunction finds the start of a shell function definition, up to
+// its opening brace: `name() {` or `function name {`.
+var shellFunction = regexp.MustCompile(`(?m)(?:^|[;&|]|\s)(?:function\s+[A-Za-z_][\w:-]*\s*(?:\(\s*\))?|[A-Za-z_][\w:-]*\s*\(\s*\))\s*\{`)
+
+// splitFunctions returns a shell text without its function bodies, and
+// the bodies.
+func splitFunctions(text string) (string, []string) {
+	var top strings.Builder
+	var bodies []string
+	rest := text
+	for {
+		loc := shellFunction.FindStringIndex(rest)
+		if loc == nil {
+			top.WriteString(rest)
+			return top.String(), bodies
+		}
+		open := loc[1] - 1
+		end := matchClose(rest, open)
+		top.WriteString(rest[:open] + "\n")
+		bodies = append(bodies, rest[open+1:end])
+		rest = rest[end+1:]
+	}
 }
 
 var (
@@ -571,33 +606,86 @@ func looksLikeScript(w string) bool {
 
 // commands reads the commands of a shell text: the scripts they run,
 // inline commands, and make.
-func (w *refWalk) commands(text string, dirs []string, file string, depth int) {
+//
+// args are the words the caller passed after the script's path (nil for
+// a step's own text). Function bodies are read apart from the top level:
+// see command for "$@".
+func (w *refWalk) commands(text string, dirs []string, file string, depth int, args []string) {
 	if depth > 8 {
 		w.problem("its commands nest too deep for the check")
 		return
 	}
-	literal := literalCommands(text)
-	for _, words := range shellCommands(text) {
-		script, lang, inline, inlineShell, makeArgs, isMake := commandTarget(words)
-		if m := bareVar.FindStringSubmatch(script); m != nil && literal[m[1]] {
-			continue // "$sudo" with sudo=sudo: a command on PATH
+	lit := literalCommands(text)
+	top, bodies := splitFunctions(text)
+	for _, words := range shellCommands(top) {
+		w.command(words, lit, false, args, dirs, file, depth)
+	}
+	for _, b := range bodies {
+		for _, words := range shellCommands(b) {
+			w.command(words, lit, true, args, dirs, file, depth)
 		}
-		if file != "" && positional.MatchString(script) {
-			// "$@" in a script runs the words its caller passed; those are
-			// in the caller's text, whose words are followed as files.
-			continue
+	}
+}
+
+// command reads one command. An exception may skip a word, never the
+// whole command (#50 delta review B):
+//   - a command word that is a variable the text assigns only literal
+//     command names ($SUDO with SUDO=sudo) is replaced by each value and
+//     the command is read again: sudo is then a prefix, bash an
+//     interpreter;
+//   - "$@", "$*" or "$N" as the command word inside a function body
+//     runs the function's arguments, words of the same text: that word
+//     is skipped and the rest of the command read;
+//   - the same at the top level of a script runs the caller's words after
+//     the script's path: they are put in its place and the command is
+//     read again, so `sh retry.sh make publish` reads `make publish`, and
+//     `sh retry.sh "$X"` reports $X.
+//
+// Any other command word with a variable ("$SAVE", the "$CMD" of sh -c
+// "$CMD") does not resolve and is reported (#50 review B, finding 3).
+func (w *refWalk) command(words []string, lit map[string][]string, inFunc bool, args []string, dirs []string, file string, depth int) {
+	if depth > 8 {
+		w.problem("its commands nest too deep for the check")
+		return
+	}
+	words = dropRedirects(words)
+	if i := commandStart(words); i < len(words) {
+		replace := func(with []string) []string {
+			out := append(slices.Clone(words[:i]), with...)
+			return append(out, words[i+1:]...)
 		}
-		switch {
-		case inline != "" && inlineShell:
-			w.commands(inline, dirs, file, depth+1)
-		case isMake:
-			w.makeCall(makeArgs, dirs, file, depth)
-		case script != "":
-			// A command word with a variable ("$SAVE", the "$CMD" of
-			// sh -c "$CMD") does not resolve: reported (#50 review B,
-			// finding 3).
-			w.script(script, lang, dirs, file, depth)
+		if m := bareVar.FindStringSubmatch(words[i]); m != nil && len(lit[m[1]]) > 0 {
+			for _, v := range lit[m[1]] {
+				w.command(replace(strings.Fields(v)), nil, inFunc, args, dirs, file, depth+1)
+			}
+			return
 		}
+		if m := positional.FindStringSubmatch(words[i]); m != nil && file != "" {
+			if inFunc {
+				w.command(replace(nil), lit, inFunc, args, dirs, file, depth+1)
+				return
+			}
+			var with []string
+			switch m[1] {
+			case "@", "*":
+				with = args
+			default:
+				if n, err := strconv.Atoi(m[1]); err == nil && n >= 1 && n <= len(args) {
+					with = args[n-1 : n]
+				}
+			}
+			w.command(replace(with), nil, inFunc, nil, dirs, file, depth+1)
+			return
+		}
+	}
+	script, lang, scriptArgs, inline, inlineShell, makeArgs, isMake := commandTarget(words)
+	switch {
+	case inline != "" && inlineShell:
+		w.commands(inline, dirs, file, depth+1, nil)
+	case isMake:
+		w.makeCall(makeArgs, dirs, file, depth)
+	case script != "":
+		w.script(script, lang, scriptArgs, dirs, file, depth)
 	}
 }
 
@@ -606,7 +694,7 @@ func (w *refWalk) commands(text string, dirs []string, file string, depth int) {
 // script is read: as shell, or (langOther) only for image commands;
 // langDirect means the command runs the file itself, and its #! line
 // decides.
-func (w *refWalk) script(word string, lang int, dirs []string, file string, depth int) {
+func (w *refWalk) script(word string, lang int, args, dirs []string, file string, depth int) {
 	for _, d := range systemDirs {
 		if strings.HasPrefix(word, d) {
 			return
@@ -620,7 +708,7 @@ func (w *refWalk) script(word string, lang int, dirs []string, file string, dept
 			}
 			if t, ok := targets(c); ok && len(t) > 0 {
 				for _, p := range t {
-					w.follow(p, true, scriptIsShell(p, lang), dirs, depth+1)
+					w.follow(p, true, scriptIsShell(p, lang), dirs, depth+1, args...)
 				}
 				found = true
 			}
@@ -785,7 +873,11 @@ func (w *refWalk) makeCall(args []string, dirs []string, file string, depth int)
 		return
 	}
 	text := expandMake(strings.Join(recipe, "\n"), vars)
-	w.out = append(w.out, refText{rel + " (make " + strings.Join(goals, " ") + ")", text, true})
+	rt := refText{rel + " (make " + strings.Join(goals, " ") + ")", text, true}
+	if slices.Contains(w.out, rt) {
+		return // the same make call twice (`"$@" || "$@"`)
+	}
+	w.out = append(w.out, rt)
 	w.queue = append(w.queue, refItem{text: text, dirs: makeDirs, file: mfPath, shell: true, depth: depth + 1})
 }
 

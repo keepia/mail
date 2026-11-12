@@ -1,0 +1,7 @@
+job build: step 3 tests, saves, pushes or tags the image; the step right before must be
+job build: step 3 pushes ghcr.io/keepia/mail-root:dev by a name it did not tag from "$VERIFIED_IMAGE"
+job build: step 4 tests, saves, pushes or tags the image; the step right before must be
+job build: step 4 pushes ghcr.io/keepia/mail-root:dev by a name it did not tag from "$VERIFIED_IMAGE"
+job build: step 5 tests, saves, pushes or tags the image; the step right before must be
+job build: step 5 pushes ghcr.io/keepia/mail-root:dev by a name it did not tag from "$VERIFIED_IMAGE"
+job build: step 6: it runs $SAVE, which the check cannot resolve to a file in the repository

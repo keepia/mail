@@ -324,7 +324,12 @@ lives, also under a skipped path.
          explicit rule, a prerequisite with neither rule nor file, or a
          Makefile that uses a conditional, `define`, `.DEFAULT_GOAL`,
          `$(eval)` or `$(call)`), or that names more than 200 files, is
-         reported;
+         reported. An exception may skip a word, never a whole command: a
+         variable the script sets only to plain command names (`SUDO=sudo`)
+         is replaced by its value and the command read again; `"$@"` or
+         `"$N"` at a script's top level is replaced by the words its caller
+         passed after the script's path, and is skipped only inside a
+         function body, where the arguments are words of the same text;
        - no step of the job writes `GITHUB_ENV` or `GITHUB_PATH` (in what it
          runs, as above, or with `core.exportVariable`/`core.addPath` in a
          github-script), except the commit time (`SOURCE_DATE_EPOCH`) and
