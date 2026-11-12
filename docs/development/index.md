@@ -73,14 +73,25 @@ is a no-op; the first tables come with the data model (#2).
 ## Wrapper
 
 `km` runs `keepia-mail` commands through Docker Compose, for example
-`./km migrate`. It starts the Compose service `postgres` (`docker compose up
--d --wait postgres`), then runs the command in a one-off container of the
-service `keepia`, whose entrypoint is `keepia-mail` (`docker compose run
---rm -T keepia …`), with `--build` when a `Dockerfile` lies next to it. Its
-exit status is the command's. That is the contract the Compose template of
-#5 meets; the image's health probe is `keepia-mail healthcheck` (exit 0 when
-`/healthz` answers 200), because the image has no curl. The tests use a fake
-`docker` (`cmd/keepia-mail/km_test.go`).
+`./km migrate`. The local flow is:
+
+```sh
+make images      # build the images, the only local build path
+./km migrate     # then run keepia-mail commands
+```
+
+`km` never builds (#56), so a CI job can run it without a second, unchecked
+build path. It first looks up the image of the Compose service `keepia`
+(`docker compose config --images keepia`); if that image is not in the local
+Docker store, it starts nothing, exits non-zero and names `make images`.
+Otherwise it starts the services `postgres` (`docker compose up -d --wait
+--no-build postgres`) and `keepia` (`docker compose up -d --no-build
+keepia`), then runs the command in the running container (`docker compose
+exec -T keepia keepia-mail …`). Its exit status is the command's. That is
+the contract the Compose template of #5 meets; the image's health probe is
+`keepia-mail healthcheck` (exit 0 when `/healthz` answers 200), because the
+image has no curl. The tests use a fake `docker`
+(`cmd/keepia-mail/km_test.go`).
 
 Architecture and resource budget: [architecture.md](architecture.md).
 

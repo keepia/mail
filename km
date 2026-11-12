@@ -4,20 +4,24 @@
 #   ./km migrate
 #   ./km migrate status
 #
-# Starts PostgreSQL (Compose service postgres) if needed, then runs the
-# command in a one-off container of the Compose service keepia, whose
-# entrypoint is keepia-mail, and removes it afterwards. Next to a
-# Dockerfile (a source checkout) it rebuilds the image first, fast when
-# cached; in a release bundle it uses the released image. Docker Compose's
-# progress output is hidden. The exit status is the command's.
+# Starts PostgreSQL (Compose service postgres) and the Compose service
+# keepia if needed, then runs `keepia-mail <arguments>` in the running
+# keepia container. km never builds an image (#56): images are built only
+# by `make images` or CI's checked build. If the image of the service
+# keepia is not in the local Docker store, km stops before starting
+# anything and names `make images`. Docker Compose's progress output is
+# hidden. The exit status is the command's.
 set -eu
 
 cd "$(dirname "$0")"
 
-build=
-if [ -f Dockerfile ]; then
-	build=--build
+image=$(docker compose --progress quiet config --images keepia)
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+	echo "km: the image $image of the Compose service keepia is missing." >&2
+	echo "km: build it with \`make images\` in a source checkout (km does not build), or pull a released image." >&2
+	exit 1
 fi
 
-docker compose --progress quiet up -d --wait postgres
-exec docker compose --progress quiet run --rm $build -T keepia "$@"
+docker compose --progress quiet up -d --wait --no-build postgres
+docker compose --progress quiet up -d --no-build keepia
+exec docker compose --progress quiet exec -T keepia keepia-mail "$@"
