@@ -13,9 +13,11 @@
 
 # HeinleinSupport/olefy at commit 9c01c571f11da1a41dda33b75e46d45d303270e4
 # (2026-11-05, the newest on master when #44 pinned it), as GitHub's commit
-# archive. check-source ties the archive to that commit's tree.
+# archive. Its sha256 was taken from CI's own download (BuildKit's digest
+# mismatch against a placeholder, the same on amd64 and arm64; #44), and
+# check-source ties the archive to that commit's tree.
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS source
-ADD --checksum=sha256:0000000000000000000000000000000000000000000000000000000000000000 https://github.com/HeinleinSupport/olefy/archive/9c01c571f11da1a41dda33b75e46d45d303270e4.tar.gz /tmp/olefy.tar.gz
+ADD --checksum=sha256:ad84687d875a1e4a8687224e9c97907e3711a730fc468482c06172a4ea500b2e https://github.com/HeinleinSupport/olefy/archive/9c01c571f11da1a41dda33b75e46d45d303270e4.tar.gz /tmp/olefy.tar.gz
 RUN --mount=type=bind,source=olefy/check-source,target=/tmp/check-source --mount=type=bind,source=olefy/olefy-source.sha256,target=/tmp/olefy-source.sha256 \
     sh /tmp/check-source /tmp/olefy.tar.gz /tmp/olefy-source.sha256 /src/olefy
 
