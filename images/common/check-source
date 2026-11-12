@@ -1,22 +1,35 @@
 #!/bin/sh
 # check-source: unpacks a pinned source archive and checks that it holds
-# exactly the files of the pinned git tree (#44, #25). ADD --checksum pins
-# the archive's bytes; this check ties those bytes to the reviewed tree,
-# taken from a clone of the upstream repository at the pinned commit or tag.
+# exactly the pinned git tree (#44, #25, #55). ADD --checksum pins the
+# archive's bytes; this check ties those bytes to the reviewed tree, taken
+# from a clone of the upstream repository at the pinned commit or tag.
 #
 # Usage: check-source ARCHIVE MANIFEST DIR
 # Unpacks ARCHIVE into DIR (without the archive's top directory) and fails
-# unless DIR holds exactly the files the manifest pins and nothing but
-# files and directories. The manifest has one of two forms:
+# unless DIR holds exactly the pinned tree: the same files with the same
+# content and modes, the same directories, and nothing else.
 #
-# - a listing: every file as "<sha256>  <path>", the way sha256sum writes
-#   it (olefy, 12 files). Every sum is checked, and DIR holds no other file.
-# - a digest, for trees of thousands of files (SOPE, SOGo): comment lines
-#   (#) and one line "listing <sha256> <count>". <sha256> is the sha256 of
-#   that same listing, sorted by path in the C locale, with one "\n" after
-#   each line; <count> is its number of files. The check computes the
-#   listing of DIR and compares both. On a mismatch it prints the listing,
-#   so a diff against one generated from the clone names the file.
+# The archive is unpacked with umask 022 and --no-same-permissions, so no
+# entry lands with a setuid, setgid or sticky bit or writable by group or
+# others, whatever the archive says. The check then reads DIR's listing:
+# one line per file or directory, sorted by path in the C locale
+# (LC_ALL=C sort -t ' ' -k4), with one "\n" after each line:
+#
+#   f <mode> <sha256> <path>   a file: its octal mode (644 or 755 for a git
+#                              blob) and the sha256 of its content
+#   d <mode> - <path>          a directory (755), also an empty one, such as
+#                              a submodule's in GitHub's archive
+#
+# scripts/source-listing.sh writes the same listing from a clone; see
+# docs/development/index.md. Paths with a newline or a backslash are
+# rejected on both sides. The manifest has one of two forms:
+#
+# - the listing itself, after comment lines (#) (olefy). DIR's listing must
+#   equal it; a mismatch prints a diff.
+# - a digest, for trees of thousands of entries (SOPE, SOGo): comment lines
+#   and one line "listing <sha256> <count>", the sha256 of the listing and
+#   its number of lines. On a mismatch the check prints DIR's listing, so a
+#   diff against one generated from the clone names the entry.
 #
 # A path may contain spaces. The Dockerfiles bind-mount this script for one
 # RUN, so it is not in an image.
@@ -28,45 +41,69 @@ if [ $# -ne 3 ]; then
 fi
 archive=$1 manifest=$2 dir=$3
 
+lists=$(mktemp -d)
+trap 'rm -rf "$lists"' EXIT
+trap 'exit 1' HUP INT TERM
+
+umask 022
 mkdir -p "$dir"
-tar -xzf "$archive" -C "$dir" --strip-components=1 --no-same-owner
+tar -xzf "$archive" -C "$dir" --strip-components=1 --no-same-owner --no-same-permissions
 cd "$dir"
 other=$(find . ! -type f ! -type d)
 if [ -n "$other" ]; then
-	echo "check-source: the archive holds entries that are not files: $other" >&2
+	echo "check-source: the archive holds entries that are not files or directories: $other" >&2
+	exit 1
+fi
+nl='
+'
+odd=$(find . -name "*$nl*" -o -name '*\\*')
+if [ -n "$odd" ]; then
+	echo "check-source: the archive holds a path with a newline or a backslash" >&2
 	exit 1
 fi
 
-lists=$(mktemp -d)
-find . -type f | sed 's|^\./||' | LC_ALL=C sort >"$lists/have"
-count=$(wc -l <"$lists/have")
+# "<sha256>  ./<path>" per file, then one listing line per entry.
+find . -type f -print0 | xargs -0 -r sha256sum -- >"$lists/sums"
+find . -mindepth 1 -printf '%y %m %P\n' >"$lists/entries"
+awk '
+	NR == FNR { sum[substr($0, 69)] = substr($0, 1, 64); next }
+	{
+		path = $0
+		sub(/^[^ ]+ [^ ]+ /, "", path)
+		if ($1 == "d") { print "d", $2, "-", path; next }
+		if (!(path in sum)) { print "check-source: no sha256 for " path > "/dev/stderr"; exit 1 }
+		print "f", $2, sum[path], path
+	}
+' "$lists/sums" "$lists/entries" >"$lists/unsorted"
+LC_ALL=C sort -t ' ' -k4 "$lists/unsorted" >"$lists/listing"
+count=$(wc -l <"$lists/listing")
+if [ "$count" -eq 0 ]; then
+	echo "check-source: the archive is empty" >&2
+	exit 1
+fi
+have_sum=$(sha256sum <"$lists/listing" | cut -d' ' -f1)
 
-digest=$(grep -v '^#' "$manifest" | grep -E '^listing [0-9a-f]{64} [0-9]+$' || true)
+grep -v '^#' "$manifest" >"$lists/want" || true
+digest=$(grep -E '^listing [0-9a-f]{64} [0-9]+$' "$lists/want" || true)
 if [ -n "$digest" ]; then
-	if [ "$(grep -v '^#' "$manifest" | wc -l)" -ne 1 ]; then
+	if [ "$(wc -l <"$lists/want")" -ne 1 ]; then
 		echo "check-source: a digest manifest has exactly one line besides comments" >&2
 		exit 1
 	fi
 	want_sum=$(echo "$digest" | cut -d' ' -f2)
 	want_count=$(echo "$digest" | cut -d' ' -f3)
-	tr '\n' '\0' <"$lists/have" | xargs -0 -r sha256sum -- >"$lists/listing"
-	have_sum=$(sha256sum <"$lists/listing" | cut -d' ' -f1)
 	if [ "$have_sum" != "$want_sum" ] || [ "$count" -ne "$want_count" ]; then
 		cat "$lists/listing" >&2
-		echo "check-source: the archive's listing (above) has sha256 $have_sum and $count files;" \
+		echo "check-source: the archive's listing (above) has sha256 $have_sum and $count entries;" \
 			"the pinned tree's has $want_sum and $want_count" >&2
 		exit 1
 	fi
-	rm -rf "$lists"
-	echo "check-source: $count files match the pinned tree (listing sha256 $have_sum)"
+	echo "check-source: $count entries match the pinned tree (listing sha256 $have_sum)"
 	exit 0
 fi
 
-sha256sum --strict --quiet -c "$manifest"
-sed 's/^[0-9a-f]\{64\}  //' "$manifest" | LC_ALL=C sort >"$lists/want"
-if ! diff -u "$lists/want" "$lists/have" >&2; then
-	echo "check-source: the archive's files differ from the pinned tree's (- manifest, + archive)" >&2
+if ! diff -u "$lists/want" "$lists/listing" >&2; then
+	echo "check-source: the archive's entries differ from the pinned tree's (- manifest, + archive)" >&2
 	exit 1
 fi
-rm -rf "$lists"
-echo "check-source: $count files match the pinned tree"
+echo "check-source: $count entries match the pinned tree"

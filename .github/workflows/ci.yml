@@ -102,6 +102,9 @@ jobs:
       # The Go toolchain check that the Dockerfile runs, with its own tests
       # (scripts/check-go-toolchain.sh, byte-identical with mail-archive).
       - run: sh scripts/check-go-toolchain-test.sh
+      # The images' shell scripts that run without Docker: check-source with
+      # source-listing.sh, and the SOGo stop wrapper keepia-sogod (#55).
+      - run: make image-scripts-test
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.14.0

@@ -15,17 +15,19 @@
 # the newest 5.x release when #25 pinned them (2026-11-12), as GitHub's tag
 # archives. Each sha256 was computed offline from a clone of the public
 # repository (git archive with GitHub's prefix, gzip -n) and matches CI's
-# own download (#25). check-source ties each archive to the tag's tree:
-# sope-source.sha256 and sogo-source.sha256 list every file with its
-# sha256, taken from the clones.
+# own download (#25). check-source (images/common/check-source) ties each
+# archive to the tag's tree: sope-source.sha256 and sogo-source.sha256 hold
+# the sha256 of the tree's listing (every file with its mode and sha256,
+# every directory) and its number of lines, taken from the clones (#55).
+# Every RUN that needs no download runs with --network=none (#55).
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS sope-source
 ADD --checksum=sha256:76efdbc86d04842fad0fd447798f6b834703f0bc17e93d9900f8789536696969 https://github.com/Alinto/sope/archive/refs/tags/SOPE-5.12.13.tar.gz /tmp/sope.tar.gz
-RUN --mount=type=bind,source=common/check-source,target=/tmp/check-source --mount=type=bind,source=sogo/sope-source.sha256,target=/tmp/sope-source.sha256 \
+RUN --network=none --mount=type=bind,source=common/check-source,target=/tmp/check-source --mount=type=bind,source=sogo/sope-source.sha256,target=/tmp/sope-source.sha256 \
     sh /tmp/check-source /tmp/sope.tar.gz /tmp/sope-source.sha256 /src/sope
 
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS sogo-source
 ADD --checksum=sha256:0c6b4cf8992634ab14c9a7860c21189cf48db69cba3d82ee76a556a0b083708b https://github.com/Alinto/sogo/archive/refs/tags/SOGo-5.12.13.tar.gz /tmp/sogo.tar.gz
-RUN --mount=type=bind,source=common/check-source,target=/tmp/check-source --mount=type=bind,source=sogo/sogo-source.sha256,target=/tmp/sogo-source.sha256 \
+RUN --network=none --mount=type=bind,source=common/check-source,target=/tmp/check-source --mount=type=bind,source=sogo/sogo-source.sha256,target=/tmp/sogo-source.sha256 \
     sh /tmp/check-source /tmp/sogo.tar.gz /tmp/sogo-source.sha256 /src/sogo
 
 # The build: SOPE is installed into this stage's system tree, so that SOGo
@@ -49,13 +51,13 @@ COPY --from=sogo-source /src/sogo /src/sogo
 # SAML2 and MFA on, libsodium found by configure; ActiveSync is built as
 # its own step there too.
 WORKDIR /src/sope
-RUN . /usr/share/GNUstep/Makefiles/GNUstep.sh \
+RUN --network=none . /usr/share/GNUstep/Makefiles/GNUstep.sh \
  && ./configure --with-gnustep --disable-debug --disable-strip --disable-mysql \
  && make -j"$(nproc)" \
  && make install GNUSTEP_INSTALLATION_DOMAIN=SYSTEM \
  && make install GNUSTEP_INSTALLATION_DOMAIN=SYSTEM DESTDIR=/out
 WORKDIR /src/sogo
-RUN . /usr/share/GNUstep/Makefiles/GNUstep.sh \
+RUN --network=none . /usr/share/GNUstep/Makefiles/GNUstep.sh \
  && ./configure --disable-debug --disable-strip --enable-saml2 --enable-mfa \
  && make -j"$(nproc)" \
  && make install GNUSTEP_INSTALLATION_DOMAIN=SYSTEM DESTDIR=/out \
@@ -69,7 +71,7 @@ RUN . /usr/share/GNUstep/Makefiles/GNUstep.sh \
 # Then only what sogod needs at run time stays: no headers, no
 # gnustep-make files and no debug symbols (every ELF file is stripped).
 # The licences of both projects go with the binaries.
-RUN cd /out/usr/lib/*/GNUstep \
+RUN --network=none cd /out/usr/lib/*/GNUstep \
  && for d in *; do \
       sys=$(dirname "$(pwd)" | sed 's|^/out||')/GNUstep/$d; \
       if [ -L "$sys" ]; then \
@@ -90,7 +92,7 @@ FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f0
 
 # The home holds GNUstep's user defaults; the spool is SOGo's mail spool
 # (the named volume sogo-spool in part 3).
-RUN groupadd --system --gid 10060 sogo \
+RUN --network=none groupadd --system --gid 10060 sogo \
  && useradd --system --uid 10060 --gid sogo \
       --home-dir /var/lib/sogo --no-create-home --shell /usr/sbin/nologin sogo \
  && install -d -o sogo -g sogo -m 0750 /var/lib/sogo /var/spool/sogo
@@ -105,7 +107,7 @@ RUN --mount=type=bind,source=common/keepia-apt-install,target=/tmp/keepia-apt-in
 COPY --from=build /out/ /
 # Fails the build if any ELF file of SOPE or SOGo (the build's /out, now
 # at /) misses a shared library at run time.
-RUN --mount=type=bind,from=build,source=/out,target=/tmp/out \
+RUN --network=none --mount=type=bind,from=build,source=/out,target=/tmp/out \
     ldconfig \
  && cd /tmp/out \
  && missing=$(find . -type f -exec sh -c 'for f; do if [ "$(head -c 4 "$f" | tail -c 3)" = ELF ]; then ldd "/${f#./}" | sed "s|^|/${f#./}: |"; fi; done' sh {} + | grep 'not found' || true) \

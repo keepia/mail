@@ -5,8 +5,8 @@
 # connects to $KEEPIA_HEALTH_ADDR:$KEEPIA_HEALTH_PORT (defaults 127.0.0.1
 # and 20000; Compose sets the container's private address), sends
 # GET /SOGo/ and requires an HTTP/1.x status line within 4 s, below the
-# image's 5 s healthcheck timeout. It reads only the status line. Any status counts: without a database
-# sogod still answers.
+# image's 5 s healthcheck timeout. It reads only the status line. Any
+# status counts: without a database sogod still answers.
 #
 # Measured red (#25, scripts/image-test.sh): every process of the
 # container stopped with SIGSTOP. The kernel still accepts the connection

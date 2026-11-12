@@ -105,34 +105,56 @@ distroless static and installs no Debian packages.
 olefy's source is one pinned commit of HeinleinSupport/olefy (the project
 has no release tags), fetched as GitHub's commit archive with
 `ADD --checksum`; the build checks that the archive holds exactly that
-commit's files ([`images/olefy/olefy-source.sha256`](../../images/olefy/olefy-source.sha256)).
-To move the pin, update the commit in the Dockerfile, the archive's
-sha256 and the file list together.
+commit's tree ([`images/olefy/olefy-source.sha256`](../../images/olefy/olefy-source.sha256)).
 
 SOGo is built from Alinto's release tags: SOPE and SOGo of the same
 release, each fetched as GitHub's tag archive with `ADD --checksum`, then
 compiled in a build stage with Debian's build dependencies. Their trees
-have thousands of files, so their manifests
+have thousands of entries, so their manifests
 ([`images/sogo/sope-source.sha256`](../../images/sogo/sope-source.sha256),
 [`images/sogo/sogo-source.sha256`](../../images/sogo/sogo-source.sha256))
-pin the sha256 of the file listing instead of the listing itself
-([`images/common/check-source`](../../images/common/check-source)). To move
-the pin to a new release `<v>`, from bare clones of `Alinto/sope` and
-`Alinto/sogo`, for each of `sope SOPE` and `sogo SOGo`:
+pin the sha256 of the tree's listing instead of the listing itself.
+
+[`images/common/check-source`](../../images/common/check-source) unpacks
+the archive (umask 022, `--no-same-permissions`, so no setuid, setgid,
+sticky or group- or world-writable entry lands) and compares its listing
+with the manifest: every file with its mode and sha256, every directory
+(also an empty one, such as a submodule's), and nothing else.
+[`scripts/source-listing.sh`](../../scripts/source-listing.sh) writes the
+same listing from a clone; `make image-scripts-test` tests both.
+
+To move a pin, compute the archive's sha256 and the tree's listing offline
+from a clone of the public repository, never from a download, and update
+the Dockerfile and the manifest together. GitHub's archives are
+`git archive` with GitHub's prefix, compressed by an external
+`gzip -cn` (git's internal gzip gives other bytes). For olefy at a new
+commit `<c>`:
 
 ```sh
-git -C sogo.git -c tar.tar.gz.command="gzip -cn" archive --format=tar.gz \
-  --prefix=sogo-SOGo-<v>/ -o sogo.tar.gz SOGo-<v>   # sha256sum: the ADD --checksum
-git -C sogo.git ls-tree -r SOGo-<v> | LC_ALL=C sort -t "$(printf '\t')" -k2 |
-  while IFS="$(printf '\t')" read -r meta path; do
-    set -- $meta; [ "$2" = blob ] || continue
-    printf '%s  %s\n' "$(git -C sogo.git cat-file blob "$3" | sha256sum | cut -d' ' -f1)" "$path"
-  done >sogo-listing.txt
-sha256sum sogo-listing.txt; wc -l sogo-listing.txt   # both go in the manifest's "listing" line
+git clone --bare https://github.com/HeinleinSupport/olefy.git olefy.git
+git --git-dir=olefy.git -c tar.tar.gz.command="gzip -cn" archive --format=tar.gz \
+  --prefix=olefy-<c>/ -o olefy.tar.gz <c>
+sha256sum olefy.tar.gz                              # the ADD --checksum
+bash scripts/source-listing.sh olefy.git <c>        # the manifest's lines, after its comments
 ```
 
-On a mismatch the build prints the archive's listing, so a `diff` against
-`sogo-listing.txt` names the file.
+For SOPE and SOGo at a new release `<v>`, for each of `sope SOPE` and
+`sogo SOGo` (shown for SOGo):
+
+```sh
+git clone --bare https://github.com/Alinto/sogo.git sogo.git
+git --git-dir=sogo.git -c tar.tar.gz.command="gzip -cn" archive --format=tar.gz \
+  --prefix=sogo-SOGo-<v>/ -o sogo.tar.gz SOGo-<v>
+sha256sum sogo.tar.gz                               # the ADD --checksum
+bash scripts/source-listing.sh sogo.git SOGo-<v> >sogo-listing.txt
+sha256sum sogo-listing.txt; wc -l <sogo-listing.txt # the manifest's "listing <sha256> <count>"
+```
+
+`--git-dir` keeps `-o` relative to the current directory (`git -C` would
+write the archive into the clone). The listing reads `git ls-tree -r -t -z`,
+so any path name comes out unquoted. On a mismatch the build prints the
+archive's listing (or, for olefy, a diff), so a `diff` against
+`sogo-listing.txt` names the entry.
 
 The Compose template "all roles on one server" follows in
 the next part of #5; the upstream images (Dovecot, rspamd, ClamAV,
