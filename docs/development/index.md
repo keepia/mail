@@ -4,6 +4,8 @@ This page grows with the code. For now it describes the checks that run on
 every pull request; setup, tests and migrations follow with the first Go
 code (#6).
 
+Architecture and resource budget: [architecture.md](architecture.md).
+
 ## Security checks
 
 The required checks are `secret-scan`, `links` and `workflows`. Each runs on
