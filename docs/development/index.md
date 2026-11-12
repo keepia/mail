@@ -244,7 +244,14 @@ make image-scripts-test           # check-source, source-listing.sh and keepia-s
 [`docker-compose.yml`](../../docker-compose.yml) holds every role, one
 profile each (architecture section 7); with
 `COMPOSE_PROFILES=control,edge,store,filter,groupware` it is the template
-"all roles on one server": 14 containers.
+"all roles on one server": 14 containers, plus the one-shot
+`edge-addresses`, which exits once it has checked the edge addresses. It
+needs Docker Engine 28 or later (the gateway mode `isolated`): Engine 27
+refuses to create the networks, and 26 or older creates them without the
+isolation, silently. [Architecture section 7](architecture.md#7-docker)
+has the check to run after the first start: the host must have no
+address in the internal subnets (`edge-public`, which is not internal,
+keeps its gateway address on the host).
 
 ```sh
 cp .env.example .env              # then set KEEPIA_POSTGRES_PASSWORD and the edge addresses
@@ -262,14 +269,34 @@ docker compose up -d --wait --no-build --pull never
 | groupware | `groupware-sogo`, `groupware-memcached` | `groupware-private` |
 
 - **Only port 25 is published**, to `EDGE_IPV4` and `EDGE_IPV6`; outbound
-  mail is SNATed to them. In 0.1.0 no traffic crosses roles (the gates
+  mail is SNATed to them. A wildcard there (`0.0.0.0`, `::` or another
+  spelling of them) is refused by
+  [`deploy/edge/check-edge-addresses.sh`](../../deploy/edge/check-edge-addresses.sh),
+  in two places. On `up`, the one-shot `edge-addresses` runs it, and
+  `edge-postfix` starts only after it exited 0, so a refused `up`
+  publishes nothing; it leaves `edge-postfix` Created with the wildcard
+  in its port bindings. A start that skips that dependency (`docker
+  compose restart`, `docker start`, `up --no-deps`) reaches the second
+  place, `edge-postfix`'s own entrypoint, which exits 1 before Postfix
+  runs. Docker publishes the port for that moment (and for each restart
+  attempt): docker-proxy can briefly accept a TCP handshake, but nothing
+  in the container listens and no data is handled (measured: 8 of 6468
+  probes accepted, no `220` banner). After a refusal, fix `.env`, then
+  run `docker compose rm -f edge-postfix` and `up` again. The check is in
+  Compose and not in `km`, because `km` never starts the edge role.
+- **The host cannot reach the internal networks:** their bridges use the
+  gateway mode `isolated` and have no host address, so host processes
+  cannot reach memcached, olefy, clamd or rspamd (no authentication), and
+  containers cannot reach host services through a bridge. Debugging from
+  the host therefore goes through `docker compose exec` or a helper
+  container on the network. In 0.1.0 no traffic crosses roles (the gates
   come with 0.2.0), Postfix has no domains (`454 4.7.1`, deferred), the
   edge Dovecot answers every lookup with a temporary failure, and every
   Unbound refuses everything but its health zone.
 - **Every container** drops all capabilities, runs with
   `no-new-privileges` and a fixed non-root uid (Postfix's master aside),
-  has its memory limit (architecture section 9), a protocol healthcheck,
-  and fixed addresses; it listens only on them or on loopback
+  has its memory limit (architecture section 9), a process limit
+  (`pids_limit`), a protocol healthcheck, and fixed addresses; it listens only on them or on loopback
   (R-BIND-PRIVATE). Programs that read their address from the
   environment or the command line (Keepia, Postgres, Valkey, memcached,
   rspamd, olefy, SOGo) keep a read-only root file system. Postfix,
@@ -279,8 +306,11 @@ docker compose up -d --wait --no-build --pull never
 - **Static configuration** lives in [`deploy/`](../../deploy)
   (`deploy/<role>/<service>/`); the agent replaces it in 0.2.0.
 - **Volumes** are named; every image `VOLUME` is covered, so Compose
-  creates no anonymous volume. Mail is in `store-mail` at exactly
-  `/srv/vmail`, the indexes in `store-index`.
+  creates no anonymous volume. The nine are `postgres-data`,
+  `valkey-data`, `postfix-spool`, `edge-vmail` (stays empty),
+  `store-mail`, `store-index`, `store-users`, `rspamd-data` and
+  `sogo-spool`. Mail is in `store-mail` at exactly `/srv/vmail`, the
+  indexes in `store-index`.
 - **Logs** go to journald (`KEEPIA_LOG_DRIVER`, `local` on a host without
   it); the host keeps them 30 days.
 - **Own image names:** `${KEEPIA_<NAME>_IMAGE:-${KEEPIA_REGISTRY}/mail-<name>:${KEEPIA_VERSION}}`
@@ -295,15 +325,26 @@ docker compose up -d --wait --no-build --pull never
   that drops the IPv6 subnets and addresses with `!reset`/`!override`.
 
 [`scripts/compose-test.sh`](../../scripts/compose-test.sh) starts the
-template (`up -d --wait --no-build --pull never`) and checks it: exactly
-the 14 containers, each with a healthcheck and healthy, and an olefy scan
-(test 6); every listening socket on the container's own address or
-loopback, none on 8080/9090 in Dovecot (test 8); the networks, fixed
-addresses and the only published port (test 9); capabilities,
-`no-new-privileges` and uids (test 10); a message over LMTP into the named
-volume `store-mail`, an empty `edge-vmail` and no anonymous volume (test
-11); the edge's `451 4.3.0` and `NO [UNAVAILABLE]` (test 12); and the edge
-SNAT and DNAT rules (test 13). It runs every test and names each failure.
+template (`up -d --wait --no-build --pull never`) and checks it. First, a
+start with `EDGE_IPV4=0.0.0.0` and then `EDGE_IPV6=::` must fail in
+`edge-addresses` without `edge-postfix` ever running, and a `docker
+start` of the `edge-postfix` that the refusal left behind must exit 1 on
+its own check, before Postfix (test 14). Then:
+exactly the 14 containers, each with a healthcheck and healthy, the guard
+exited 0, and an olefy scan (test 6); every listening socket either on
+loopback or exactly one of the container's planned listeners (protocol,
+address and port), each planned one present, none on 8080/9090 in Dovecot, read by a
+helper container in the container's network namespace (test 8); the
+networks, their gateway mode `isolated`, no host address in them, no host
+reach to rspamd, clamd, olefy or memcached while a container on the
+network reaches them, the fixed addresses and the only published port
+(test 9); capabilities, `no-new-privileges`, `pids_limit` and uids (test
+10); a message over LMTP into the named volume `store-mail`, an empty
+`edge-vmail` and no anonymous volume (test 11); the edge's `451 4.3.0`
+and `NO [UNAVAILABLE]` (test 12); and the edge SNAT and DNAT rules (test
+13). It runs every test and names each failure; every helper run is
+bounded by a timeout. It still needs sudo for the NAT rules (test 13) and,
+in CI, to put the edge addresses on loopback.
 
 ### The docker check
 
@@ -344,9 +385,12 @@ SNAT and DNAT rules (test 13). It runs every test and names each failure.
   its ID; the later steps give Compose these IDs (`KEEPIA_IMAGE`,
   `KEEPIA_POSTFIX_IMAGE`, `KEEPIA_UNBOUND_IMAGE`, `KEEPIA_OLEFY_IMAGE`,
   `KEEPIA_SOGO_IMAGE`), so nothing after the verification goes by tag. Then
-  `scripts/compose-test.sh` (tests 6 and 8–13), `./km migrate` and `./km
+  `scripts/compose-test.sh` (tests 6 and 8–14), `./km migrate` and `./km
   migrate status` (test 7: version 1 applied), `./km` with a wrong database
-  password (it must fail), and `docker compose down --volumes`. The step
+  password (it must fail, and the step names why: km's exec found the
+  recreated keepia restarting, or migrate's own login failed; that
+  keepia has restarted and its log has SQLSTATE 28P01), and `docker
+  compose down --volumes`. The step
   summary lists each container's health, memory and CPU.
 
 The `lint` job also runs `scripts/check-go-toolchain-test.sh`; the
@@ -382,9 +426,13 @@ lives, also under a skipped path.
    reported, because BuildKit expands variables in `ADD` sources;
 4. a Compose file: a service without `build:` has `image:
    name:tag@sha256:<64 hex>`; a service with `build:` names its image
-   under `${KEEPIA_REGISTRY…}`, or as `${KEEPIA_<NAME>_IMAGE:-<that
-   name>}` (a variable that replaces the whole name, in CI with the
-   verified image ID), and builds from a relative local context.
+   exactly `${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail[-<name>]`, with an
+   optional tag that is literal or `${KEEPIA_VERSION:-<tag>}` (the whole
+   name is matched, so `${KEEPIA_REGISTRY:-docker.io/…}` or
+   `${KEEPIA_REGISTRYX:-…}` fails, #61), or as
+   `${KEEPIA_<NAME>_IMAGE:-<that name>}` (a variable that replaces the
+   whole name, in CI with the verified image ID), and builds from a
+   relative local context.
    `build` may use only `context`, `dockerfile`, `args`, `target` and
    `labels` (so `x-bake`, `additional_contexts`, `dockerfile_inline`,
    `cache_from` and any new key are reported), and `args` may not set

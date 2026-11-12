@@ -130,7 +130,8 @@ image-pins:
 image-pins-test:
 	$(GO) test -count=1 ./tools/check-image-pins/
 
-## image-scripts-test: tests of check-source, source-listing.sh and keepia-sogod (no Docker, no network)
+## image-scripts-test: tests of check-source, source-listing.sh, keepia-sogod and the edge address guard (no Docker, no network)
 image-scripts-test:
 	sh scripts/check-source-test.sh
 	bash scripts/keepia-sogod-test.sh
+	sh scripts/check-edge-addresses-test.sh
