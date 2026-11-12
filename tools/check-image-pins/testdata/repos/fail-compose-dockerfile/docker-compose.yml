@@ -1,0 +1,17 @@
+# Compose builds name their Dockerfile too: it is checked whatever its
+# name and wherever it lives.
+services:
+  a:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-a:dev
+    build:
+      context: .
+      dockerfile: build.txt
+  b:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-b:dev
+    build:
+      context: prototypes
+  c:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-c:dev
+    build:
+      context: .
+      dockerfile: ../outside/Dockerfile

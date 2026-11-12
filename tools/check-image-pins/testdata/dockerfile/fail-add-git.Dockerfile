@@ -5,4 +5,5 @@ ADD --checksum=sha256:72ad8bd748fd0c4e7b5b4733af770d11543ebb2bf2697455f99f975fcd
 ADD git@example.org:team/repo.git /src
 ADD git://example.org/team/repo /src
 ADD --keep-git-dir=true https://example.org/team/repo.git?ref=v1 /src
-# want-lines: 3 4 5 6 7 7
+ADD ssh://git@example.org/team/repo /src
+# want-lines: 3 4 5 6 7 7 8

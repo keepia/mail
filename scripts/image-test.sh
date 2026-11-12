@@ -55,13 +55,21 @@ fail() {
 # in the image (5 s, 2).
 health_flags=(--health-interval 1s --health-start-period 1s --health-start-interval 1s)
 
+# mark: the events a later wait_health reads start now (nanoseconds), so a
+# state reached before, such as an unhealthy probe during start-up, cannot
+# satisfy it.
+mark() {
+	t0=$(date +%s.%N)
+}
+
 # start <container> [docker run options] -- [command]: runs a detached
-# container and records it for cleanup. Sets t0 for wait_health.
+# container and records it for cleanup. Sets t0 for wait_health; a later
+# wait that must see a new state calls mark first.
 start() {
 	local c=$1
 	shift
 	created+=("$c")
-	t0=$(date +%s)
+	mark
 	docker run -d --name "$c" --network none --security-opt no-new-privileges:true "$@" >/dev/null
 }
 
@@ -164,6 +172,9 @@ health_cycle() {
 	[ "$nnp" = 1 ] || fail "$c: NoNewPrivs is '$nnp', want 1"
 	[ "$cap" = "$want_cap" ] || fail "$c: CapEff of PID 1 is $cap, want $want_cap"
 	pass "$name: NoNewPrivs 1, CapEff of PID 1 $cap"
+	# Only an unhealthy event after the stop counts (review B 2).
+	[ "$(docker inspect -f '{{.State.Health.Status}}' "$c")" = healthy ] || fail "$c is not healthy before the stop"
+	mark
 	signal_all "$c" STOP
 	wait_health "$c" unhealthy 60
 	pass "$name unhealthy with its processes stopped: $(last_probe "$c" | tail -1)"
@@ -260,6 +271,9 @@ postfix)
 	wait_health "$prefix-chroot-y" unhealthy 60
 	# `postfix status` can block after it printed; bounded, for the log only.
 	status=$(timeout 10 docker exec "$prefix-chroot-y" postfix status 2>&1 | head -1 || true)
+	# The point of this case: the master still reports itself as running.
+	[[ $status == *"the Postfix mail system is running"* ]] ||
+		fail "postfix status with chroot = y says '$status', want 'the Postfix mail system is running'"
 	pass "postfix with chroot = y unhealthy ($(last_probe "$prefix-chroot-y")) while postfix status says: $status"
 	docker logs "$prefix-chroot-y" 2>&1 | grep -m1 'chroot(' || true
 	docker rm -f "$prefix-chroot-y" >/dev/null

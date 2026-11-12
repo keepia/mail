@@ -2,13 +2,21 @@ package main
 
 import (
 	"fmt"
+	"sort"
 
 	"go.yaml.in/yaml/v3"
 )
 
-// CheckWorkflow applies rule 6 of the image pin check to a workflow other
-// than release.yml: nothing grants `packages: write`, so only the release
-// workflow can push to GHCR. Reported are:
+// CheckWorkflow checks a workflow file.
+//
+// In every workflow, release.yml included, the images a job runs in are
+// pinned: each `jobs.<id>.container` (a string or its `image`) and each
+// `jobs.<id>.services.<name>.image` is name:tag@sha256:<64 hex>. Action
+// references (`uses: docker://…`) are tools/check-action-pins' rule.
+//
+// Rule 6 applies to every workflow except release.yml: nothing grants
+// `packages: write`, so only the release workflow can push to GHCR.
+// Reported are:
 //   - `packages: write` at workflow or job level;
 //   - `permissions: write-all` at either level (it includes packages);
 //   - a job that calls a reusable workflow (`uses:`) without its own
@@ -17,7 +25,7 @@ import (
 //     repository's default token permissions, which this check cannot see.
 //
 // Other permission values are left to review.
-func CheckWorkflow(src []byte) ([]Finding, error) {
+func CheckWorkflow(src []byte, release bool) ([]Finding, error) {
 	docs, err := parseYAML(src)
 	if err != nil {
 		return nil, err
@@ -39,7 +47,7 @@ func CheckWorkflow(src []byte) ([]Finding, error) {
 		return out, nil
 	}
 	_, topKey := mappingValue(top, "permissions")
-	if topKey != nil {
+	if topKey != nil && !release {
 		checkPermissions(topKey.Line, "workflow", wf.Permissions, add)
 	}
 	jobs, _ := mappingValue(top, "jobs")
@@ -53,6 +61,10 @@ func CheckWorkflow(src []byte) ([]Finding, error) {
 			add(name.Line, "job %s does not decode: %v", name.Value, err)
 			continue
 		}
+		checkJobImages(name.Line, name.Value, job, add)
+		if release {
+			continue
+		}
 		perms, hasPerms := job["permissions"]
 		if hasPerms {
 			checkPermissions(name.Line, "job "+name.Value, perms, add)
@@ -64,6 +76,42 @@ func CheckWorkflow(src []byte) ([]Finding, error) {
 		}
 	}
 	return out, nil
+}
+
+// checkJobImages checks the container and service images of one job. The
+// image may be a string or a mapping with `image`; any other shape, and an
+// expression (`${{ … }}`), is reported.
+func checkJobImages(line int, job string, j map[string]any, add func(int, string, ...any)) {
+	check := func(where string, v any) {
+		if m, ok := v.(map[string]any); ok {
+			v = m["image"]
+		}
+		s, ok := v.(string)
+		switch {
+		case !ok:
+			add(line, "job %s: %s has no image string", job, where)
+		case !isPinnedImage(s):
+			add(line, "job %s: %s", job, unpinnedMsg(where+" image", s))
+		}
+	}
+	if c, ok := j["container"]; ok {
+		check("container", c)
+	}
+	if s, ok := j["services"]; ok {
+		services, ok := s.(map[string]any)
+		if !ok {
+			add(line, "job %s: services is not a mapping", job)
+			return
+		}
+		names := make([]string, 0, len(services))
+		for n := range services {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			check("service "+n, services[n])
+		}
+	}
 }
 
 func checkPermissions(line int, where string, perms any, add func(int, string, ...any)) {

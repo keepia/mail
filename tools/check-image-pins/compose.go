@@ -65,34 +65,39 @@ func root(doc *yaml.Node) *yaml.Node {
 // builds from a local context. A URL context, build.additional_contexts,
 // build.dockerfile_inline, extends and a top-level include are reported:
 // they can pull images or sources this check does not see.
-func CheckCompose(src []byte) ([]Finding, error) {
+//
+// It also returns the Dockerfile of every build with a valid local context
+// (relative to the Compose file's directory), so the caller checks it with
+// the Dockerfile rules whatever its name.
+func CheckCompose(src []byte) ([]Finding, []string, error) {
 	docs, err := parseYAML(src)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var out []Finding
+	var dockerfiles []string
 	add := func(line int, format string, a ...any) {
 		out = append(out, Finding{line, fmt.Sprintf(format, a...)})
 	}
 	if len(docs) != 1 {
 		add(0, "a Compose file must hold exactly one YAML document, found %d", len(docs))
-		return out, nil
+		return out, dockerfiles, nil
 	}
 	top := root(docs[0])
 	if top.Kind != yaml.MappingNode {
 		add(top.Line, "the Compose file is not a mapping")
-		return out, nil
+		return out, dockerfiles, nil
 	}
 	if _, k := mappingValue(top, "include"); k != nil {
 		add(k.Line, "include: is not read by this check")
 	}
 	services, k := mappingValue(top, "services")
 	if services == nil {
-		return out, nil
+		return out, dockerfiles, nil
 	}
 	if services.Kind != yaml.MappingNode {
 		add(k.Line, "services: is not a mapping")
-		return out, nil
+		return out, dockerfiles, nil
 	}
 	for i := 0; i+1 < len(services.Content); i += 2 {
 		name, val := services.Content[i], services.Content[i+1]
@@ -105,12 +110,17 @@ func CheckCompose(src []byte) ([]Finding, error) {
 			add(name.Line, "service %s does not decode: %v", name.Value, err)
 			continue
 		}
-		checkService(name.Line, name.Value, svc, add)
+		if df := checkService(name.Line, name.Value, svc, add); df != "" {
+			dockerfiles = append(dockerfiles, df)
+		}
 	}
-	return out, nil
+	return out, dockerfiles, nil
 }
 
-func checkService(line int, name string, svc map[string]any, add func(int, string, ...any)) {
+// checkService applies rule 4 to one service. For a build from a valid
+// local context it returns the Dockerfile's path relative to the Compose
+// file's directory (Compose resolves `dockerfile` against the context).
+func checkService(line int, name string, svc map[string]any, add func(int, string, ...any)) string {
 	if _, ok := svc["extends"]; ok {
 		add(line, "service %s: extends is not read by this check", name)
 	}
@@ -118,7 +128,7 @@ func checkService(line int, name string, svc map[string]any, add func(int, strin
 	imageStr, isStr := image.(string)
 	if hasImage && !isStr {
 		add(line, "service %s: image is not a string", name)
-		return
+		return ""
 	}
 	build, hasBuild := svc["build"]
 	if !hasBuild {
@@ -128,12 +138,12 @@ func checkService(line int, name string, svc map[string]any, add func(int, strin
 		case !isPinnedImage(imageStr):
 			add(line, "service %s: %s", name, unpinnedMsg("image", imageStr))
 		}
-		return
+		return ""
 	}
 	if !strings.HasPrefix(imageStr, registryPrefix) {
 		add(line, "service %s builds an image; name it under %s...}", name, registryPrefix)
 	}
-	context := "."
+	context, dockerfile := ".", "Dockerfile"
 	switch b := build.(type) {
 	case string:
 		context = b
@@ -142,9 +152,17 @@ func checkService(line int, name string, svc map[string]any, add func(int, strin
 			s, ok := c.(string)
 			if !ok {
 				add(line, "service %s: build.context is not a string", name)
-				return
+				return ""
 			}
 			context = s
+		}
+		if d, ok := b["dockerfile"]; ok {
+			s, ok := d.(string)
+			if !ok || !isLocalContext(s) {
+				add(line, "service %s: build.dockerfile %v is not a relative path inside the context", name, d)
+				return ""
+			}
+			dockerfile = s
 		}
 		for _, k := range []string{"additional_contexts", "dockerfile_inline"} {
 			if _, ok := b[k]; ok {
@@ -153,11 +171,13 @@ func checkService(line int, name string, svc map[string]any, add func(int, strin
 		}
 	default:
 		add(line, "service %s: build is neither a string nor a mapping", name)
-		return
+		return ""
 	}
 	if !isLocalContext(context) {
 		add(line, "service %s: build context %q is not a local relative path", name, context)
+		return ""
 	}
+	return context + "/" + dockerfile
 }
 
 // isLocalContext reports whether a build context is a relative path inside

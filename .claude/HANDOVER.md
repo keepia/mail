@@ -7,7 +7,7 @@ Current state only. At session end replace these sections; never append. History
 
 ## Open PRs
 - Runbook skeleton for the mailcow migration (#28, part 1 of #13), docs only.
-- Images part 1 (#24, part 1 of #5): Keepia, Postfix and Unbound images, `docker-build`/`docker` jobs, `tools/check-image-pins`, reload watcher. olefy is not in it (no source pin readable, see the PR).
+- Images part 1 (#24, part 1 of #5): Keepia, Postfix and Unbound images, `docker-build`/`docker` jobs, `tools/check-image-pins`, reload watcher. olefy moved to #44.
 
 ## Open tickets
 - **0.1.0 (Foundation):**

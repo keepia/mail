@@ -96,7 +96,11 @@ release (#5):
 | `ghcr.io/keepia/mail-postfix` | [`images/postfix/Dockerfile`](../../images/postfix/Dockerfile) | root master with `CHOWN DAC_OVERRIDE FOWNER SETUID SETGID`, `chroot = n` everywhere | SMTP `220 ` greeting |
 | `ghcr.io/keepia/mail-unbound` | [`images/unbound/Dockerfile`](../../images/unbound/Dockerfile) | 10053, no capabilities | `unbound-control status` |
 
-SOGo, olefy and the Compose template "all roles on one server" follow in
+Each Debian-based image lists its installed packages in
+`/usr/share/keepia/packages.txt`; the Keepia image has none, because it is
+distroless static and installs no Debian packages.
+
+SOGo, olefy (#44) and the Compose template "all roles on one server" follow in
 the next parts of #5; the upstream images (Dovecot, rspamd, ClamAV,
 Postgres, Valkey, memcached) are used unchanged, pinned by digest in the
 template.
@@ -167,34 +171,55 @@ mail-archive's; change them there first. `ci-pull-images.sh` is used by the
 ### The image pin check
 
 [`tools/check-image-pins`](../../tools/check-image-pins/main.go) walks the
-repository (except `.git`, `bin`, `prototypes` and `testdata`) and fails
-closed on any form it cannot read:
+repository and fails closed on any form it cannot read. The walk skips only
+these root paths: `.git`, `bin`, `prototypes` (C10) and the checks' own
+fixtures (`scripts/testdata`, `tools/*/testdata`). A directory with one of
+those names elsewhere is walked. A Dockerfile that a bake target or a
+Compose build names is always checked, whatever its name and wherever it
+lives, also under a skipped path.
 
 1. a Dockerfile's `# syntax=` is `name:X.Y.Z@sha256:<64 hex>`;
 2. every `FROM`, `COPY --from=` and `RUN --mount=…,from=` names an earlier
-   stage or `name:tag@sha256:<64 hex>`; only `FROM --platform` may carry a
-   variable (`$BUILDPLATFORM`, `$TARGETPLATFORM`); a `FROM` on several
-   lines and a `--flag` on a continuation line are reported;
+   stage or `name:tag@sha256:<64 hex>`; `--mount` is read as one CSV record,
+   as BuildKit does (so `"from=…"` counts); only `FROM --platform` may
+   carry a variable (`$BUILDPLATFORM`, `$TARGETPLATFORM`); a `FROM` on
+   several lines and a `--flag` on a continuation line are reported;
 3. every `ADD` from `http(s)://` has `--checksum=sha256:<64 hex>`, one URL
-   per `ADD`; `ADD` of a git URL is reported;
+   per `ADD`; `ADD` of a git URL (`git@`, `git://`, `ssh://`, `.git`, a
+   `#ref`) and any `ADD` source with a variable (`$SRC`, `${SRC}`) are
+   reported, because BuildKit expands variables in `ADD` sources;
 4. a Compose file: a service without `build:` has `image:
    name:tag@sha256:<64 hex>`; a service with `build:` names its image
    under `${KEEPIA_REGISTRY…}` and builds from a relative local context;
    a URL context, `additional_contexts`, `dockerfile_inline`, `extends` and
    `include` are reported;
-5. a `docker-bake*.hcl`: every `context` is a relative path literal; named
-   `contexts`, `dockerfile-inline` and `BUILDKIT_SYNTAX` are reported; a JSON
-   bake file is reported;
+5. the bake definition as Docker resolves it, not its HCL lines: the tool
+   runs `docker buildx bake --list` and `--print` at the root, over every
+   target, hidden ones included (inheritance, variables and one-line blocks
+   are resolved). Every `context` is a relative path inside the
+   repository, and named `contexts`, `dockerfile-inline` and a
+   `BUILDKIT_SYNTAX` argument are reported. A bake file outside the root
+   and a JSON bake file are reported;
 6. no workflow except `release.yml` grants `packages: write`, at workflow or
    job level; `permissions: write-all`, a job that calls a reusable
    workflow without its own `permissions`, and a job without permissions in
-   a workflow without them are reported.
+   a workflow without them are reported. In every workflow, `release.yml`
+   included, each job's `container` and `services` image is
+   `name:tag@sha256:<64 hex>`.
+
+**Rule 5 needs Docker.** It runs the `docker` CLI with the buildx plugin
+(no daemon needed; buildx resolves the file itself). Without it, `make
+image-pins` reports "cannot resolve the bake definition" and fails: it
+never passes a bake file unread. CI's `docker` job runs on a runner with
+Docker.
 
 It also reports here-documents and `ONBUILD` in Dockerfiles. Downloads in
 `RUN` are a review rule (`.claude/rules/docker.md`), not a heuristic. Its
-tests run it on the fixtures in `tools/check-image-pins/testdata/`; a
-fail fixture names its expected lines in its last line (`# want-lines:
-N`).
+tests run it on the fixtures in `tools/check-image-pins/testdata/`:
+single files per rule (a fail fixture names its expected lines in its last
+line, `# want-lines: N`), and whole trees in `testdata/repos/` with the
+expected findings in `WANT`. The trees with a bake file need buildx: they
+skip locally without it and fail in CI (`CI` set).
 
 ## Security checks
 

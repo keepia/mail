@@ -1,0 +1,31 @@
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-24.04
+    container: node:20
+    services:
+      db:
+        image: mirror.gcr.io/library/postgres:18
+      cache:
+        image: valkey/valkey:9.0.7-trixie@sha256:7e1deda01b64ece3167d370ab5be3452d29734feec22cbcbc69b3a64f6859d6d
+    steps:
+      - run: true
+  b:
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    services:
+      db:
+        options: --health-cmd true
+    steps:
+      - run: true
+  c:
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+    services: [db]
+    steps:
+      - run: true
+# want-lines: 5 5 15 15 24

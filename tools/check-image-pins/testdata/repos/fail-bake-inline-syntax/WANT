@@ -1,0 +1,3 @@
+target "a": dockerfile-inline is not read by this check
+target "_syntax": the BUILDKIT_SYNTAX argument overrides
+target "b": the BUILDKIT_SYNTAX argument overrides

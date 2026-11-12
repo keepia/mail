@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -41,7 +42,8 @@ type instruction struct {
 //  3. every ADD from http(s):// carries --checksum=sha256:<64 hex>; ADD of
 //     a git URL is reported.
 //
-// Forms it cannot read fail closed: an escape directive other than the
+// Forms it cannot read fail closed: an ADD source with a variable, a
+// --mount that is not valid CSV, an escape directive other than the
 // backslash, a here-document and ONBUILD are reported.
 func CheckDockerfile(src []byte) []Finding {
 	lines := strings.Split(strings.ReplaceAll(string(src), "\r\n", "\n"), "\n")
@@ -112,10 +114,15 @@ func CheckDockerfile(src []byte) []Finding {
 				}
 			case "RUN":
 				for _, v := range flagValues(flags, "--mount") {
-					for _, kv := range strings.Split(v, ",") {
+					fields, err := mountFields(v)
+					if err != nil {
+						add(in.line, "RUN --mount=%s does not parse as CSV: %v", v, err)
+						continue
+					}
+					for _, kv := range fields {
 						k, val, _ := strings.Cut(kv, "=")
 						if strings.EqualFold(strings.TrimSpace(k), "from") {
-							checkStageRef(in.line, "RUN --mount from", strings.Trim(val, `"'`), stages, nStages, add)
+							checkStageRef(in.line, "RUN --mount from", val, stages, nStages, add)
 						}
 					}
 				}
@@ -188,6 +195,25 @@ func splitFlags(args []string) (flags, rest []string) {
 		i++
 	}
 	return args[:i], args[i:]
+}
+
+// mountFields splits a --mount value into its key=value fields the way
+// BuildKit does: as one CSV record, so a quoted field such as
+// "from=busybox" loses its quotes. A value quoted as a whole
+// (--mount="type=bind,from=x") is one field that holds commas; it is split
+// once more.
+func mountFields(v string) ([]string, error) {
+	read := func(s string) ([]string, error) {
+		return csv.NewReader(strings.NewReader(s)).Read()
+	}
+	fields, err := read(v)
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 1 && strings.Contains(fields[0], ",") {
+		return read(fields[0])
+	}
+	return fields, nil
 }
 
 // flagValues returns the value of every --name=value flag. A bare --name
@@ -303,6 +329,12 @@ func checkAdd(in instruction, flags, rest []string, add func(int, string, ...any
 	urls := 0
 	for _, s := range srcs {
 		l := strings.ToLower(s)
+		if strings.Contains(s, "$") {
+			// BuildKit expands ARG and ENV values in ADD sources, so a
+			// variable can hold a URL that this check never sees.
+			add(in.line, "ADD source %q uses a variable; write the source literally", s)
+			continue
+		}
 		if isGitSource(s) {
 			add(in.line, "ADD of a git URL (%s) is not allowed; ADD a release archive with --checksum", s)
 			continue

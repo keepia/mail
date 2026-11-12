@@ -1,0 +1,1 @@
+docker-bake.hcl:0: a bake file outside the repository root is not resolved by this check

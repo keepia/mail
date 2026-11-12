@@ -1,0 +1,3 @@
+target "a": dockerfile "../elsewhere/Dockerfile" is not a relative path inside the context
+target "b": dockerfile "/srv/Dockerfile" is not a relative path inside the context
+missing.Dockerfile:0: open

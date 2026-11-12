@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -11,21 +12,35 @@ import (
 )
 
 // minFixtures guards against fixture directories that lost files: the test
-// would otherwise pass on whatever is left. One pass and one fail fixture
-// per rule is the floor; the numbers are the current counts.
+// would otherwise pass on whatever is left. The numbers are the current
+// counts.
 var minFixtures = map[string]int{
-	"dockerfile": 30,
-	"compose":    14,
-	"bake":       8,
-	"workflow":   8,
+	"dockerfile": 33,
+	"compose":    15,
+	"workflow":   9,
+	"repos":      11,
 }
 
-// fixtureKind maps a testdata directory to the rules its fixtures run.
+// fixtureKind maps a testdata directory of single files to the rules its
+// fixtures run. testdata/repos holds whole trees (TestRepos).
 var fixtureKind = map[string]kind{
 	"dockerfile": kindDockerfile,
 	"compose":    kindCompose,
-	"bake":       kindBake,
 	"workflow":   kindWorkflow,
+}
+
+// checkFixture runs the rules of k on one file's source.
+func checkFixture(k kind, src []byte) ([]Finding, error) {
+	switch k {
+	case kindDockerfile:
+		return CheckDockerfile(src), nil
+	case kindCompose:
+		f, _, err := CheckCompose(src)
+		return f, err
+	case kindWorkflow:
+		return CheckWorkflow(src, false)
+	}
+	return nil, nil
 }
 
 // TestFixtures runs each rule on its fixtures in testdata/<kind>/. A pass-*
@@ -55,7 +70,7 @@ func TestFixtures(t *testing.T) {
 				case strings.HasPrefix(name, "pass-"):
 					pass++
 					if len(got) != 0 {
-						t.Errorf("want no finding, got lines %v:\n%s", got, report(k, src))
+						t.Errorf("want no finding, got lines %v:\n%s", got, fixtureReport(k, src))
 					}
 				case strings.HasPrefix(name, "fail-"):
 					fail++
@@ -64,7 +79,7 @@ func TestFixtures(t *testing.T) {
 						t.Fatalf("last line must be '# want-lines: N ...'")
 					}
 					if !slices.Equal(got, want) {
-						t.Errorf("reported lines %v, want %v:\n%s", got, want, report(k, src))
+						t.Errorf("reported lines %v, want %v:\n%s", got, want, fixtureReport(k, src))
 					}
 				default:
 					t.Errorf("fixture name must start with pass- or fail-")
@@ -79,7 +94,7 @@ func TestFixtures(t *testing.T) {
 
 // gotLines is the sorted multiset of finding lines; a parse error adds 0.
 func gotLines(k kind, src []byte) []int {
-	findings, err := checkFile(k, src)
+	findings, err := checkFixture(k, src)
 	var lines []int
 	if err != nil {
 		lines = append(lines, 0)
@@ -91,8 +106,8 @@ func gotLines(k kind, src []byte) []int {
 	return lines
 }
 
-func report(k kind, src []byte) string {
-	findings, err := checkFile(k, src)
+func fixtureReport(k kind, src []byte) string {
+	findings, err := checkFixture(k, src)
 	var b strings.Builder
 	if err != nil {
 		b.WriteString("parse error: " + err.Error() + "\n")
@@ -123,6 +138,90 @@ func wantLines(src []byte) ([]int, bool) {
 	return want, len(want) > 0
 }
 
+// haveBuildx reports whether `docker buildx` runs. Rule 5 needs it. In CI
+// (CI set) its absence fails the test instead of skipping it, so CI never
+// passes with the bake fixtures skipped.
+func haveBuildx(t *testing.T) bool {
+	t.Helper()
+	if exec.Command("docker", "buildx", "version").Run() == nil {
+		return true
+	}
+	if os.Getenv("CI") != "" {
+		t.Fatal("docker buildx is not available; the bake fixtures need it in CI")
+	}
+	return false
+}
+
+// TestRepos runs the whole check on each tree in testdata/repos/. A
+// fixture's WANT file lists one expected output fragment per line: the
+// run must print each fragment and report exactly that many findings
+// (exit 1). A pass- tree has an empty WANT and must exit 0. Trees with a
+// root docker-bake.hcl need docker buildx.
+func TestRepos(t *testing.T) {
+	dirs, err := filepath.Glob(filepath.Join("testdata", "repos", "*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) < minFixtures["repos"] {
+		t.Fatalf("only %d repo fixtures found, want at least %d", len(dirs), minFixtures["repos"])
+	}
+	buildx := haveBuildx(t)
+	for _, dir := range dirs {
+		name := filepath.Base(dir)
+		t.Run(name, func(t *testing.T) {
+			if _, err := os.Stat(filepath.Join(dir, "docker-bake.hcl")); err == nil && !buildx {
+				t.Skip("docker buildx is not available")
+			}
+			raw, err := os.ReadFile(filepath.Join(dir, "WANT"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want []string
+			for _, l := range strings.Split(string(raw), "\n") {
+				if l = strings.TrimSpace(l); l != "" {
+					want = append(want, l)
+				}
+			}
+			var out, errOut bytes.Buffer
+			code := run([]string{dir}, &out, &errOut)
+			switch {
+			case strings.HasPrefix(name, "pass-"):
+				if code != 0 || len(want) != 0 {
+					t.Fatalf("exit %d, want 0 (and an empty WANT):\n%s%s", code, out.String(), errOut.String())
+				}
+			case strings.HasPrefix(name, "fail-"):
+				if code != 1 {
+					t.Fatalf("exit %d, want 1:\n%s%s", code, out.String(), errOut.String())
+				}
+				for _, w := range want {
+					if !strings.Contains(out.String(), w) {
+						t.Errorf("output lacks %q", w)
+					}
+				}
+				if n := strings.Count(out.String(), "\n") - 1; n != len(want) {
+					t.Errorf("%d findings, want %d", n, len(want))
+				}
+				if t.Failed() {
+					t.Logf("output:\n%s%s", out.String(), errOut.String())
+				}
+			default:
+				t.Fatalf("fixture name must start with pass- or fail-")
+			}
+		})
+	}
+}
+
+// TestBakeWithoutBuildx: without the docker CLI the bake rule cannot
+// resolve the definition, and the check fails instead of passing.
+func TestBakeWithoutBuildx(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	var out, errOut bytes.Buffer
+	code := run([]string{filepath.Join("testdata", "repos", "pass-bake")}, &out, &errOut)
+	if code != 1 || !strings.Contains(out.String(), "cannot resolve the bake definition") {
+		t.Fatalf("exit %d, want 1 with 'cannot resolve the bake definition':\n%s%s", code, out.String(), errOut.String())
+	}
+}
+
 // TestClassify checks which files the walk checks, and as what.
 func TestClassify(t *testing.T) {
 	cases := map[string]kind{
@@ -138,7 +237,7 @@ func TestClassify(t *testing.T) {
 		"docker-bake.json":              kindBakeJSON,
 		".github/workflows/ci.yml":      kindWorkflow,
 		".github/workflows/x.yaml":      kindWorkflow,
-		".github/workflows/release.yml": kindNone,
+		".github/workflows/release.yml": kindReleaseWorkflow,
 		".github/dependabot.yml":        kindNone,
 		"README.md":                     kindNone,
 		"tools/x/dockerfile.go":         kindNone,
@@ -173,15 +272,15 @@ func TestRun(t *testing.T) {
 		write(t, root, ".github/workflows/ci.yml", "permissions:\n  contents: read\njobs:\n  a:\n    runs-on: x\n")
 		// release.yml may push packages.
 		write(t, root, ".github/workflows/release.yml", "permissions:\n  packages: write\n")
-		// Prototypes and testdata are not checked.
+		// The root's prototypes and the check fixtures are not walked.
 		write(t, root, "prototypes/p/Dockerfile", "FROM debian:trixie-slim\n")
-		write(t, root, "x/testdata/Dockerfile", "FROM debian:trixie-slim\n")
+		write(t, root, "tools/check-image-pins/testdata/Dockerfile", "FROM debian:trixie-slim\n")
 		var out, errOut bytes.Buffer
 		if code := run([]string{root}, &out, &errOut); code != 0 {
 			t.Fatalf("exit %d, want 0:\n%s%s", code, out.String(), errOut.String())
 		}
-		if !strings.Contains(out.String(), "1 Dockerfiles") || !strings.Contains(out.String(), "1 workflows") {
-			t.Errorf("summary does not count 1 Dockerfile and 1 workflow: %s", out.String())
+		if !strings.Contains(out.String(), "1 Dockerfiles") || !strings.Contains(out.String(), "2 workflows") {
+			t.Errorf("summary does not count 1 Dockerfile and 2 workflows: %s", out.String())
 		}
 	})
 	t.Run("findings", func(t *testing.T) {
@@ -190,6 +289,8 @@ func TestRun(t *testing.T) {
 		write(t, root, "images/a/Dockerfile", pinnedSyntaxLine+"FROM debian:trixie-slim\n")
 		write(t, root, "docker-bake.json", "{}\n")
 		write(t, root, ".github/workflows/ci.yml", "permissions:\n  packages: write\n")
+		// release.yml may push, but its job images are pinned too.
+		write(t, root, ".github/workflows/release.yml", "permissions:\n  packages: write\njobs:\n  a:\n    container: node:20\n")
 		write(t, root, "docker-compose.yml", "services: [\n")
 		var out, errOut bytes.Buffer
 		if code := run([]string{root}, &out, &errOut); code != 1 {
@@ -199,8 +300,9 @@ func TestRun(t *testing.T) {
 			filepath.Join("images", "a", "Dockerfile") + ":2: FROM image",
 			"docker-bake.json:0: a JSON bake file",
 			filepath.Join(".github", "workflows", "ci.yml") + ":1: workflow grants packages: write",
-			"docker-compose.yml: does not parse",
-			"4 finding(s) in 5 file(s)",
+			filepath.Join(".github", "workflows", "release.yml") + ":4: job a: container image \"node:20\"",
+			"docker-compose.yml:0: does not parse",
+			"5 finding(s)",
 		} {
 			if !strings.Contains(out.String(), want) {
 				t.Errorf("output lacks %q:\n%s", want, out.String())
