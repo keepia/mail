@@ -271,7 +271,7 @@ jobs:
   # build. It loads each amd64 image tar, verifies the loaded image against
   # its build's metadata (-verify-built) and gives Compose that image ID,
   # so nothing between the load and its use goes by tag. Then
-  # scripts/compose-test.sh starts every role (tests 6, 8-13) and ./km
+  # scripts/compose-test.sh starts every role (tests 6, 8-14) and ./km
   # migrate runs in the template (test 7).
   compose:
     name: compose
@@ -329,7 +329,7 @@ jobs:
         run: BAKE_METADATA=$(cat "$RUNNER_TEMP/images/image-olefy/metadata.json") GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
       - id: sogo
         run: BAKE_METADATA=$(cat "$RUNNER_TEMP/images/image-sogo/metadata.json") GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
-      - name: Compose template (tests 6 and 8-13)
+      - name: Compose template (tests 6, 8-14)
         env:
           KEEPIA_IMAGE: ${{ steps.keepia.outputs.image }}
           KEEPIA_POSTFIX_IMAGE: ${{ steps.postfix.outputs.image }}
@@ -354,7 +354,10 @@ jobs:
           grep -E '^00001_baseline\.sql +applied ' <<<"$status"
       # Test 7's counter-case: with a wrong database password km must fail.
       # Compose recreates postgres (same volume, so the old password
-      # stays) and keepia, whose serve then cannot log in.
+      # stays) and keepia, whose serve then cannot log in. km's exec fails
+      # because that keepia keeps restarting, not on migrate's own error
+      # (#61): the step asserts each link of that chain, in the new
+      # keepia container only.
       - name: ./km with a wrong database password fails (test 7)
         env:
           KEEPIA_IMAGE: ${{ steps.keepia.outputs.image }}
@@ -365,11 +368,25 @@ jobs:
           KEEPIA_POSTGRES_PASSWORD: wrong-password
         run: |
           rc=0
-          ./km migrate status || rc=$?
-          echo "km exited $rc"
+          out=$(./km migrate status 2>&1) || rc=$?
+          echo "km exited $rc: $out"
           test "$rc" != 0
-          logs=$(docker compose logs --no-log-prefix keepia)
-          grep -m1 'password authentication failed' <<<"$logs"
+          # Why km failed: normally its exec found keepia restarting; if
+          # the exec caught keepia between two restarts, migrate's own
+          # login failed. Anything else fails the step.
+          case $out in
+          *'is restarting'*) echo "cause: km's exec found keepia restarting" ;;
+          *'password authentication failed'*) echo "cause: migrate's own login failed" ;;
+          *) echo "km failed for another reason"; exit 1 ;;
+          esac
+          # keepia restarts because serve cannot log in: the recreated
+          # container has restarted, and its own log names the wrong
+          # password (SQLSTATE 28P01).
+          c=$(docker compose ps -aq keepia)
+          docker inspect -f 'keepia: {{.State.Status}}, restarts {{.RestartCount}}' "$c"
+          test "$(docker inspect -f '{{.RestartCount}}' "$c")" -gt 0
+          logs=$(docker logs "$c" 2>&1)
+          grep -m1 'password authentication failed.*28P01' <<<"$logs"
       - name: Stop and remove the template
         if: always()
         run: docker compose down --volumes --timeout 30

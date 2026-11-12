@@ -6,14 +6,19 @@
 # Copy .env.example to .env and fill it in first. The own images
 # (ghcr.io/keepia/mail*) come from `make images` locally, with the tag
 # KEEPIA_VERSION, or from a release; nothing here builds or pulls them
-# (start with `docker compose up -d --no-build`, run commands with ./km).
-# The upstream images are pinned by digest (tools/check-image-pins).
+# (start with `docker compose up -d --no-build --pull never`, run commands
+# with ./km; without --pull never, Compose would pull a missing own image's
+# mutable tag). The upstream images are pinned by digest
+# (tools/check-image-pins). Needs Docker Engine 28 or later (the internal
+# networks' gateway mode isolated).
 #
 # Every container:
 # - drops every capability and runs with no-new-privileges; only Postfix
 #   (five) and Dovecot (SYS_CHROOT) get any back (#5 plan, C13, C14);
 # - runs as a fixed non-root uid, except Postfix's master;
-# - has a memory limit (architecture section 9) and a protocol
+# - has a memory limit (architecture section 9), a process limit
+#   (pids_limit, well above what the service uses, so a fork or thread
+#   storm stops there and not at the host's limit; #61) and a protocol
 #   healthcheck (an SMTP greeting, PONG, an HTTP reply; never only a port);
 # - listens only on its fixed private address or on loopback
 #   (R-BIND-PRIVATE); programs that cannot read the address from the
@@ -26,7 +31,11 @@
 # Networks: one internal network per role (<role>-private), plus
 # filter-olefy, an internal network for rspamd and olefy only, and
 # edge-public, the only network with a way out: Postfix on port 25, which
-# is the only published port. In 0.1.0 no traffic crosses roles (the gates
+# is the only published port. The internal networks use the gateway mode
+# isolated: their bridge has no address on the host, so host processes
+# cannot reach memcached, olefy, clamd or rspamd, which have no
+# authentication, and no container reaches a host service through the
+# bridge (#61). In 0.1.0 no traffic crosses roles (the gates
 # come with 0.2.0), and every unbound refuses everything but its health
 # zone, so nothing resolves names outside the host.
 #
@@ -45,6 +54,13 @@ x-service: &service
   # KEEPIA_LOG_DRIVER=local where the host has no journald.
   logging:
     driver: ${KEEPIA_LOG_DRIVER:-journald}
+
+# The internal networks' bridge gets no address on the host (Docker 28+;
+# the mode needs internal: true). Host processes cannot reach their
+# containers, and the containers cannot reach the host (#61).
+x-isolated: &isolated
+  com.docker.network.bridge.gateway_mode_ipv4: isolated
+  com.docker.network.bridge.gateway_mode_ipv6: isolated
 
 # One probe a minute once healthy, one a second while starting (#5 plan,
 # "Healthchecks").
@@ -70,6 +86,7 @@ services:
     user: "65532:65532"
     read_only: true
     mem_limit: 128m
+    pids_limit: 128
     environment:
       KEEPIA_LISTEN: ${KEEPIA_SUBNET4:-172.29}.1.10:8080
       # The password must be URL-safe (letters, digits, - . _ ~).
@@ -90,6 +107,8 @@ services:
     user: "999:999"
     read_only: true
     mem_limit: 384m
+    # One process per connection (max_connections 100) plus its own.
+    pids_limit: 256
     command: ["postgres", "-c", "listen_addresses=${KEEPIA_SUBNET4:-172.29}.1.11"]
     environment:
       POSTGRES_USER: keepia
@@ -120,6 +139,7 @@ services:
     user: "999:999"
     read_only: true
     mem_limit: 256m
+    pids_limit: 64
     # Protected mode stays on: without a password Valkey answers only
     # loopback and gives every other client DENIED (measured). No client
     # uses it in 0.1.0; its first one comes with its password.
@@ -129,7 +149,10 @@ services:
     healthcheck:
       <<: *health
       # Over loopback, the only address protected mode serves. The reply
-      # is compared, so a DENIED or a later NOAUTH cannot pass.
+      # is compared, so a DENIED or a later NOAUTH cannot pass. When the
+      # first client brings Valkey's password (0.2.0), probe the private
+      # address with AUTH instead, so the probe covers the listener the
+      # clients use (#61).
       test: ["CMD-SHELL", "test \"$$(timeout 3 valkey-cli -h 127.0.0.1 ping)\" = PONG"]
     dns: ["${KEEPIA_SUBNET4:-172.29}.1.53"]
     networks:
@@ -146,6 +169,7 @@ services:
       dockerfile: unbound/Dockerfile
     user: "10053:10053"
     mem_limit: 128m
+    pids_limit: 64
     # The image's configuration plus this container's address (configs).
     command: ["unbound", "-d", "-p", "-c", "/etc/keepia/unbound.conf"]
     configs:
@@ -158,6 +182,29 @@ services:
 
   # ---- edge (networks 2: edge-private, 3: edge-public) ----
 
+  # Refuses an edge address that means every interface (0.0.0.0, :: and
+  # their other spellings; deploy/edge/check-edge-addresses.sh, #61). It
+  # runs once on every `up`; edge-postfix starts, and publishes port 25,
+  # only after it exited 0. In the Dovecot image the edge role pulls
+  # anyway, with no network.
+  edge-addresses:
+    <<: *service
+    profiles: [edge]
+    image: dovecot/dovecot:2.4.5@sha256:43c14def08a57f25107593cbcf64a0a6fbae84a7b9de7aa038513c9b21e91914
+    entrypoint: ["sh", "/etc/keepia/check-edge-addresses.sh"]
+    user: "65534:65534"
+    read_only: true
+    restart: "no"
+    network_mode: none
+    mem_limit: 16m
+    pids_limit: 16
+    environment:
+      EDGE_IPV4: ${EDGE_IPV4:-192.0.2.10}
+      EDGE_IPV6: ${EDGE_IPV6:-2001:db8::10}
+    configs:
+      - source: edge-addresses
+        target: /etc/keepia/check-edge-addresses.sh
+
   edge-postfix:
     <<: *service
     profiles: [edge]
@@ -169,6 +216,8 @@ services:
     # five capabilities; every master.cf service runs with chroot = n (C14).
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
     mem_limit: 128m
+    # The master and its services, each up to default_process_limit (100).
+    pids_limit: 512
     environment:
       KEEPIA_HEALTH_ADDR: ${KEEPIA_SUBNET4:-172.29}.2.10
     configs:
@@ -178,7 +227,11 @@ services:
       - postfix-spool:/var/spool/postfix
     # Only to the edge addresses. Unset, they are documentation addresses
     # (RFC 5737, RFC 3849) that no host has, so nothing is published by
-    # accident, never on every interface.
+    # accident; a wildcard is refused by edge-addresses, so never on every
+    # interface.
+    depends_on:
+      edge-addresses:
+        condition: service_completed_successfully
     ports:
       - "${EDGE_IPV4:-192.0.2.10}:25:25"
       - "[${EDGE_IPV6:-2001:db8::10}]:25:25"
@@ -200,6 +253,7 @@ services:
     cap_add: [SYS_CHROOT]
     user: "1000:1000"
     mem_limit: 256m
+    pids_limit: 128
     configs:
       - source: edge-dovecot
         target: /etc/dovecot/dovecot.conf
@@ -236,6 +290,7 @@ services:
       dockerfile: unbound/Dockerfile
     user: "10053:10053"
     mem_limit: 128m
+    pids_limit: 64
     command: ["unbound", "-d", "-p", "-c", "/etc/keepia/unbound.conf"]
     configs:
       - source: edge-unbound
@@ -254,6 +309,7 @@ services:
     cap_add: [SYS_CHROOT]
     user: "1000:1000"
     mem_limit: 512m
+    pids_limit: 256
     configs:
       - source: store-dovecot
         target: /etc/dovecot/dovecot.conf
@@ -288,6 +344,8 @@ services:
     user: "11333:11333"
     read_only: true
     mem_limit: 512m
+    # Its workers scale with the host's CPUs.
+    pids_limit: 512
     environment:
       # The normal and proxy workers' address (the image's rspamd.conf);
       # the controller stays on loopback (override.d/worker-controller.inc).
@@ -335,6 +393,7 @@ services:
     # signatures are in the image, freshclam comes with 0.3.0.
     entrypoint: ["clamd", "--foreground", "--config-file=/etc/keepia/clamd.conf"]
     mem_limit: 2944m
+    pids_limit: 128
     configs:
       - source: filter-clamd
         target: /etc/keepia/clamd.conf
@@ -362,6 +421,7 @@ services:
     # One 20 MB attachment OOM-killed it at 128 MiB; 256 MiB handled it
     # (#44). rspamd sends parts up to 10 MB (local.d/external_services.conf).
     mem_limit: 256m
+    pids_limit: 64
     environment:
       # Explicit: an empty value would bind every interface (#44).
       OLEFY_BINDADDRESS: ${KEEPIA_SUBNET4:-172.29}.7.11
@@ -384,6 +444,7 @@ services:
       dockerfile: unbound/Dockerfile
     user: "10053:10053"
     mem_limit: 128m
+    pids_limit: 64
     command: ["unbound", "-d", "-p", "-c", "/etc/keepia/unbound.conf"]
     configs:
       - source: filter-unbound
@@ -405,6 +466,7 @@ services:
     user: "10060:10060"
     read_only: true
     mem_limit: 512m
+    pids_limit: 128
     # The image's whole command with the private address as WOPort: the
     # address is part of the argument list (#25).
     command: ["/usr/local/bin/keepia-sogod", "/usr/sbin/sogod", "-WONoDetach", "YES", "-WOPort", "${KEEPIA_SUBNET4:-172.29}.6.10:20000", "-WOLogFile", "-", "-WOPidFile", "/tmp/sogod.pid"]
@@ -441,6 +503,7 @@ services:
     user: "11211:11211"
     read_only: true
     mem_limit: 64m
+    pids_limit: 64
     command: ["memcached", "-l", "${KEEPIA_SUBNET4:-172.29}.6.11", "-U", "0", "-m", "48"]
     healthcheck:
       <<: *health
@@ -459,6 +522,7 @@ networks:
   control-private:
     internal: true
     enable_ipv6: true
+    driver_opts: *isolated
     ipam:
       config:
         - subnet: ${KEEPIA_SUBNET4:-172.29}.1.0/24
@@ -466,6 +530,7 @@ networks:
   edge-private:
     internal: true
     enable_ipv6: true
+    driver_opts: *isolated
     ipam:
       config:
         - subnet: ${KEEPIA_SUBNET4:-172.29}.2.0/24
@@ -486,6 +551,7 @@ networks:
   store-private:
     internal: true
     enable_ipv6: true
+    driver_opts: *isolated
     ipam:
       config:
         - subnet: ${KEEPIA_SUBNET4:-172.29}.4.0/24
@@ -493,6 +559,7 @@ networks:
   filter-private:
     internal: true
     enable_ipv6: true
+    driver_opts: *isolated
     ipam:
       config:
         - subnet: ${KEEPIA_SUBNET4:-172.29}.5.0/24
@@ -500,6 +567,7 @@ networks:
   groupware-private:
     internal: true
     enable_ipv6: true
+    driver_opts: *isolated
     ipam:
       config:
         - subnet: ${KEEPIA_SUBNET4:-172.29}.6.0/24
@@ -508,6 +576,7 @@ networks:
   filter-olefy:
     internal: true
     enable_ipv6: true
+    driver_opts: *isolated
     ipam:
       config:
         - subnet: ${KEEPIA_SUBNET4:-172.29}.7.0/24
@@ -577,6 +646,8 @@ configs:
       smtp_tls_security_level = none
       maximal_queue_lifetime = 7d
 
+  edge-addresses:
+    file: ./deploy/edge/check-edge-addresses.sh
   edge-dovecot:
     file: ./deploy/edge/dovecot/dovecot.conf
   edge-dovecot-tempfail:

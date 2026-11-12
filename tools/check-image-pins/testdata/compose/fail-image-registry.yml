@@ -1,0 +1,34 @@
+# Rule 4 names an own image exactly as
+# ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail[-<name>][:<tag>], also as the
+# default of the override; a name that only starts with ${KEEPIA_REGISTRY
+# could default to another registry or to a different variable (#61, the
+# first two are Review B's probes on #60).
+services:
+  a:
+    image: ${KEEPIA_IMAGE:-${KEEPIA_REGISTRY:-docker.io/evil}/mail:dev}
+    build: .
+  b:
+    image: ${KEEPIA_X_IMAGE:-${KEEPIA_REGISTRYX:-busybox}:latest}
+    build: .
+  c:
+    image: ${KEEPIA_REGISTRY:-docker.io/evil}/mail:dev
+    build: .
+  d:
+    image: ${KEEPIA_REGISTRY}/mail:dev
+    build: .
+  e:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/other:dev
+    build: .
+  f:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail:dev}${X:-busybox}
+    build: .
+  g:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-a:${OTHER:-dev}
+    build: .
+  h:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-a@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    build: .
+  i:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}.evil.example.org/mail:dev
+    build: .
+# want-lines: 7 10 13 16 19 22 25 28 31

@@ -1,29 +1,43 @@
 #!/bin/bash
 # Tests the Compose template "all roles on one server" (docker-compose.yml;
-# #5 plan, tests 6 and 8-13). The CI compose job runs it after loading the
-# verified images; ./km migrate (test 7) runs in the job's next steps.
+# #5 plan, tests 6 and 8-13; #61, test 14). The CI compose job runs it
+# after loading the verified images; ./km migrate (test 7) runs in the
+# job's next steps.
 #
 # It starts every service with `docker compose up -d --wait --no-build
 # --pull never` (nothing is built or pulled: the images must already be in
 # the local store) and leaves them running; the caller stops them
 # (`docker compose down -v`). Then:
 #
+# 14  wildcard edge addresses (first, before the template starts): with
+#     EDGE_IPV4=0.0.0.0, and then EDGE_IPV6=::, starting edge-postfix
+#     fails, the guard edge-addresses names the variable, and edge-postfix
+#     never runs (#61). The partial start is removed again.
 #  6  containers and health: the project's containers are exactly the 14
-#     expected services, one each; every one has a healthcheck and is
+#     expected services, one each, plus the one-shot guard edge-addresses,
+#     which exited 0; every one of the 14 has a healthcheck and is
 #     healthy. olefy also scans with its read-only root (its /tmp is a
 #     tmpfs; without it every scan fails while the probe stays green).
 #  8  listeners (R-BIND-PRIVATE): every listening TCP socket and unconnected
-#     UDP socket of every container (/proc/<pid>/net/{tcp,tcp6,udp,udp6};
-#     a missing file is tolerated) is on one of the container's own fixed
-#     addresses or on loopback, never 0.0.0.0 or ::; Dovecot has nothing on
+#     UDP socket of every container (/proc/net/{tcp,tcp6,udp,udp6}, read
+#     by a helper container in the container's network namespace; a
+#     missing file is tolerated) is either on loopback or exactly one of
+#     the container's planned listeners (address and port, want_listen
+#     below), and every planned listener is there; so a bind on another of
+#     the container's own addresses fails too (#61). Dovecot has nothing on
 #     8080 or 9090.
-#  9  networks: every network but edge-public is internal; every container
-#     is on exactly its networks, with exactly its fixed addresses; only
-#     edge-postfix publishes, port 25 on EDGE_IPV4 and EDGE_IPV6.
+#  9  networks: every network but edge-public is internal, with the gateway
+#     mode isolated; the host has no address in their subnets and cannot
+#     reach rspamd, clamd, olefy or memcached, which a container on the
+#     same network can (#61); every container is on exactly its networks,
+#     with exactly its fixed addresses; only edge-postfix publishes, port
+#     25 on EDGE_IPV4 and EDGE_IPV6.
 # 10  privileges: CapDrop ALL, exactly the planned CapAdd (Postfix five,
 #     Dovecot SYS_CHROOT, all others none), no-new-privileges, not
-#     privileged, no host network, no Docker socket; every process runs as
-#     a non-zero uid, except Postfix's master and its launchers.
+#     privileged, no host network, no Docker socket, the template's
+#     pids_limit; every process runs as a non-zero uid, except Postfix's
+#     master and its launchers. The same for edge-addresses, which also
+#     has no network and a read-only root.
 # 11  volumes: a user line in store-users and a message over LMTP to
 #     store-dovecot land as a file in the named volume store-mail;
 #     edge-vmail stays empty; no container has an anonymous volume.
@@ -41,8 +55,9 @@
 # KEEPIA_UNBOUND_IMAGE, KEEPIA_OLEFY_IMAGE, KEEPIA_SOGO_IMAGE), and the
 # script puts EDGE_IPV4 and EDGE_IPV6 on the runner's loopback.
 #
-# Usage: scripts/compose-test.sh   (needs root or sudo to read the
-# containers' /proc and the NAT rules)
+# Usage: scripts/compose-test.sh   (needs root or sudo to read the NAT
+# rules and, in GitHub Actions, to put the edge addresses on loopback;
+# the containers' sockets are read by helper containers, without sudo)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -95,6 +110,31 @@ declare -A want_networks=(
 	[groupware-memcached]="groupware-private"
 )
 
+# The listeners each container has besides loopback (test 8): <network>:
+# <port> is the container's IPv4 address on that network, <network>/6:
+# <port> its IPv6 address. TCP and UDP count alike (Unbound has both on
+# 53). Exactly these, so a listener on another of the container's own
+# addresses (rspamd on filter-olefy) fails.
+declare -A want_listen=(
+	[keepia]="control-private:8080"
+	[postgres]="control-private:5432"
+	[valkey]="control-private:6379"
+	[control-unbound]="control-private:53"
+	[edge-postfix]="edge-private:25 edge-public:25 edge-public/6:25"
+	[edge-dovecot]="edge-private:24 edge-private:143"
+	[edge-unbound]="edge-private:53"
+	[store-dovecot]="store-private:24 store-private:143"
+	[filter-rspamd]="filter-private:11332 filter-private:11333"
+	[filter-clamd]="filter-private:3310"
+	[filter-olefy]="filter-olefy:10050"
+	[filter-unbound]="filter-private:53"
+	[groupware-sogo]="groupware-private:20000"
+	[groupware-memcached]="groupware-private:11211"
+)
+
+# The one-shot services: each runs once per start and must exit 0.
+oneshot_services=(edge-addresses)
+
 image_id='^sha256:[0-9a-f]{64}$'
 if [ "${GITHUB_ACTIONS:-}" = true ]; then
 	# The own images are the verified IDs of the loaded tars, never a tag
@@ -114,12 +154,7 @@ fi
 # The whole template, every profile: the expected addresses and volumes.
 config=$(docker compose --profile '*' config --format json)
 project=$(jq -r .name <<<"$config")
-
-# ---- start -------------------------------------------------------------
-
-echo "---- start: project $project"
-up_rc=0
-docker compose up -d --wait --wait-timeout 300 --no-build --pull never || up_rc=$?
+docker version --format 'Docker Engine {{.Server.Version}}, client {{.Client.Version}}'
 
 # container <service>: the ID of the service's container ("" if none).
 container() {
@@ -127,17 +162,86 @@ container() {
 		--filter "label=com.docker.compose.service=$1"
 }
 
+# Probes run in a helper container: the memcached image (pinned, already
+# in the store, with bash), no capabilities, either on no network
+# (volumes), on one role's internal network (a client of that role), or
+# in a container's network namespace (its sockets, test 8). Every run is
+# bounded by a timeout, and they read every reply with one.
+helper_image=$(jq -r '.services["groupware-memcached"].image' <<<"$config")
+helper() {
+	timeout 60 docker run --rm --pull never --cap-drop ALL --security-opt no-new-privileges:true "$@"
+}
+
+# client <network> <function> <arguments...>: runs the function in a
+# helper on the project's network.
+client() {
+	local net=$1 fn=$2
+	shift 2
+	helper --network "${project}_$net" --user 65534:65534 --entrypoint bash "$helper_image" \
+		-c "$(declare -f "$fn"); $fn \"\$@\"" "$fn" "$@" 2>&1
+}
+
+# tcp_open <host> <port>: a TCP connection opens within 3 s.
+tcp_open() {
+	timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$2"
+}
+
+# ---- test 14: wildcard edge addresses -------------------------------------
+
+# Before the template starts: a start of edge-postfix with a wildcard edge
+# address must fail in the guard, and edge-postfix must never run. Then
+# the partial start is removed.
+echo "---- test 14: wildcard edge addresses are refused"
+for wildcard in EDGE_IPV4=0.0.0.0 EDGE_IPV6=::; do
+	var=${wildcard%%=*}
+	rc=0
+	out=$(env "$wildcard" timeout 120 docker compose up -d --no-build --pull never edge-postfix 2>&1) || rc=$?
+	c=$(container edge-postfix)
+	# A container that never ran keeps the zero StartedAt (0001-01-01).
+	state="no container" started=0001-
+	[ -z "$c" ] || read -r state started < <(docker inspect -f '{{.State.Status}} {{.State.StartedAt}}' "$c")
+	guard=$(docker compose logs --no-log-prefix edge-addresses 2>&1 || true)
+	if [ "$state" = running ] || [[ $started != 0001-* ]]; then
+		fail "test 14: $wildcard: edge-postfix was started ($state, at $started)"
+	elif [ "$rc" != 0 ] && [[ $guard == *"keepia: $var='${wildcard#*=}'"* ]]; then
+		pass "test 14: $wildcard refused, edge-postfix never ran ($state): $(grep -m1 "$var" <<<"$guard")"
+	else
+		fail "test 14: $wildcard: up exited $rc, edge-postfix is $state, guard: $(tr '\n' ' ' <<<"$guard" | cut -c1-300); up: $(tr '\n' ' ' <<<"$out" | tail -c 300)"
+	fi
+	timeout 120 docker compose down --volumes --timeout 10 2>&1 | tail -n 3 || true
+done
+
+# ---- start -------------------------------------------------------------
+
+echo "---- start: project $project"
+up_rc=0
+docker compose up -d --wait --wait-timeout 300 --no-build --pull never || up_rc=$?
+
 # ---- test 6: containers and health -------------------------------------
 
 echo "---- test 6: containers and health"
 mapfile -t running < <(docker ps -a --filter "label=com.docker.compose.project=$project" \
 	--format '{{.Label "com.docker.compose.service"}}' | sort)
-mapfile -t want < <(printf '%s\n' "${expected_services[@]}" | sort)
+mapfile -t want < <(printf '%s\n' "${expected_services[@]}" "${oneshot_services[@]}" | sort)
 if [ "${running[*]}" = "${want[*]}" ]; then
-	pass "test 6: exactly the ${#want[@]} planned containers: ${running[*]}"
+	pass "test 6: exactly the ${#expected_services[@]} planned containers and the one-shot ${oneshot_services[*]}: ${running[*]}"
 else
 	fail "test 6: the project's containers are [${running[*]}], want [${want[*]}]"
 fi
+for s in "${oneshot_services[@]}"; do
+	c=$(container "$s")
+	if [ -z "$c" ]; then
+		fail "test 6: $s has no container"
+		continue
+	fi
+	st=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$c")
+	if [ "$st" = "exited 0" ]; then
+		pass "test 6: $s ran once and exited 0: $(docker logs "$c" 2>&1 | tail -n 1)"
+	else
+		fail "test 6: $s is '$st', want 'exited 0'"
+		docker logs "$c" >&2 || true
+	fi
+done
 for s in "${expected_services[@]}"; do
 	c=$(container "$s")
 	if [ -z "$c" ]; then
@@ -219,77 +323,113 @@ full6() {
 	echo "${out%:}"
 }
 
-# addresses <container> <IPAddress|GlobalIPv6Address>: the container's
-# addresses of that family on all its networks (an unset address prints
-# as "" or "invalid IP", depending on the Docker version).
-addresses() {
-	docker inspect -f "{{range .NetworkSettings.Networks}}{{.$2}} {{end}}" "$1" |
-		tr ' ' '\n' | grep -E '^[0-9a-fA-F.:]+$' | grep -E "$([ "$2" = IPAddress ] && echo '\.' || echo ':')" | xargs || true
+# socket_tables <container>: /proc/net/{tcp,tcp6,udp,udp6} of the
+# container's network namespace, each after a line "# <name>", read by a
+# helper that joins that namespace (no sudo, no host /proc).
+socket_tables() {
+	helper --network "container:$1" --user 65534:65534 --entrypoint bash "$helper_image" -c '
+		for f in tcp tcp6 udp udp6; do
+			[ -e "/proc/net/$f" ] || continue
+			echo "# $f"
+			tail -n +2 "/proc/net/$f"
+		done'
 }
 
-# listeners <pid>: "<proto> <address> <port>" per listening TCP socket and
-# unconnected UDP socket in the process's network namespace.
+# listeners <container>: "<proto> <address> <port>" per listening TCP
+# socket and unconnected UDP socket in the container's network namespace.
 listeners() {
-	local pid=$1 f proto line local_addr rem st addr port
-	for f in tcp tcp6 udp udp6; do
-		proto=$f
-		$sudo test -e "/proc/$pid/net/$f" || continue
-		while read -r _ local_addr rem st _; do
-			case $f in
-			tcp*) [ "$st" = 0A ] || continue ;;
-			udp*) [ "$st" = 07 ] && [[ $rem =~ ^0+:0000$ ]] || continue ;;
-			esac
-			port=$((16#${local_addr#*:}))
-			addr=${local_addr%:*}
-			if [ ${#addr} = 8 ]; then
-				addr=$(hex4 "$addr")
-			else
-				addr=$(hex6 "$addr")
-			fi
-			echo "$proto $addr $port"
-		done < <($sudo tail -n +2 "/proc/$pid/net/$f")
+	local f="" local_addr rem st addr port tables
+	tables=$(socket_tables "$1") || return 1
+	while read -r first local_addr rem st _; do
+		if [ "$first" = "#" ]; then
+			f=$local_addr
+			continue
+		fi
+		case $f in
+		tcp*) [ "$st" = 0A ] || continue ;;
+		udp*) [ "$st" = 07 ] && [[ $rem =~ ^0+:0000$ ]] || continue ;;
+		*) continue ;;
+		esac
+		port=$((16#${local_addr#*:}))
+		addr=${local_addr%:*}
+		if [ ${#addr} = 8 ]; then
+			addr=$(hex4 "$addr")
+		else
+			addr=$(hex6 "$addr")
+		fi
+		echo "$f $addr $port"
+	done <<<"$tables"
+}
+
+# planned_listeners <service>: "<address>:<port>" per planned listener
+# (want_listen), the IPv6 address in full form, from the template.
+planned_listeners() {
+	local s=$1 l net port fam a
+	for l in ${want_listen[$s]}; do
+		net=${l%:*} port=${l##*:} fam=ipv4_address
+		if [[ $net == */6 ]]; then
+			net=${net%/6} fam=ipv6_address
+		fi
+		a=$(jq -r --arg s "$s" --arg n "$net" --arg f "$fam" '.services[$s].networks[$n][$f] // ""' <<<"$config")
+		[ "$fam" = ipv6_address ] && [ -n "$a" ] && a=$(full6 "$a")
+		echo "${a:-<no $fam on $net>}:$port"
 	done
 }
 
-echo "---- test 8: listeners (R-BIND-PRIVATE)"
+echo "---- test 8: listeners (R-BIND-PRIVATE, one planned address per listener)"
 loop6=$(full6 ::1)
 for s in "${expected_services[@]}"; do
 	c=$(container "$s")
 	[ -n "$c" ] || continue
-	pid=$(docker inspect -f '{{.State.Pid}}' "$c")
-	if [ "$pid" = 0 ]; then
+	if [ "$(docker inspect -f '{{.State.Running}}' "$c")" != true ]; then
 		fail "test 8: $s is not running"
 		continue
 	fi
-	own4=$(addresses "$c" IPAddress)
-	own6=""
-	for a in $(addresses "$c" GlobalIPv6Address); do
-		own6+=" $(full6 "$a")"
-	done
-	n=0 bad=0
+	mapfile -t planned < <(planned_listeners "$s")
+	if ! socks=$(listeners "$c"); then
+		fail "test 8: could not read the sockets of $s"
+		continue
+	fi
+	n=0 bad=0 seen=" " lo=0
 	while read -r proto addr port; do
 		[ -n "$proto" ] || continue
 		n=$((n + 1))
-		ok=false
 		case $addr in
-		127.*) ok=true ;;
-		*:*) [ "$addr" = "$loop6" ] && ok=true ;;
+		127.*)
+			lo=$((lo + 1))
+			continue
+			;;
+		*:*)
+			if [ "$addr" = "$loop6" ]; then
+				lo=$((lo + 1))
+				continue
+			fi
+			;;
 		esac
-		for a in $own4 $own6; do
-			[ "$addr" = "$a" ] && ok=true
-		done
-		if ! $ok; then
-			fail "test 8: $s listens on $proto $addr:$port, which is neither its own address nor loopback"
+		case $s:$port in
+		*dovecot:8080 | *dovecot:9090)
+			fail "test 8: $s listens on $proto $addr:$port (the image's HTTP listeners)"
+			bad=$((bad + 1))
+			continue
+			;;
+		esac
+		if [[ " ${planned[*]} " == *" $addr:$port "* ]]; then
+			seen+="$addr:$port "
+		else
+			fail "test 8: $s listens on $proto $addr:$port, which is not one of its planned listeners [${planned[*]}] nor loopback"
 			bad=$((bad + 1))
 		fi
-		case $s:$port in
-		*dovecot:8080 | *dovecot:9090) fail "test 8: $s listens on $proto $addr:$port (the image's HTTP listeners)" ;;
-		esac
-	done < <(listeners "$pid")
+	done <<<"$socks"
+	for p in "${planned[@]}"; do
+		if [[ $seen != *" $p "* ]]; then
+			fail "test 8: $s does not listen on its planned $p"
+			bad=$((bad + 1))
+		fi
+	done
 	if [ "$n" = 0 ]; then
 		fail "test 8: $s has no listening socket"
 	elif [ "$bad" = 0 ]; then
-		pass "test 8: $s: $n listening sockets, each on its own address ($own4$own6) or loopback"
+		pass "test 8: $s: $n listening sockets: exactly [${planned[*]}], and $lo on loopback"
 	fi
 done
 
@@ -301,15 +441,59 @@ public_v6=$(docker network inspect -f '{{.EnableIPv6}}' "$public" 2>/dev/null ||
 if [ "${GITHUB_ACTIONS:-}" = true ] && [ "$public_v6" != true ]; then
 	fail "test 9: edge-public has no IPv6"
 fi
+host_addrs=$(ip -o addr show | awk '{ print $4 }')
 for n in $(jq -r '.networks | keys[]' <<<"$config"); do
 	name=$(jq -r --arg n "$n" '.networks[$n].name' <<<"$config")
-	internal=$(docker network inspect -f '{{.Internal}}' "$name" 2>/dev/null || echo missing)
-	want_internal=true
-	[ "$n" = edge-public ] && want_internal=false
-	if [ "$internal" = "$want_internal" ]; then
-		pass "test 9: network $n internal=$internal"
+	# One inspect: a missing network fails here, with nothing printed.
+	if ! info=$(docker network inspect -f '{{.Internal}} {{index .Options "com.docker.network.bridge.gateway_mode_ipv4"}} {{index .Options "com.docker.network.bridge.gateway_mode_ipv6"}}' "$name" 2>/dev/null); then
+		fail "test 9: network $n ($name) is missing"
+		continue
+	fi
+	read -r internal mode4 mode6 <<<"$info"
+	if [ "$n" = edge-public ]; then
+		if [ "$internal" = false ]; then
+			pass "test 9: network $n internal=false"
+		else
+			fail "test 9: network $n internal=$internal, want false"
+		fi
+		continue
+	fi
+	ok=true
+	if [ "$internal" != true ]; then
+		fail "test 9: network $n internal=$internal, want true"
+		ok=false
+	fi
+	if [ "$mode4 $mode6" != "isolated isolated" ]; then
+		fail "test 9: network $n has gateway modes [$mode4 $mode6], want [isolated isolated]"
+		ok=false
+	fi
+	# No host interface holds an address in the network's subnets.
+	for sub in $(jq -r --arg n "$n" '.networks[$n].ipam.config[].subnet' <<<"$config"); do
+		case $sub in
+		*::/*) prefix="${sub%%::/*}:" ;;
+		*) prefix="${sub%.0/24}." ;;
+		esac
+		if hit=$(grep -m1 -F -- "$prefix" <<<"$host_addrs"); then
+			fail "test 9: network $n: the host has the address $hit in $sub"
+			ok=false
+		fi
+	done
+	$ok && pass "test 9: network $n internal=true, gateway mode isolated, no host address in it"
+done
+
+# The host cannot reach the services without authentication on the
+# internal networks (the bridge has no address there), while a container
+# on the same network can (#61).
+for probe in filter-rspamd:filter-private:11333 filter-clamd:filter-private:3310 \
+	filter-olefy:filter-olefy:10050 groupware-memcached:groupware-private:11211; do
+	IFS=: read -r s n port <<<"$probe"
+	a=$(jq -r --arg s "$s" --arg n "$n" '.services[$s].networks[$n].ipv4_address' <<<"$config")
+	if timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$a" "$port" 2>/dev/null; then
+		fail "test 9: the host reaches $s at $a:$port"
+	elif ! client "$n" tcp_open "$a" "$port" >/dev/null; then
+		fail "test 9: a container on $n does not reach $s at $a:$port either; the host check proves nothing"
 	else
-		fail "test 9: network $n internal=$internal, want $want_internal"
+		pass "test 9: the host cannot reach $s at $a:$port; a container on $n can"
 	fi
 done
 for s in "${expected_services[@]}"; do
@@ -391,6 +575,12 @@ for s in "${expected_services[@]}"; do
 		fail "test 10: $s mounts $sockets"
 		ok=false
 	fi
+	want_pids=$(jq -r --arg s "$s" '.services[$s].pids_limit // 0' <<<"$config")
+	pids=$(jq -r '.PidsLimit // 0' <<<"$hc")
+	if [ "$want_pids" -le 0 ] || [ "$pids" != "$want_pids" ]; then
+		fail "test 10: $s has PidsLimit $pids, want the template's pids_limit ($want_pids, above 0)"
+		ok=false
+	fi
 	# Every process's uid, read on the host. Only Postfix's master (and
 	# tini and the scripts that start it) runs as root, and its health
 	# probe, which Docker runs as the image's user.
@@ -412,19 +602,34 @@ for s in "${expected_services[@]}"; do
 		ok=false
 	fi
 	uids=$(awk '{ print $1 }' <<<"$procs" | sort -un | xargs)
-	$ok && pass "test 10: $s: CapAdd [${caps}], CapDrop ALL, no-new-privileges, uids [$uids]"
+	$ok && pass "test 10: $s: CapAdd [${caps}], CapDrop ALL, no-new-privileges, PidsLimit $pids, uids [$uids]"
+done
+# The one-shot guard has exited: its configuration, not its processes.
+for s in "${oneshot_services[@]}"; do
+	c=$(container "$s")
+	[ -n "$c" ] || continue
+	got=$(docker inspect "$c" | jq -r '.[0] | [
+		"CapAdd=\((.HostConfig.CapAdd // []) | map(ltrimstr("CAP_")) | join(","))",
+		"CapDrop=\((.HostConfig.CapDrop // []) | map(ltrimstr("CAP_")) | join(","))",
+		"nnp=\((.HostConfig.SecurityOpt // []) | index("no-new-privileges:true") != null)",
+		"privileged=\(.HostConfig.Privileged)",
+		"network=\(.HostConfig.NetworkMode)",
+		"readonly=\(.HostConfig.ReadonlyRootfs)",
+		"user=\(.Config.User)",
+		"pids=\(.HostConfig.PidsLimit // 0)",
+		"mounts=\([.Mounts[] | select(.Type != "bind")] | length)"
+	] | join(" ")')
+	want="CapAdd= CapDrop=ALL nnp=true privileged=false network=none readonly=true user=65534:65534 pids=$(jq -r --arg s "$s" '.services[$s].pids_limit // 0' <<<"$config") mounts=0"
+	if [ "$got" = "$want" ]; then
+		pass "test 10: $s: $got"
+	else
+		fail "test 10: $s has [$got], want [$want]"
+	fi
 done
 
 # ---- test 11: volumes ---------------------------------------------------------
 
-# Probes for tests 11 and 12 run in a helper container: the memcached
-# image (pinned, already in the store, with bash), no capabilities, either
-# on no network (volumes) or on one role's internal network (a client of
-# that role's Dovecot). They read every reply with a timeout.
-helper_image=$(jq -r '.services["groupware-memcached"].image' <<<"$config")
-helper() {
-	docker run --rm --pull never --cap-drop ALL --security-opt no-new-privileges:true "$@"
-}
+# Tests 11 and 12 use the helpers (helper, client) defined at the top.
 
 # smtp_talk <host> <port> <line>...: an SMTP/LMTP client in bash. It reads
 # the greeting, then sends each line and prints the server's reply to it
@@ -465,16 +670,6 @@ imap_login() {
 		[[ $l == "a "* ]] && break
 	done
 	printf 'b LOGOUT\r\n' >&3
-}
-
-# client <network> <function> <arguments...>: runs the function in a
-# helper on the project's network.
-client() {
-	local net=$1 fn=$2
-	shift 2
-	timeout 60 docker run --rm --pull never --cap-drop ALL --security-opt no-new-privileges:true \
-		--network "${project}_$net" --user 65534:65534 --entrypoint bash "$helper_image" \
-		-c "$(declare -f "$fn"); $fn \"\$@\"" "$fn" "$@" 2>&1
 }
 
 echo "---- test 11: volumes"
@@ -588,21 +783,22 @@ echo "---- resources (docker stats; image size in MB)"
 mapfile -t ids < <(docker ps -q --filter "label=com.docker.compose.project=$project")
 stats=""
 if [ "${#ids[@]}" -gt 0 ]; then
-	stats=$(docker stats --no-stream --format '{{.Name}}|{{.MemUsage}}|{{.MemPerc}}|{{.CPUPerc}}' "${ids[@]}" | sort)
+	stats=$(docker stats --no-stream --format '{{.Name}}|{{.MemUsage}}|{{.MemPerc}}|{{.CPUPerc}}|{{.PIDs}}' "${ids[@]}" | sort)
 fi
-table=$(while IFS='|' read -r name mem perc cpu; do
+table=$(while IFS='|' read -r name mem perc cpu pids; do
 	[ -n "$name" ] || continue
 	health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$name")
+	limit=$(docker inspect -f '{{.HostConfig.PidsLimit}}' "$name")
 	size=$(docker image inspect -f '{{.Size}}' "$(docker inspect -f '{{.Image}}' "$name")")
-	echo "$name|$health|$mem|$perc|$cpu|$((size / 1000000))"
+	echo "$name|$health|$mem|$perc|$cpu|$pids / $limit|$((size / 1000000))"
 done <<<"$stats")
 printf '%s\n' "$table" | tr '|' '\t'
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
 	{
 		echo "### Compose template: containers"
 		echo
-		echo "| Container | Health | Memory (use / limit) | Memory % | CPU % | Image MB |"
-		echo "|---|---|---|---:|---:|---:|"
+		echo "| Container | Health | Memory (use / limit) | Memory % | CPU % | PIDs (use / limit) | Image MB |"
+		echo "|---|---|---|---:|---:|---:|---:|"
 		printf '%s\n' "$table" | sed 's/|/ | /g; s/^/| /; s/$/ |/'
 	} >>"$GITHUB_STEP_SUMMARY"
 fi
@@ -611,4 +807,4 @@ if [ "$failed" != 0 ]; then
 	echo "FAIL compose-test: $failed failure(s)" >&2
 	exit 1
 fi
-echo "ok   compose-test: tests 6 and 8-13 passed"
+echo "ok   compose-test: tests 6, 8-13 and 14 passed"

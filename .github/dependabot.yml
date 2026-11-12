@@ -24,7 +24,7 @@ updates:
   # together). Each image directory is listed: images/common has no
   # Dockerfile. A new image adds its directory.
   - package-ecosystem: docker
-    directories: ["/", "/images/postfix", "/images/unbound"]
+    directories: ["/", "/images/postfix", "/images/unbound", "/images/olefy", "/images/sogo"]
     schedule:
       interval: weekly
     labels: [dependencies]

@@ -1028,7 +1028,9 @@ control 768 MiB, edge 640 MiB, store 512 MiB, filter 3840 MiB, groupware
   6.8 GiB**, with five gates, one agent and three `unbound`; ClamAV is 3 GiB
   of it. The 14 containers of 0.1.0's template have 6336 MiB of it; the
   gates, the agent, keepia-edge, rspamd-proxy, groupware-web and freshclam
-  add 672 MiB in later milestones. Measured idle, the 14 use about 1.2
+  add 672 MiB in later milestones. The one-shot `edge-addresses` (16
+  MiB, #61) only runs for a moment at each start, before `edge-postfix`,
+  and is not counted. Measured idle, the 14 use about 1.2
   GiB (1189 MiB), 956 MiB of it clamd ([#26][c26]); CPU is 0.00–0.16 %
   per container. **Minimum server: 8 GiB RAM, 2 vCPU; recommended 4
   vCPU** (predicted from the limits). Disk: the images of the template,
