@@ -1,5 +1,7 @@
-# A hidden target (not in `bake --list`) carries named contexts and a
-# remote context; a real target inherits them (review B 1).
+# A hidden target (not in `bake --list`) carries named contexts; a real
+# target inherits them, and --print of the real target shows them
+# (review B 1). _remote is inherited by nothing, so nothing builds it, and
+# the check reads only what builds read (round 3: names only from --list).
 group "default" {
   targets = ["app"]
 }

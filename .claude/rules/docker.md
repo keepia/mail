@@ -11,6 +11,13 @@ paths:
 ---
 # Docker
 - **Pins** (`tools/check-image-pins`, `make image-pins`): `# syntax=` is `name:X.Y.Z@sha256:<64 hex>`; every `FROM`, `COPY --from=` and `RUN --mount=…,from=` is an earlier stage or `name:tag@sha256:<64 hex>`; Compose's upstream images are `tag@sha256`; own images are built from local contexts; workflow `container`/`services` images are pinned by digest. Write every `--flag` on the instruction's first line, ADD sources literally (no `$VAR`), no here-documents, no `ONBUILD`, no bake `contexts`. The bake rule reads `docker buildx bake --print`, so `make image-pins` needs Docker with buildx.
+- **Bake inputs only where the check sees them:**
+  - The only bake files are the root's `docker-bake.hcl` (and `docker-bake.override.hcl`); any other `*.hcl` is reported.
+  - In workflows, bake runs only through `docker/bake-action`. Its inputs come from the job env `BAKE_TARGET`/`BAKE_SET`/`PLATFORM`, `BAKE_SET` only sets `cache-from`/`cache-to`, and `make image-pins-build` must be the step right before it.
+  - `make images` never passes `-f`, and `--set` there is limited to `*.secrets`, `*.network` and `*.args.HTTPS_PROXY`.
+  - No `BUILDX_*` variables are set anywhere.
+  - A new bake variable needs a sentinel in `tools/check-image-pins/bake.go` if the generic one does not resolve.
+- Compose `build` keys only `context`, `dockerfile`, `args` (no `BUILDKIT_SYNTAX`), `target` and `labels`.
 - **Downloads only by `ADD --checksum=sha256:`**, one URL per `ADD`, from a source the plan lists. No `curl`, `wget`, `pip install` from an index, `git clone` or any other download in `RUN`: the check cannot see them, so review must. Debian packages come from the Debian archive through `images/common/keepia-apt-install`, which records them in `/usr/share/keepia/packages.txt` (recorded, not pinned).
 - A new registry, base image, package source or action is a new external service: the maintainer's OK first.
 - **Privileges:** `cap_drop: [ALL]`, `no-new-privileges`, and exactly the capabilities the plan lists per container (Postfix: `CHOWN DAC_OVERRIDE FOWNER SETUID SETGID`, with `chroot = n` for every `master.cf` service; Dovecot: `SYS_CHROOT`; all others none). Fixed non-zero uids; only Postfix's master runs as root. No `privileged`, host network or Docker socket.

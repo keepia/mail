@@ -1,0 +1,22 @@
+# Review B R2's workflow probe: bake-action inputs and env that change the
+# definition the build resolves.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+      - uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        env:
+          BUILDX_BAKE_FILE: ci-alt.hcl
+        with:
+          source: https://example.invalid/team/repo.git
+          files: ci-alt.hcl
+          workdir: sub
+          vars: CTX=https://example.invalid/x.git
+          targets: app
+          set: |
+            *.args.BUILDKIT_SYNTAX=docker/dockerfile:latest
+            *.contexts.base=docker-image://busybox:latest

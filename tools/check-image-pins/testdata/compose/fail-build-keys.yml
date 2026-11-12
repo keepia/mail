@@ -1,0 +1,30 @@
+services:
+  a:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-a:dev
+    build:
+      context: .
+      x-bake:
+        contexts:
+          base: docker-image://busybox:latest
+      cache_from:
+        - type=registry,ref=example.org/cache
+      args:
+        BUILDKIT_SYNTAX: docker/dockerfile:latest
+  b:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-b:dev
+    build:
+      context: .
+      args:
+        - VERSION=dev
+        - BUILDKIT_SYNTAX=docker/dockerfile:latest
+  c:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-c:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final
+      labels:
+        org.opencontainers.image.title: c
+      args:
+        VERSION: dev
+# want-lines: 2 2 2 13

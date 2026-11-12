@@ -1,3 +1,4 @@
 build.txt:2: FROM image "debian:trixie-slim" is not pinned
 prototypes/Dockerfile:2: FROM image "busybox:latest" is not pinned
 service c: build.dockerfile ../outside/Dockerfile is not a relative path inside the context
+target "c": dockerfile "../outside/Dockerfile" is not a relative path inside the context

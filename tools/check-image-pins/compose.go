@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -62,9 +63,11 @@ func root(doc *yaml.Node) *yaml.Node {
 // CheckCompose applies rule 4 of the image pin check to a Compose file:
 // a service without build: names image: name:tag@sha256:<64 hex>; a
 // service with build: names its image under ${KEEPIA_REGISTRY...} and
-// builds from a local context. A URL context, build.additional_contexts,
-// build.dockerfile_inline, extends and a top-level include are reported:
-// they can pull images or sources this check does not see.
+// builds from a local context. build may only use the keys in
+// composeBuildKeys (so x-bake, additional_contexts, dockerfile_inline and
+// any new key are reported), and its args may not set BUILDKIT_SYNTAX. A
+// URL context, extends and a top-level include are reported: they can
+// pull images or sources this check does not see.
 //
 // It also returns the Dockerfile of every build with a valid local context
 // (relative to the Compose file's directory), so the caller checks it with
@@ -164,10 +167,18 @@ func checkService(line int, name string, svc map[string]any, add func(int, strin
 			}
 			dockerfile = s
 		}
-		for _, k := range []string{"additional_contexts", "dockerfile_inline"} {
-			if _, ok := b[k]; ok {
-				add(line, "service %s: build.%s is not read by this check", name, k)
+		keys := make([]string, 0, len(b))
+		for k := range b {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if !composeBuildKeys[k] {
+				add(line, "service %s: build.%s is not allowed (allowed: context, dockerfile, args, target, labels); it can change what is built in a way this check does not read", name, k)
 			}
+		}
+		if hasSyntaxArg(b["args"]) {
+			add(line, "service %s: build.args.BUILDKIT_SYNTAX overrides the pinned # syntax= directive", name)
 		}
 	default:
 		add(line, "service %s: build is neither a string nor a mapping", name)
@@ -178,6 +189,37 @@ func checkService(line int, name string, svc map[string]any, add func(int, strin
 		return ""
 	}
 	return context + "/" + dockerfile
+}
+
+// composeBuildKeys are the build keys a Compose service may use. Anything
+// else (x-bake, additional_contexts, dockerfile_inline, cache_from, ssh,
+// secrets, network, …) is reported: an allowlist fails closed on keys
+// Compose or bake add later.
+var composeBuildKeys = map[string]bool{
+	"context": true, "dockerfile": true, "args": true, "target": true, "labels": true,
+}
+
+// hasSyntaxArg reports whether Compose build args (a mapping, or a list of
+// KEY=VALUE or KEY) set BUILDKIT_SYNTAX.
+func hasSyntaxArg(args any) bool {
+	isSyntax := func(k string) bool { return strings.EqualFold(strings.TrimSpace(k), "BUILDKIT_SYNTAX") }
+	switch a := args.(type) {
+	case map[string]any:
+		for k := range a {
+			if isSyntax(k) {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range a {
+			s, _ := e.(string)
+			k, _, _ := strings.Cut(s, "=")
+			if isSyntax(k) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isLocalContext reports whether a build context is a relative path inside

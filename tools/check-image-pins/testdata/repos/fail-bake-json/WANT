@@ -1,1 +1,2 @@
 docker-bake.json:0: a JSON bake file is not read by this check
+target "a": context "https://example.invalid/team/repo.git" is not a relative path

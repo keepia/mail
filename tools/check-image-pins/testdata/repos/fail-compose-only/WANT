@@ -1,0 +1,4 @@
+compose.yaml:6: service app: build.x-bake is not allowed
+compose.yaml:6: service app: build.args.BUILDKIT_SYNTAX overrides
+target "app": named contexts are not allowed (base=docker-image://busybox:latest)
+target "app": the BUILDKIT_SYNTAX argument overrides

@@ -25,7 +25,7 @@ ACTIONLINT_VERSION := v1.7.12
 ACTIONLINT := bin/actionlint-$(ACTIONLINT_VERSION)/actionlint
 
 .PHONY: build test test-unit lint vuln tidy secrets secrets-test links links-test workflows workflows-test \
-	images image-test image-pins image-pins-test
+	images image-test image-pins image-pins-build image-pins-test
 
 ## build: the keepia-mail binary in bin/
 build:
@@ -124,6 +124,10 @@ image-test:
 ## image-pins: every image, frontend and download pinned; packages: write only in release.yml
 image-pins:
 	$(GO) run ./tools/check-image-pins
+
+## image-pins-build: rule 5 on one build's definition (BAKE_TARGET, BAKE_SET; CI)
+image-pins-build:
+	$(GO) run ./tools/check-image-pins -build "$$BAKE_TARGET" -build-set "$$BAKE_SET"
 
 ## image-pins-test: tests of the image pin check (fixtures, no network)
 image-pins-test:

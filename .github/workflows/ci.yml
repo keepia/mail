@@ -137,10 +137,30 @@ jobs:
       matrix:
         image: [keepia, postfix, unbound]
         arch: [amd64, arm64]
+    # The build's bake inputs, defined once for the check step and the Build
+    # step (tools/check-image-pins rule 5 allows no other env here and
+    # requires both steps to read these):
+    # - BAKE_TARGET: the target;
+    # - PLATFORM: the bake variable for the platform (it only sets
+    #   platforms);
+    # - BAKE_SET: the layer cache in the GitHub Actions cache, one scope per
+    #   image and platform. Only pushes to main write it (mode=max: every
+    #   stage), so pull requests cannot crowd main's entries out of the
+    #   10 GB cache; on a pull request cache-to is empty, which exports
+    #   nothing.
+    env:
+      BAKE_TARGET: ${{ matrix.image }}
+      PLATFORM: linux/${{ matrix.arch }}
+      BAKE_SET: |
+        ${{ matrix.image }}.cache-from=type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+        ${{ matrix.image }}.cache-to=${{ github.event_name == 'push' && format('type=gha,mode=max,scope={0}-{1}', matrix.image, matrix.arch) || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
       - run: sh scripts/ci-docker-mirror.sh
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
@@ -154,22 +174,20 @@ jobs:
       # gives the same layers where the inputs are the same.
       - name: Commit time
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
+      # Rule 5 in build mode: resolves exactly what the next step builds
+      # (BAKE_TARGET, BAKE_SET and this job's environment, including what
+      # earlier steps wrote to GITHUB_ENV) and checks it. It must stay the
+      # step right before Build.
+      - run: make image-pins-build
       # bake-action exposes the GitHub Actions cache runtime to BuildKit; a
       # plain `docker buildx bake` in a run step could not use type=gha.
-      # The cache scope is per image and platform. Only pushes to main write
-      # the cache (mode=max: every stage), so pull requests cannot crowd
-      # main's entries out of the 10 GB cache; they only read it.
       - name: Build
         uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
-        env:
-          PLATFORM: linux/${{ matrix.arch }}
         with:
           source: .
-          targets: ${{ matrix.image }}
+          targets: ${{ env.BAKE_TARGET }}
           load: true
-          set: |
-            ${{ matrix.image }}.cache-from=type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
-            ${{ github.event_name == 'push' && format('{0}.cache-to=type=gha,mode=max,scope={0}-{1}', matrix.image, matrix.arch) || '' }}
+          set: ${{ env.BAKE_SET }}
       - name: Smoke, health and reload tests
         env:
           IMAGE: ${{ matrix.image }}

@@ -1,0 +1,7 @@
+Makefile:3: bake --set "*.contexts.base"
+Makefile:4: bake -f: a bake file other than the defaults
+Makefile:7: bake -f: a bake file other than the defaults
+Makefile:7: bake --set "*.dockerfile-inline"
+Makefile:10: bake --file=other.hcl
+Makefile:10: bake --set "*.args.BUILDKIT_SYNTAX"
+Makefile:14: BUILDX_ variables steer buildx

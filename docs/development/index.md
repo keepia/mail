@@ -149,9 +149,13 @@ make image-pins-test image-pins   # the pin check: tests, then the repository
 - **`docker-build (<image>, <arch>)`**: one row per image and platform,
   amd64 on `ubuntu-24.04` and arm64 on `ubuntu-24.04-arm`, natively (no
   QEMU). It points dockerd and BuildKit at `mirror.gcr.io` with Docker Hub
-  as the fallback (`scripts/ci-docker-mirror.sh`), builds with
-  `docker/bake-action` (which gives BuildKit the GitHub Actions cache: one
-  scope per image and platform, written only by pushes to `main`), runs
+  as the fallback (`scripts/ci-docker-mirror.sh`). The build's bake inputs
+  are defined once, in the job's env (`BAKE_TARGET`, `PLATFORM`,
+  `BAKE_SET`). `make image-pins-build`, the step right before the build,
+  resolves exactly those inputs in the build's environment and checks
+  them (rule 5, build mode). The job then builds with `docker/bake-action`
+  (which gives BuildKit the GitHub Actions cache: one scope per image and
+  platform, written only by pushes to `main`), runs
   `make image-test`, and on amd64 uploads the image for the `compose` job
   of #5 part 3 (artifact `image-<name>`, kept 1 day). CI never logs in to a
   registry and never pushes.
@@ -190,16 +194,56 @@ lives, also under a skipped path.
    reported, because BuildKit expands variables in `ADD` sources;
 4. a Compose file: a service without `build:` has `image:
    name:tag@sha256:<64 hex>`; a service with `build:` names its image
-   under `${KEEPIA_REGISTRY…}` and builds from a relative local context;
-   a URL context, `additional_contexts`, `dockerfile_inline`, `extends` and
-   `include` are reported;
-5. the bake definition as Docker resolves it, not its HCL lines: the tool
-   runs `docker buildx bake --list` and `--print` at the root, over every
-   target, hidden ones included (inheritance, variables and one-line blocks
-   are resolved). Every `context` is a relative path inside the
-   repository, and named `contexts`, `dockerfile-inline` and a
-   `BUILDKIT_SYNTAX` argument are reported. A bake file outside the root
-   and a JSON bake file are reported;
+   under `${KEEPIA_REGISTRY…}` and builds from a relative local context.
+   `build` may use only `context`, `dockerfile`, `args`, `target` and
+   `labels` (so `x-bake`, `additional_contexts`, `dockerfile_inline`,
+   `cache_from` and any new key are reported), and `args` may not set
+   `BUILDKIT_SYNTAX`; a URL context, `extends` and `include` are reported;
+5. the bake definition **exactly as each build resolves it**, never its HCL
+   lines. In every resolved target, `context` must be a relative path
+   inside the repository; named `contexts`, `dockerfile-inline` and a
+   `BUILDKIT_SYNTAX` argument are reported, and every target's Dockerfile
+   is read with rules 1–3. The principle is that no input may change the
+   definition unless the check sees it too.
+   - **Repository mode** (`make image-pins`):
+     - The tool passes every one of buildx's default files present at the
+       root to `docker buildx bake` with `--file`, in buildx's order:
+       `compose.yaml`, `compose.yml`, `docker-compose.yml`,
+       `docker-compose.yaml`, `docker-bake.json`, `docker-bake.hcl`,
+       `docker-bake.override.json`, `docker-bake.override.hcl`. A Compose
+       file alone counts too.
+     - It runs bake in a cleaned environment: only `PATH`, `HOME` and
+       `DOCKER_CONFIG`, so no `BUILDX_BAKE_*` and no bake variable from the
+       caller.
+     - Target names come only from `--list` and are passed after `--`.
+       Hidden targets are checked through the targets that inherit them.
+     - It then resolves again with every declared variable at a sentinel
+       value. A target whose `context`, `contexts`, `dockerfile`,
+       `dockerfile-inline` or `BUILDKIT_SYNTAX` moves is reported, because
+       a build's environment could move it. Known variables have sentinels
+       that still resolve (`PLATFORM` must be a platform). If the definition
+       does not resolve with the sentinels, the check fails.
+   - **Build mode** (`make image-pins-build`, in CI): the exact targets
+     (`BAKE_TARGET`), `--set` lines (`BAKE_SET`) and environment of the build
+     step that follows it, with buildx's own file lookup.
+   - **Every build input must be visible to the check.**
+     - In workflows, bake runs only through `docker/bake-action`:
+       - inputs only `source: .`, `targets: ${{ env.BAKE_TARGET }}`,
+         `set: ${{ env.BAKE_SET }}`, `load`, `push`, `provenance`, `sbom`,
+         `no-cache` and `pull` (no `files`, `workdir` or `vars`);
+       - no step env, and job and workflow env only `BAKE_TARGET`,
+         `BAKE_SET` and `PLATFORM`;
+       - `BAKE_SET` lines may set only `cache-from` and `cache-to`;
+       - the step right before is `run: make image-pins-build`, with no env,
+         `if` or `continue-on-error`.
+     - No `run:` step or shell script calls `buildx bake` itself.
+     - In a Makefile, the `buildx bake` lines and the make variables they
+       use may not contain `-f` or `--file`. `--set` keys there are limited
+       to `*.secrets`, `*.network` and `*.args.HTTPS_PROXY`, which local
+       proxy builds need. No `BUILDX_` variable may appear anywhere in it.
+   - Any `*.hcl` other than the root's `docker-bake.hcl` and
+     `docker-bake.override.hcl` is reported, unless it is on the tool's
+     `hclAllowlist`, which is empty. A JSON bake file is reported;
 6. no workflow except `release.yml` grants `packages: write`, at workflow or
    job level; `permissions: write-all`, a job that calls a reusable
    workflow without its own `permissions`, and a job without permissions in

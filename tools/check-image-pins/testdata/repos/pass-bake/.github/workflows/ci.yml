@@ -1,0 +1,31 @@
+# The repository's docker-build shape: one job-level definition of the
+# build's inputs, the build-mode check right before the build.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  docker-build:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        image: [root, a]
+        arch: [amd64, arm64]
+    env:
+      BAKE_TARGET: ${{ matrix.image }}
+      PLATFORM: linux/${{ matrix.arch }}
+      BAKE_SET: |
+        ${{ matrix.image }}.cache-from=type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+        ${{ matrix.image }}.cache-to=${{ github.event_name == 'push' && format('type=gha,mode=max,scope={0}-{1}', matrix.image, matrix.arch) || '' }}
+    steps:
+      - run: make image-pins-build
+      - name: Build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+          set: ${{ env.BAKE_SET }}
+      - name: Test
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: make image-test IMAGE="$IMAGE"

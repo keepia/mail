@@ -1,3 +1,1 @@
-target "_hidden": named contexts are not allowed (base=docker-image://busybox:latest)
-target "_remote": context "https://example.invalid/team/repo.git" is not a relative path
 target "app": named contexts are not allowed (base=docker-image://busybox:latest)

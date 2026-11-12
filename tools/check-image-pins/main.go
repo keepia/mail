@@ -30,6 +30,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -69,7 +70,16 @@ const (
 	kindBakeJSON
 	kindWorkflow
 	kindReleaseWorkflow
+	kindStrayHCL
+	kindMakefile
+	kindScript
 )
+
+// hclAllowlist lists HCL files (relative to the root) that are not bake
+// files and may stay: none today. Any other *.hcl than the root's
+// docker-bake.hcl and docker-bake.override.hcl is reported, because a
+// build could be pointed at it with --file.
+var hclAllowlist = map[string]bool{}
 
 // classify returns how the file at rel (relative to the root) is checked.
 func classify(rel string) kind {
@@ -91,10 +101,20 @@ func classify(rel string) kind {
 	case (strings.HasPrefix(lower, "docker-compose") || strings.HasPrefix(lower, "compose")) &&
 		(strings.HasSuffix(lower, ".yml") || strings.HasSuffix(lower, ".yaml")):
 		return kindCompose
-	case strings.HasPrefix(lower, "docker-bake") && strings.HasSuffix(lower, ".hcl"):
-		return kindBake
+	case strings.HasSuffix(lower, ".hcl"):
+		if dir == "." && (base == "docker-bake.hcl" || base == "docker-bake.override.hcl") {
+			return kindBake
+		}
+		if hclAllowlist[filepath.ToSlash(rel)] {
+			return kindNone
+		}
+		return kindStrayHCL
 	case strings.HasPrefix(lower, "docker-bake") && strings.HasSuffix(lower, ".json"):
 		return kindBakeJSON
+	case lower == "makefile" || lower == "gnumakefile" || strings.HasSuffix(lower, ".mk"):
+		return kindMakefile
+	case strings.HasSuffix(lower, ".sh"):
+		return kindScript
 	}
 	return kindNone
 }
@@ -120,17 +140,31 @@ func (r *report) addAll(path string, findings []Finding) {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("check-image-pins", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	build := flags.String("build", "", "build mode: the bake targets one build step builds (space or comma separated)")
+	buildSet := flags.String("build-set", "", "build mode: that step's --set values, one per line")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
 	root := "."
-	switch len(args) {
+	switch flags.NArg() {
 	case 0:
 	case 1:
-		root = args[0]
+		root = flags.Arg(0)
 	default:
-		fmt.Fprintln(stderr, "usage: check-image-pins [root]")
+		fmt.Fprintln(stderr, "usage: check-image-pins [-build TARGETS [-build-set SETS]] [root]")
 		return 2
 	}
 	if st, err := os.Stat(root); err != nil || !st.IsDir() { //nolint:gosec // root is the tool's own argument: the tree to check
 		fmt.Fprintf(stderr, "check-image-pins: no directory %s\n", root)
+		return 2
+	}
+	if *build != "" {
+		return runBuild(root, *build, *buildSet, stdout)
+	}
+	if *buildSet != "" {
+		fmt.Fprintln(stderr, "check-image-pins: -build-set needs -build")
 		return 2
 	}
 
@@ -195,38 +229,49 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	for _, p := range files[kindBakeJSON] {
+		r.add(p, 0, "a JSON bake file is not read by this check; use docker-bake.hcl")
+	}
+	for _, p := range files[kindStrayHCL] {
+		r.add(p, 0, "an HCL file that is not the root's docker-bake.hcl or docker-bake.override.hcl: a build could be pointed at it with --file; remove it or list it in hclAllowlist")
+	}
+	// The bake definition a default `docker buildx bake` reads: every
+	// default file present at the root, Compose files included.
 	var rootBake []string
-	var hcl [][]byte
-	for _, p := range files[kindBake] {
-		if filepath.Dir(p) != filepath.Clean(root) {
-			r.add(p, 0, "a bake file outside the repository root is not resolved by this check; keep the bake definition at the root")
-			continue
+	for _, name := range defaultBakeFiles {
+		if st, err := os.Stat(filepath.Join(root, name)); err == nil && st.Mode().IsRegular() { //nolint:gosec // a fixed default file name under root
+			rootBake = append(rootBake, name)
 		}
+	}
+	if len(rootBake) > 0 {
+		label := filepath.Join(root, strings.Join(rootBake, ","))
+		findings, refs := checkRepoBake(root, rootBake)
+		for _, f := range findings {
+			r.add(label, 0, f)
+		}
+		for _, df := range refs {
+			if inRoot(label, df) {
+				dockerfiles[filepath.Clean(df)] = true
+			}
+		}
+	}
+	for _, p := range files[kindMakefile] {
 		src, err := os.ReadFile(p) //nolint:gosec // p is a file found by walking root
 		if err != nil {
 			r.add(p, 0, err.Error())
 			continue
 		}
-		rootBake = append(rootBake, p)
-		hcl = append(hcl, src)
+		r.addAll(p, CheckMakefile(src))
 	}
-	for _, p := range files[kindBakeJSON] {
-		r.add(p, 0, "a JSON bake file is not read by this check; use docker-bake.hcl")
-	}
-	if len(rootBake) > 0 {
-		label := strings.Join(rootBake, ",")
-		targets, err := resolveBake(root, hcl)
+	for _, p := range files[kindScript] {
+		src, err := os.ReadFile(p) //nolint:gosec // p is a file found by walking root
 		if err != nil {
-			r.add(label, 0, "cannot resolve the bake definition (rule 5 needs the docker CLI with buildx): "+err.Error())
-		} else {
-			findings, refs := CheckBakeTargets(root, targets)
-			for _, f := range findings {
-				r.add(label, 0, f)
-			}
-			for _, df := range refs {
-				if inRoot(label, df) {
-					dockerfiles[filepath.Clean(df)] = true
-				}
+			r.add(p, 0, err.Error())
+			continue
+		}
+		for i, l := range strings.Split(string(src), "\n") {
+			if strings.Contains(strings.Join(strings.Fields(l), " "), "buildx bake") {
+				r.add(p, i+1, "a script runs `buildx bake`; build only through make images or docker/bake-action (rule 5)")
 			}
 		}
 	}
@@ -273,5 +318,51 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "check-image-pins: every image and download is pinned (%d Dockerfiles, %d Compose files, %d bake files, %d workflows).\n",
 		len(dfs), len(files[kindCompose]), len(rootBake), workflows)
+	return 0
+}
+
+// runBuild is build mode: it resolves what one build step builds (its
+// targets and --set lines, in this process's environment and with
+// buildx's own file lookup, as docker/bake-action runs it), then applies
+// rule 5 and rules 1-3 to every Dockerfile it names.
+func runBuild(root, targets, sets string, stdout io.Writer) int {
+	names := strings.Fields(strings.ReplaceAll(targets, ",", " "))
+	var setLines []string
+	for _, l := range strings.Split(sets, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			setLines = append(setLines, l)
+		}
+	}
+	r := &report{out: stdout}
+	label := "bake build (" + strings.Join(names, ",") + ")"
+	findings, refs := checkBuildBake(root, names, setLines)
+	for _, f := range findings {
+		r.add(label, 0, f)
+	}
+	seen := map[string]bool{}
+	for _, df := range refs {
+		df = filepath.Clean(df)
+		if seen[df] {
+			continue
+		}
+		seen[df] = true
+		rel, err := filepath.Rel(root, df)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			r.add(label, 0, "names a Dockerfile outside the repository: "+df)
+			continue
+		}
+		src, err := os.ReadFile(df) //nolint:gosec // df is named by the repository's own bake definition, inside root
+		if err != nil {
+			r.add(df, 0, err.Error())
+			continue
+		}
+		r.addAll(df, CheckDockerfile(src))
+	}
+	if r.bad > 0 {
+		fmt.Fprintf(stdout, "check-image-pins: %d finding(s) in the definition of build %s.\n", r.bad, strings.Join(names, ","))
+		return 1
+	}
+	fmt.Fprintf(stdout, "check-image-pins: build %s resolves to pinned images and sources (%d Dockerfiles, %d --set lines).\n",
+		strings.Join(names, ","), len(seen), len(setLines))
 	return 0
 }

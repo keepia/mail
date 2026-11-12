@@ -16,9 +16,9 @@ import (
 // counts.
 var minFixtures = map[string]int{
 	"dockerfile": 33,
-	"compose":    15,
+	"compose":    16,
 	"workflow":   9,
-	"repos":      11,
+	"repos":      18,
 }
 
 // fixtureKind maps a testdata directory of single files to the rules its
@@ -222,6 +222,72 @@ func TestBakeWithoutBuildx(t *testing.T) {
 	}
 }
 
+// TestRepoModeIgnoresCallerEnv: the repository mode resolves the root's
+// default files with an explicit --file list in a cleaned environment, so
+// neither BUILDX_BAKE_FILE nor a bake variable from the caller changes
+// what it checks (review B R1). env-bake.hcl would hide fail-bake-oneline's
+// findings, and CTX is irrelevant to it.
+func TestRepoModeIgnoresCallerEnv(t *testing.T) {
+	if !haveBuildx(t) {
+		t.Skip("docker buildx is not available")
+	}
+	decoy, err := filepath.Abs(filepath.Join("testdata", "env-bake.hcl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDX_BAKE_FILE", decoy)
+	t.Setenv("CTX", "https://example.invalid/env.git")
+	for _, c := range []struct{ repo, want string }{
+		// BUILDX_BAKE_FILE would replace the default files.
+		{"fail-bake-oneline", `target "b": named contexts`},
+		// CTX would be the context of the default resolution; only the
+		// sentinel run may set it.
+		{"fail-bake-variables", `target "a": context depends on a bake variable`},
+	} {
+		var out, errOut bytes.Buffer
+		code := run([]string{filepath.Join("testdata", "repos", c.repo)}, &out, &errOut)
+		if code != 1 || !strings.Contains(out.String(), c.want) || strings.Contains(out.String(), "env.git") {
+			t.Errorf("%s: exit %d, want 1 with %q and nothing from the caller's environment:\n%s%s", c.repo, code, c.want, out.String(), errOut.String())
+		}
+	}
+}
+
+// TestBuildMode checks one build's definition: its --set lines and its
+// environment are part of what it builds.
+func TestBuildMode(t *testing.T) {
+	if !haveBuildx(t) {
+		t.Skip("docker buildx is not available")
+	}
+	repo := filepath.Join("testdata", "repos", "pass-bake")
+	cases := []struct {
+		name, targets, sets, env string
+		code                     int
+		want                     string
+	}{
+		{"clean", "a", "a.cache-from=type=gha,scope=a-amd64\na.cache-to=", "", 0, "build a resolves to pinned images"},
+		{"set contexts", "a", "a.contexts.base=docker-image://busybox:latest", "", 1, `target "a": named contexts are not allowed`},
+		{"set syntax", "root", "*.args.BUILDKIT_SYNTAX=docker/dockerfile:latest", "", 1, `target "root": the BUILDKIT_SYNTAX argument`},
+		{"env file", "a", "", "env-bake.hcl", 1, `target "a": context "https://example.invalid/env.git"`},
+		{"injected name", "--file=x.hcl", "", "", 1, `target name "--file=x.hcl" is not a plain name`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.env != "" {
+				p, err := filepath.Abs(filepath.Join("testdata", c.env))
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("BUILDX_BAKE_FILE", p)
+			}
+			var out, errOut bytes.Buffer
+			code := run([]string{"-build", c.targets, "-build-set", c.sets, repo}, &out, &errOut)
+			if code != c.code || !strings.Contains(out.String(), c.want) {
+				t.Fatalf("exit %d, want %d with %q:\n%s%s", code, c.code, c.want, out.String(), errOut.String())
+			}
+		})
+	}
+}
+
 // TestClassify checks which files the walk checks, and as what.
 func TestClassify(t *testing.T) {
 	cases := map[string]kind{
@@ -241,6 +307,11 @@ func TestClassify(t *testing.T) {
 		".github/dependabot.yml":        kindNone,
 		"README.md":                     kindNone,
 		"tools/x/dockerfile.go":         kindNone,
+		"build/docker-bake.hcl":         kindStrayHCL,
+		"images.hcl":                    kindStrayHCL,
+		"Makefile":                      kindMakefile,
+		"tools/x.mk":                    kindMakefile,
+		"scripts/build.sh":              kindScript,
 	}
 	for rel, want := range cases {
 		if got := classify(filepath.FromSlash(rel)); got != want {
@@ -302,7 +373,10 @@ func TestRun(t *testing.T) {
 			filepath.Join(".github", "workflows", "ci.yml") + ":1: workflow grants packages: write",
 			filepath.Join(".github", "workflows", "release.yml") + ":4: job a: container image \"node:20\"",
 			"docker-compose.yml:0: does not parse",
-			"5 finding(s)",
+			// bake reads the root's default files, the broken Compose file
+			// included, and the check reports that it cannot resolve them.
+			"docker-compose.yml,docker-bake.json:0: cannot resolve the bake definition",
+			"6 finding(s)",
 		} {
 			if !strings.Contains(out.String(), want) {
 				t.Errorf("output lacks %q:\n%s", want, out.String())

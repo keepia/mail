@@ -1,0 +1,2 @@
+target "a": context depends on a bake variable (CTX, DF, VERSION at sentinel values)
+target "b": dockerfile depends on a bake variable (CTX, DF, VERSION at sentinel values)

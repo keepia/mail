@@ -40,6 +40,7 @@ func CheckWorkflow(src []byte, release bool) ([]Finding, error) {
 	}
 	var wf struct {
 		Permissions any `yaml:"permissions"`
+		Env         any `yaml:"env"`
 	}
 	top := root(docs[0])
 	if err := top.Decode(&wf); err != nil {
@@ -62,6 +63,7 @@ func CheckWorkflow(src []byte, release bool) ([]Finding, error) {
 			continue
 		}
 		checkJobImages(name.Line, name.Value, job, add)
+		checkBakeSteps(name.Line, name.Value, wf.Env, job, add)
 		if release {
 			continue
 		}
