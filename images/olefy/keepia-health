@@ -1,0 +1,49 @@
+#!/usr/bin/python3 -I
+# keepia-health: the olefy image's health probe. It needs olefy's protocol
+# reply, not only an open port or a running process: it connects to
+# $KEEPIA_HEALTH_ADDR:$OLEFY_BINDPORT (defaults 127.0.0.1 and 10050; Compose
+# sets the container's private address), sends olefy's ping ("PING" and an
+# empty line), closes its sending side (olefy answers at end of input) and
+# requires the reply "PONG". The whole probe ends within 4 s, below the
+# image's 5 s healthcheck timeout.
+#
+# Measured red (#44, scripts/image-test.sh): every process of the container
+# stopped with SIGSTOP. The kernel still accepts the connection then, so a
+# port check would stay green; this probe gets no reply.
+import os
+import socket
+import sys
+import time
+
+addr = os.environ.get("KEEPIA_HEALTH_ADDR", "127.0.0.1")
+port = int(os.environ.get("OLEFY_BINDPORT", "10050"))
+deadline = time.monotonic() + 4
+
+
+def remaining():
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("no reply within 4 s")
+    return left
+
+
+reply = b""
+try:
+    with socket.create_connection((addr, port), timeout=remaining()) as s:
+        s.settimeout(remaining())
+        s.sendall(b"PING\n\n")
+        s.shutdown(socket.SHUT_WR)
+        while len(reply) <= 64:
+            s.settimeout(remaining())
+            chunk = s.recv(64)
+            if not chunk:
+                break
+            reply += chunk
+except OSError as e:
+    print(f"no PONG from {addr}:{port}: {e}")
+    sys.exit(1)
+
+if reply != b"PONG":
+    print(f"unexpected reply from {addr}:{port}: {reply[:64]!r}")
+    sys.exit(1)
+print(f"PONG from {addr}:{port}")

@@ -95,12 +95,20 @@ release (#5):
 | `ghcr.io/keepia/mail` (Keepia) | [`Dockerfile`](../../Dockerfile) | 65532, no capabilities | `keepia-mail healthcheck` (`/healthz` 200) |
 | `ghcr.io/keepia/mail-postfix` | [`images/postfix/Dockerfile`](../../images/postfix/Dockerfile) | root master with `CHOWN DAC_OVERRIDE FOWNER SETUID SETGID`, `chroot = n` everywhere | SMTP `220 ` greeting |
 | `ghcr.io/keepia/mail-unbound` | [`images/unbound/Dockerfile`](../../images/unbound/Dockerfile) | 10053, no capabilities | `unbound-control status` |
+| `ghcr.io/keepia/mail-olefy` | [`images/olefy/Dockerfile`](../../images/olefy/Dockerfile) | 10055, no capabilities | olefy's `PING` answered by `PONG` |
 
 Each Debian-based image lists its installed packages in
 `/usr/share/keepia/packages.txt`; the Keepia image has none, because it is
 distroless static and installs no Debian packages.
 
-SOGo, olefy (#44) and the Compose template "all roles on one server" follow in
+olefy's source is one pinned commit of HeinleinSupport/olefy (the project
+has no release tags), fetched as GitHub's commit archive with
+`ADD --checksum`; the build checks that the archive holds exactly that
+commit's files ([`images/olefy/olefy-source.sha256`](../../images/olefy/olefy-source.sha256)).
+To move the pin, update the commit in the Dockerfile, the archive's
+sha256 and the file list together.
+
+SOGo and the Compose template "all roles on one server" follow in
 the next parts of #5; the upstream images (Dovecot, rspamd, ClamAV,
 Postgres, Valkey, memcached) are used unchanged, pinned by digest in the
 template.

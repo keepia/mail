@@ -6,9 +6,10 @@
 # - smoke: the image's own check command, and its package list
 #   (/usr/share/keepia/packages.txt) printed;
 # - user and capabilities as the plan sets them (Compose sets the same in
-#   part 3): Keepia as 65532, Unbound as 10053, both with no capabilities;
-#   Postfix's root master with exactly CHOWN, DAC_OVERRIDE, FOWNER, SETUID
-#   and SETGID; no-new-privileges everywhere;
+#   part 3): Keepia as 65532, Unbound as 10053, olefy as 10055, all with no
+#   capabilities; Postfix's root master with exactly CHOWN, DAC_OVERRIDE,
+#   FOWNER, SETUID and SETGID; no-new-privileges everywhere;
+# - olefy: a scan over olefy's protocol, answered by olevba;
 # - healthcheck: green, then red with every process of the container
 #   stopped (SIGSTOP from the host); for Postfix also red with Debian's
 #   chroot = y, where `postfix status` still says running; for Keepia the
@@ -21,12 +22,12 @@
 # Every wait reads a signal (docker events, a log line, docker wait), bounded
 # by a timeout. No network: the containers run with --network none.
 #
-# Usage: scripts/image-test.sh <keepia|postfix|unbound> <image reference>
+# Usage: scripts/image-test.sh <keepia|postfix|unbound|olefy> <image reference>
 # Needs root or sudo for kill on the container's host processes.
 set -euo pipefail
 
 if [ $# -ne 2 ]; then
-	echo "usage: $0 <keepia|postfix|unbound> <image reference>" >&2
+	echo "usage: $0 <keepia|postfix|unbound|olefy> <image reference>" >&2
 	exit 2
 fi
 name=$1 ref=$2
@@ -287,6 +288,41 @@ unbound)
 	check_config 10053:10053
 	health_cycle "$prefix-health" 0000000000000000 --cap-drop ALL
 	watcher_test "$prefix-watch" "Restart of unbound" --cap-drop ALL
+	stop_test "$prefix-stop" --cap-drop ALL
+	;;
+olefy)
+	out=$(docker run --rm --name "$prefix-smoke" --network none --cap-drop ALL --entrypoint python3 "$ref" \
+		-I -c 'import oletools.olevba as v, pcodedmp; print("oletools", v.__version__)')
+	[ "$out" = "oletools 0.60.2" ] || fail "smoke printed '$out', want 'oletools 0.60.2'"
+	pass "smoke: $out"
+	print_packages
+	check_config 10055:10055
+	# A scan over olefy's protocol: olefy runs olevba on the payload (olefy.py
+	# itself, over olefy's 500-byte minimum) and answers with its JSON.
+	start "$prefix-scan" "${health_flags[@]}" --cap-drop ALL "$ref"
+	wait_health "$prefix-scan" healthy 60
+	pass "olefy runs as: $(docker exec "$prefix-scan" id)"
+	out=$(docker exec "$prefix-scan" python3 -I -c '
+import socket
+with open("/usr/local/bin/olefy.py", "rb") as f:
+    payload = f.read()
+with socket.create_connection(("127.0.0.1", 10050), timeout=30) as s:
+    s.sendall(b"OLEFY/1.0\nMethod: oletools\nRspamd-ID: test01\n\n" + payload)
+    s.shutdown(socket.SHUT_WR)
+    reply = b""
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        reply += chunk
+print(reply.decode("utf-8", "replace"))
+')
+	for want in '"script_name": "olevba"' '"version": "0.60.2"' '"json_conversion_successful": true'; do
+		[[ $out == *"$want"* ]] || fail "olefy's scan reply lacks $want: ${out:0:400}"
+	done
+	pass "scan over olefy's protocol: olevba 0.60.2 answered (${#out} bytes)"
+	docker rm -f "$prefix-scan" >/dev/null
+	health_cycle "$prefix-health" 0000000000000000 --cap-drop ALL
 	stop_test "$prefix-stop" --cap-drop ALL
 	;;
 *)
