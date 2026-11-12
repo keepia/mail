@@ -620,6 +620,87 @@ func looksLikeScript(w string) bool {
 // "${1?msg}"; #68 review B, B1).
 var forwardedArg = regexp.MustCompile(`^\$(?:[0-9]+|[@*]|\{(?:[0-9]+|[@*])[^}]*\})$`)
 
+// Copies of the arguments inside a function body (#68 review A, A1;
+// review B, B2): an array expansion ("${args[@]}", "${a[*]}", also with
+// an operator), and a variable assigned from a value with $@, $*, ${@ or
+// ${* (also after local/declare, with +=) or read from a here-string
+// with them (read -r -a a <<< "$*").
+var (
+	arrayArg     = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*\[[@*]\][^}]*\}$`)
+	assignAnyArg = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\+?=(.*)$`)
+	allArgs      = regexp.MustCompile(`\$(?:[@*]|\{[@*])`)
+	shellName    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	readCommands = map[string]bool{"read": true, "mapfile": true, "readarray": true}
+)
+
+// argCopies returns the variables the commands of function bodies assign
+// from all the arguments (see arrayArg): any word name=value or
+// name+=value whose value has $@, $*, ${@ or ${*, and every name after
+// read, mapfile or readarray fed by a here-string with them. A plain
+// data variable (c=$1, x=date) is not a copy.
+func argCopies(cmds [][][]string) map[string]bool {
+	out := map[string]bool{}
+	for _, body := range cmds {
+		for _, words := range body {
+			for _, wd := range words {
+				if m := assignAnyArg.FindStringSubmatch(wd); m != nil && allArgs.MatchString(m[2]) {
+					out[m[1]] = true
+				}
+			}
+			if !hereStringArgs(words) {
+				continue
+			}
+			plain := dropRedirects(words)
+			i := commandStart(plain)
+			if i >= len(plain) || !readCommands[plain[i]] {
+				continue
+			}
+			for _, a := range plain[i+1:] {
+				if shellName.MatchString(a) {
+					out[a] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
+// hereStringArgs reports whether a command reads a here-string with all
+// the arguments (<<< "$*", <<<"$@").
+func hereStringArgs(words []string) bool {
+	for k, wd := range words {
+		fd, rest, ok := strings.Cut(wd, "<<<")
+		if !ok || strings.Trim(fd, "0123456789") != "" {
+			continue
+		}
+		if rest == "" && k+1 < len(words) {
+			rest = words[k+1]
+		}
+		if allArgs.MatchString(rest) {
+			return true
+		}
+	}
+	return false
+}
+
+// copyCall returns the first argument of a call of a forwarding function
+// that is a copy of the arguments (an array expansion, or a variable
+// argCopies holds); call starts at the command word.
+func copyCall(call []string, fwd, copies map[string]bool) (string, bool) {
+	if !fwd[call[0]] {
+		return "", false
+	}
+	for _, a := range call[1:] {
+		if arrayArg.MatchString(a) {
+			return a, true
+		}
+		if m := bareVar.FindStringSubmatch(a); m != nil && copies[m[1]] {
+			return a, true
+		}
+	}
+	return "", false
+}
+
 // shellScope is what command reads a command of a shell text with: the
 // variables the text assigns only literal command names
 // (literalCommands), and its forwarding functions.
@@ -632,7 +713,8 @@ type shellScope struct {
 // positional parameters as a command (#67): a body with "$@", "$*" or
 // "$N" as a command word (also inside a loop, after shift, after a
 // prefix such as exec), or a body that passes them on to such a function
-// (also a function defined inside another, or through more functions).
+// (also a function defined inside another, or through more functions),
+// directly or as a copy (copyCall: local a=("$@"); retry "${a[@]}").
 // outer holds the forwarding functions of the text an inline command
 // (eval, sh -c) is from. The order of definition and call is not read:
 // a call before the definition counts as well (an over-report).
@@ -645,6 +727,7 @@ func forwardingFunctions(funcs []shellFunc, lit map[string][]string, outer map[s
 	for k, f := range funcs {
 		cmds[k] = shellCommands(f.body)
 	}
+	copies := argCopies(cmds)
 	for changed := true; changed; {
 		changed = false
 		for k, f := range funcs {
@@ -652,7 +735,7 @@ func forwardingFunctions(funcs []shellFunc, lit map[string][]string, outer map[s
 				continue
 			}
 			for _, words := range cmds[k] {
-				if runsPositional(dropRedirects(words), lit, fwd, 0) {
+				if runsPositional(dropRedirects(words), lit, fwd, copies, 0) {
 					fwd[f.name] = true
 					changed = true
 					break
@@ -665,16 +748,19 @@ func forwardingFunctions(funcs []shellFunc, lit map[string][]string, outer map[s
 
 // runsPositional reports whether a command of a function body runs the
 // function's positional parameters as a command: as its command word, or
-// passed on to a forwarding function. A command word in a variable the
-// text assigns only literal command names is replaced as in command.
-func runsPositional(words []string, lit map[string][]string, fwd map[string]bool, depth int) bool {
+// passed on to a forwarding function, also as a copy (copyCall). A plain
+// data variable passed on ("$c", "$x") does not count: it would make
+// data such as image-test.sh's "$c" a command (#68 review A). A command
+// word in a variable the text assigns only literal command names is
+// replaced as in command.
+func runsPositional(words []string, lit map[string][]string, fwd, copies map[string]bool, depth int) bool {
 	i := commandStart(words)
 	if i >= len(words) || depth > 8 {
 		return false
 	}
 	if m := bareVar.FindStringSubmatch(words[i]); m != nil && len(lit[m[1]]) > 0 {
 		for _, v := range lit[m[1]] {
-			if runsPositional(replaceWord(words, i, strings.Fields(v)), lit, fwd, depth+1) {
+			if runsPositional(replaceWord(words, i, strings.Fields(v)), lit, fwd, copies, depth+1) {
 				return true
 			}
 		}
@@ -683,7 +769,10 @@ func runsPositional(words []string, lit map[string][]string, fwd map[string]bool
 	if positional.MatchString(words[i]) {
 		return true
 	}
-	_, ok := forwardedCall(words[i:], fwd)
+	if _, ok := forwardedCall(words[i:], fwd); ok {
+		return true
+	}
+	_, ok := copyCall(words[i:], fwd, copies)
 	return ok
 }
 
@@ -791,9 +880,15 @@ func (w *refWalk) command(words []string, sc shellScope, inFunc bool, dirs []str
 			w.problem("it forwards its arguments as a command (%s), which the check cannot resolve; call the command directly", words[i])
 			return
 		}
-		if arg, ok := variableCall(words[i:], sc.fwd); ok && !inFunc {
-			w.problem("it forwards its arguments as a command (%s, through the function %s), which the check cannot resolve; call the command directly", arg, words[i])
-			return
+		if !inFunc {
+			if arg, ok := forwardedCall(words[i:], sc.fwd); ok {
+				w.problem("it forwards its arguments as a command (%s, through the function %s), which the check cannot resolve; call the command directly", arg, words[i])
+				return
+			}
+			if arg, ok := variableCall(words[i:], sc.fwd); ok {
+				w.problem("it passes %s to the function %s, which runs its arguments as a command; the check cannot resolve what it holds; call the command directly", arg, words[i])
+				return
+			}
 		}
 	}
 	script, lang, inline, inlineShell, makeArgs, isMake := commandTarget(words)

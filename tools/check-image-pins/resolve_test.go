@@ -80,30 +80,45 @@ func TestReferencedTexts(t *testing.T) {
 // with literal words or from inside another function, is not.
 func TestFunctionForwarding(t *testing.T) {
 	root := t.TempDir()
-	const msg = "it forwards its arguments as a command ("
+	fwd := func(arg, fn string) string {
+		return "it forwards its arguments as a command (" + arg + ", through the function " + fn + "), which the check cannot resolve; call the command directly"
+	}
+	pass := func(arg, fn string) string {
+		return "it passes " + arg + " to the function " + fn + ", which runs its arguments as a command; the check cannot resolve what it holds; call the command directly"
+	}
 	for _, c := range []struct{ text, want string }{
-		{"main() { for i in 1 2 3; do \"$@\" && return 0; done; return 1; }\nmain \"$@\"", "$@, through the function main)"},
-		{"function main { while ! \"$@\"; do sleep 1; done; }\nmain \"$@\"", "$@, through the function main)"},
-		{"main()\n{\n\texec \"${@}\"\n}\nmain \"${@}\"", "${@}, through the function main)"},
-		{"r() { sudo -E \"$1\"; }\nr \"$1\"", "$1, through the function r)"},
-		{"r() { \"$@\"; }\nr --verbose \"${@:2}\"", "${@:2}, through the function r)"},
-		{"r() { n=$1; shift; timeout 5 \"$@\"; }\nr \"$*\"", "$*, through the function r)"},
-		{"S=sudo\nr() { $S \"$@\"; }\nr \"$@\"", "$@, through the function r)"},
-		{"main() { inner() { \"$@\"; }; inner \"$@\"; }\nmain \"$@\"", "$@, through the function main)"},
-		{"a() { \"$@\"; }\nb() { a \"$@\"; }\nc() { b \"$1\" x; }\nif c \"$@\"; then :; fi", "$@, through the function c)"},
-		{"main() { \"$@\"; }\neval 'main \"$@\"'", "$@, through the function main)"},
-		{"main() { \"$@\"; }\nout=$(main \"$@\")", "$@, through the function main)"},
+		{"main() { for i in 1 2 3; do \"$@\" && return 0; done; return 1; }\nmain \"$@\"", fwd("$@", "main")},
+		{"function main { while ! \"$@\"; do sleep 1; done; }\nmain \"$@\"", fwd("$@", "main")},
+		{"main()\n{\n\texec \"${@}\"\n}\nmain \"${@}\"", fwd("${@}", "main")},
+		{"r() { sudo -E \"$1\"; }\nr \"$1\"", fwd("$1", "r")},
+		{"r() { \"$@\"; }\nr --verbose \"${@:2}\"", fwd("${@:2}", "r")},
+		{"r() { n=$1; shift; timeout 5 \"$@\"; }\nr \"$*\"", fwd("$*", "r")},
+		{"S=sudo\nr() { $S \"$@\"; }\nr \"$@\"", fwd("$@", "r")},
+		{"main() { inner() { \"$@\"; }; inner \"$@\"; }\nmain \"$@\"", fwd("$@", "main")},
+		{"a() { \"$@\"; }\nb() { a \"$@\"; }\nc() { b \"$1\" x; }\nif c \"$@\"; then :; fi", fwd("$@", "c")},
+		{"main() { \"$@\"; }\neval 'main \"$@\"'", fwd("$@", "main")},
+		{"main() { \"$@\"; }\nout=$(main \"$@\")", fwd("$@", "main")},
 		// #68 review B, B1: any operator, and any variable at the top level.
-		{"main() { \"$@\"; }\nmain ${1+\"$@\"}", "${1+\"$@\"}, through the function main)"},
-		{"main() { \"$@\"; }\nmain \"${1=x}\"", "${1=x}, through the function main)"},
-		{"inner() { \"$@\"; }\nmain() { inner ${1+\"$@\"}; }\nmain \"$@\"", "$@, through the function main)"},
-		{"main() { \"$@\"; }\nargs=(\"$@\")\nmain \"${args[@]}\"", "${args[@]}, through the function main)"},
-		{"main() { \"$@\"; }\ncmd=\"$*\"\nmain $cmd", "$cmd, through the function main)"},
-		{"main() { \"$@\"; }\nmain \"$(cat cmd.txt)\"", "$(cat cmd.txt), through the function main)"},
+		{"main() { \"$@\"; }\nmain ${1+\"$@\"}", fwd("${1+\"$@\"}", "main")},
+		{"main() { \"$@\"; }\nmain \"${1=x}\"", fwd("${1=x}", "main")},
+		{"inner() { \"$@\"; }\nmain() { inner ${1+\"$@\"}; }\nmain \"$@\"", fwd("$@", "main")},
+		{"main() { \"$@\"; }\nargs=(\"$@\")\nmain \"${args[@]}\"", pass("${args[@]}", "main")},
+		{"main() { \"$@\"; }\ncmd=\"$*\"\nmain $cmd", pass("$cmd", "main")},
+		{"main() { \"$@\"; }\nmain \"$(cat cmd.txt)\"", pass("$(cat cmd.txt)", "main")},
+		{"main() { \"$@\"; }\nmain \"$HOME\" \"$@\"", fwd("$@", "main")},
+		// #68 review A, A1 / review B, B2: a copy of the arguments made in
+		// a body and passed on makes that function forwarding.
+		{"retry() { \"$@\"; }\nmain() { local args=(\"$@\"); retry \"${args[@]}\"; }\nmain \"$@\"", fwd("$@", "main")},
+		{"retry() { \"$@\"; }\nmain() { declare -a a; a+=(\"$@\"); retry \"${a[*]:0}\"; }\nmain \"$@\"", fwd("$@", "main")},
+		{"run() { \"$@\"; }\nmain() { local c=\"$*\"; run $c; }\nmain \"$@\"", fwd("$@", "main")},
+		{"run() { \"$@\"; }\nmain() { c=\"${@:2}\"; run \"${c}\"; }\nmain \"$@\"", fwd("$@", "main")},
+		{"run() { \"$@\"; }\nmain() { local a; read -r -a a <<< \"$*\"; run \"${a[@]}\"; }\nmain \"$@\"", fwd("$@", "main")},
+		{"run() { \"$@\"; }\nmain() { read -r line <<<\"$@\"; run $line; }\nmain \"$@\"", fwd("$@", "main")},
+		{"run() { \"$@\"; }\nmain() { mapfile -t a <<< \"$*\"; run \"${a[@]}\"; }\nmain \"$@\"", fwd("$@", "main")},
 	} {
 		_, problems := referencedTexts(root, c.text, "", true)
-		if !slices.Contains(problems, msg+c.want+", which the check cannot resolve; call the command directly") {
-			t.Errorf("referencedTexts(%q): problems %q, want %q", c.text, problems, msg+c.want)
+		if !slices.Contains(problems, c.want) {
+			t.Errorf("referencedTexts(%q): problems %q, want %q", c.text, problems, c.want)
 		}
 	}
 	for _, text := range []string{
@@ -119,6 +134,13 @@ func TestFunctionForwarding(t *testing.T) {
 		// forwarding; only the top-level call is held to that.
 		"inner() { \"$@\"; }\nmain() { x=date; inner \"$x\"; }\nmain \"$@\"",
 		"say() { echo \"$1\"; }\nsay \"$HOME\" `date`",
+		// Data passed on in a body is not a copy of the arguments: $1
+		// copies, values without $@/$*, and arrays to a function that
+		// does not forward (image-test.sh's "${health_flags[@]}").
+		"inner() { \"$@\"; }\nmain() { local c=$1 want=$2; inner \"$c\" $want; }\nmain \"$@\"",
+		"inner() { \"$@\"; }\nmain() { local n=\"$#\"; inner $n; }\nmain \"$@\"",
+		"inner() { \"$@\"; }\nmain() { read -r x <<< \"$1\"; inner $x; }\nmain \"$@\"",
+		"start() { docker run -d \"$@\"; }\nf=(--rm)\nmain() { start \"${f[@]}\" \"$@\"; }\nmain \"$@\"",
 	} {
 		if _, problems := referencedTexts(root, text, "", true); len(problems) > 0 {
 			t.Errorf("referencedTexts(%q): problems %q, want none", text, problems)

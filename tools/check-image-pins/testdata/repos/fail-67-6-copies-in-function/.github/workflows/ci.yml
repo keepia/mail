@@ -1,0 +1,29 @@
+# #68 review A, A1 and review B, B2: a copy of the arguments made inside
+# a function body and passed on to a forwarding function makes that
+# function forwarding, so the top-level `main "$@"` is reported:
+# - options-main.sh: the main idiom with option parsing in main, then
+#   local args=("$@"); retry "${args[@]}";
+# - scalar.sh: local c="$*"; run $c;
+# - read-array.sh: read -r -a a <<< "$*"; retry "${a[@]}".
+# Each runs make publish, and publish pushes by tag with no verify step
+# before it.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - run: bash scripts/options-main.sh -n 2 make publish
+      - run: bash scripts/scalar.sh make publish
+      - run: bash scripts/read-array.sh make publish

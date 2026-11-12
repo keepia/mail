@@ -569,7 +569,15 @@ lives, also under a skipped path.
          done; return 1; }; main "$@"`, also with a `while` loop, `shift`
          before the call or in the body, a prefix such as `exec` or
          `sudo`, or a function that passes them on to such a function
-         (defined inside it or not, through any number of functions);
+         (defined inside it or not, through any number of functions),
+         also as a copy made in a body: an array expansion
+         (`local args=("$@"); retry "${args[@]}"`) or a variable some
+         function body assigns from `$@`/`$*` (`local c="$*"; run $c`,
+         `read -r -a a <<< "$*"`). A plain data variable passed on in a
+         body (`"$c"` with `c=$1`) does not count. When the reported
+         argument is not a positional parameter, the finding says the
+         call passes it to a function that runs its arguments as a
+         command;
        - no step of the job writes `GITHUB_ENV` or `GITHUB_PATH` (in what it
          runs, as above, or with `core.exportVariable`/`core.addPath` in a
          github-script), except the commit time (`SOURCE_DATE_EPOCH`) and
@@ -657,14 +665,21 @@ lives, also under a skipped path.
   job may not write `GITHUB_ENV` or `GITHUB_PATH` otherwise, so an earlier
   step cannot reroute the tool's own build; locally the Makefile may not
   set `SHELL`, `GO` or the Go variables the tool is built with.
-- Known limits of following what a step runs (#51): a word on PATH that
-  runs its arguments as a command (`xargs make publish`) hides those
-  arguments; so does a command given as literal words to a function that
-  runs its arguments (`retry make publish` with `retry() { "$@"; }`),
-  whose words are read only as words of the text; a function is known
-  only in the text that defines it and its inline commands (`eval`,
-  `sh -c`), not in a file that sources it; and
-  reading `make` takes in the whole Makefile, which over-reports.
+- Known limits of following what a step runs (#51):
+  - a command given as literal words to a function that runs its
+    arguments (`retry make publish` with `retry() { "$@"; }`): the words
+    are read only as words of the text;
+  - a function is known only in the text that defines it and its inline
+    commands (`eval`, `sh -c`), not in a file that sources it
+    (`. lib.sh; run "$@"`);
+  - a shell that reads its program from stdin (`bash <<< "$*"`,
+    `bash <&3`) is not read;
+  - `xargs` and other words on PATH that run their arguments as a
+    command (`xargs make publish`, `stdbuf`) hide those arguments;
+  - a copy of the arguments made at the top level and used inside a
+    function that is called with no arguments
+    (`args=("$@"); run() { main "${args[@]}"; }; run`) is not followed;
+  - reading `make` takes in the whole Makefile, which over-reports.
 - A pull request that edits the check itself, or deliberately disables or
   routes around it (for example a build command assembled at run time, or
   a process started earlier that changes the image store or a file
