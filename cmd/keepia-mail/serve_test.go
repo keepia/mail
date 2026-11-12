@@ -192,24 +192,49 @@ func TestServeFailsOnMigrationLock(t *testing.T) {
 	}
 }
 
-// A database URL whose server is unreachable fails serve, and neither the
-// error nor the log contains the URL's password.
+// A database URL that fails serve and migrate, whether it does not parse
+// or its server is unreachable, never shows its password in the error or
+// the log: also not the part after an unescaped '@' in the password,
+// which pgx would take for the host.
 func TestServeErrorHidesPassword(t *testing.T) {
-	const password = "test-password-not-real"
-	u := url.URL{
+	const (
+		password = "test-password-not-real"
+		// atPassword has an unescaped '@'; secrets lists its parts.
+		atPassword = "test-pass@word-not-real"
+	)
+	secrets := []string{password, atPassword, "test-pass", "word-not-real"}
+	well := url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword("keepia", password),
 		Host:     closedPort(t),
 		Path:     "/keepia",
 		RawQuery: "sslmode=disable&connect_timeout=5",
 	}
-	t.Setenv(config.EnvDatabaseURL, u.String())
-	_, log, err := execute(t.Context(), options{}, "serve", "--listen", "127.0.0.1:0")
-	if err == nil {
-		t.Fatal("serve succeeded against an unreachable database")
-	}
-	if strings.Contains(err.Error(), password) || strings.Contains(log, password) {
-		t.Errorf("the password leaked:\nerror: %v\nlog: %s", err, log)
+	for name, dbURL := range map[string]string{
+		// Parses; the connect fails.
+		"unreachable": well.String(),
+		// Does not parse: pgx's parse error, masked by store.Open.
+		"bad sslmode": "postgres://keepia:" + password + "@" + closedPort(t) + "/keepia?sslmode=bogus",
+		// An unescaped '@' with a valid port: without the check, the
+		// connect error names the host "word-not-real@127.0.0.1".
+		"at, connect": "postgres://keepia:" + atPassword + "@" + closedPort(t) + "/keepia?sslmode=disable&connect_timeout=5",
+		// An unescaped '@' with an invalid port: the parse error.
+		"at, bad port": "postgres://keepia:" + atPassword + "@127.0.0.1:x/keepia",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(config.EnvDatabaseURL, dbURL)
+			for _, args := range [][]string{{"serve", "--listen", "127.0.0.1:0"}, {"migrate"}} {
+				out, log, err := execute(t.Context(), options{}, args...)
+				if err == nil {
+					t.Fatalf("%v succeeded with %s", args, name)
+				}
+				for _, s := range secrets {
+					if strings.Contains(err.Error(), s) || strings.Contains(log, s) || strings.Contains(out, s) {
+						t.Errorf("%v: %q leaked:\nerror: %v\nlog: %s", args, s, err, log)
+					}
+				}
+			}
+		})
 	}
 }
 

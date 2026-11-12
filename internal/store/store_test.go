@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -122,6 +123,27 @@ func TestMigrationsHaveDown(t *testing.T) {
 		}
 		if !downSection.Match(src) {
 			t.Errorf("%s has no -- +goose Down section", f)
+		}
+	}
+}
+
+// Open rejects a URL with an '@' in its host or in a fallback host (an
+// unescaped '@' in the password) before it connects, with a text that
+// names no part of the URL.
+func TestOpenRejectsAtInHost(t *testing.T) {
+	for _, dbURL := range []string{
+		"postgres://keepia:sec@ret-not-real@127.0.0.1:1/keepia",
+		"postgres://keepia:sec@127.0.0.1:1,ret@not-real:2/keepia",
+	} {
+		_, err := store.Open(context.Background(), dbURL)
+		if err == nil || !strings.Contains(err.Error(), "%40") {
+			t.Errorf("%s: %v, want the percent-encoding error", dbURL, err)
+			continue
+		}
+		for _, s := range []string{"sec", "ret-not", "not-real", "127.0.0.1"} {
+			if strings.Contains(err.Error(), s) {
+				t.Errorf("error %q contains %q", err, s)
+			}
 		}
 	}
 }

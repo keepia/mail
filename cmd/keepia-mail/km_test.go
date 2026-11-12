@@ -4,22 +4,33 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/keepia/mail/internal/testwait"
 )
 
+// callEnd ends each docker call in the shim's log; the shim writes every
+// argument on a line of its own, so argument boundaries are kept.
+const callEnd = "--end-of-call--"
+
 // runKm runs a copy of the repository's ./km in a directory of its own,
 // with a Dockerfile next to it when withDockerfile is set, and with a
 // docker that only logs its arguments and exits runExit on `compose ...
-// run`. It returns km's exit code, its output and the docker calls.
-func runKm(t *testing.T, withDockerfile bool, runExit string, args ...string) (int, string, []string) {
+// run`. It returns km's exit code, its output and the docker calls, each
+// as its list of arguments.
+func runKm(t *testing.T, withDockerfile bool, runExit string, args ...string) (int, string, [][]string) {
 	t.Helper()
 	if _, err := exec.LookPath("sh"); err != nil {
+		// CI must run these tests, never skip them.
+		if os.Getenv("CI") != "" {
+			t.Fatal("no sh in CI: the km tests must run there")
+		}
 		t.Skip("no sh")
 	}
 	src, err := os.ReadFile("../../km")
@@ -37,7 +48,7 @@ func runKm(t *testing.T, withDockerfile bool, runExit string, args ...string) (i
 		}
 	}
 	bin, log := t.TempDir(), filepath.Join(t.TempDir(), "docker.log")
-	shim := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + log + "'\n" +
+	shim := "#!/bin/sh\nprintf '%s\\n' \"$@\" '" + callEnd + "' >> '" + log + "'\n" +
 		"if [ \"$4\" = run ]; then exit " + runExit + "; fi\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(shim), 0o700); err != nil { //nolint:gosec // an executable test script
 		t.Fatal(err)
@@ -57,19 +68,41 @@ func runKm(t *testing.T, withDockerfile bool, runExit string, args ...string) (i
 		code = exit.ExitCode()
 	}
 	data, _ := os.ReadFile(log)
-	return code, out.String(), strings.Split(strings.TrimSpace(string(data)), "\n")
+	var calls [][]string
+	var call []string
+	for line := range strings.Lines(string(data)) {
+		line = strings.TrimSuffix(line, "\n")
+		if line == callEnd {
+			calls = append(calls, call)
+			call = nil
+			continue
+		}
+		call = append(call, line)
+	}
+	return code, out.String(), calls
+}
+
+// show formats docker calls for a failure message, one call per line,
+// each argument quoted.
+func show(calls [][]string) string {
+	var b strings.Builder
+	for _, c := range calls {
+		fmt.Fprintf(&b, "%q\n", c)
+	}
+	return b.String()
 }
 
 // ./km migrate starts PostgreSQL, then runs the command in a one-off
-// keepia container: exactly these two docker calls.
+// keepia container: exactly these two docker calls, with every argument
+// passed on as one argument, also one with a space.
 func TestKmRunsCommand(t *testing.T) {
-	code, out, calls := runKm(t, false, "0", "migrate", "status")
-	want := []string{
-		"compose --progress quiet up -d --wait postgres",
-		"compose --progress quiet run --rm -T keepia migrate status",
+	code, out, calls := runKm(t, false, "0", "migrate", "status", "a b")
+	want := [][]string{
+		{"compose", "--progress", "quiet", "up", "-d", "--wait", "postgres"},
+		{"compose", "--progress", "quiet", "run", "--rm", "-T", "keepia", "migrate", "status", "a b"},
 	}
-	if code != 0 || strings.Join(calls, "\n") != strings.Join(want, "\n") {
-		t.Errorf("exit %d\n%s\ndocker calls:\n%s\nwant:\n%s", code, out, strings.Join(calls, "\n"), strings.Join(want, "\n"))
+	if code != 0 || !slices.EqualFunc(calls, want, slices.Equal) {
+		t.Errorf("exit %d\n%s\ndocker calls:\n%swant:\n%s", code, out, show(calls), show(want))
 	}
 }
 
@@ -83,7 +116,8 @@ func TestKmExitStatus(t *testing.T) {
 // Next to a Dockerfile, km rebuilds the image.
 func TestKmBuildsNextToDockerfile(t *testing.T) {
 	code, out, calls := runKm(t, true, "0", "migrate")
-	if want := "compose --progress quiet run --rm --build -T keepia migrate"; code != 0 || calls[len(calls)-1] != want {
-		t.Errorf("exit %d\n%s\ndocker calls:\n%s\nwant last: %s", code, out, strings.Join(calls, "\n"), want)
+	want := []string{"compose", "--progress", "quiet", "run", "--rm", "--build", "-T", "keepia", "migrate"}
+	if code != 0 || len(calls) == 0 || !slices.Equal(calls[len(calls)-1], want) {
+		t.Errorf("exit %d\n%s\ndocker calls:\n%swant last: %q", code, out, show(calls), want)
 	}
 }

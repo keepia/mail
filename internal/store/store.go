@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -84,7 +85,10 @@ func WithMigrationLockTimeout(period, tries uint64) Option {
 }
 
 // Open connects to the database. Its error never contains the password of
-// url.
+// url, nor any other part of url's user information: a URL that does not
+// parse, or whose host contains an '@' (an unescaped '@' in the user or
+// password, which pgx splits at the first '@'), is rejected with a fixed
+// text before anything connects.
 func Open(ctx context.Context, url string, opts ...Option) (*Store, error) {
 	var oc openConfig
 	for _, o := range opts {
@@ -92,9 +96,13 @@ func Open(ctx context.Context, url string, opts ...Option) (*Store, error) {
 	}
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
-		// pgx's parse error quotes the URL (with the password masked);
-		// say only what is wrong with it.
+		// pgx's parse error quotes the URL (with the password masked,
+		// but not a password fragment after an unescaped '@'); say only
+		// what is wrong with it.
 		return nil, errors.New("parse database URL: invalid connection string")
+	}
+	if hostHasAt(cfg.ConnConfig) {
+		return nil, errAtInHost
 	}
 	if settings := oc.settings; len(settings) > 0 {
 		cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
@@ -118,6 +126,26 @@ func Open(ctx context.Context, url string, opts ...Option) (*Store, error) {
 		return nil, fmt.Errorf("connect to database: %w", err)
 	}
 	return &Store{pool: pool, lockOptions: oc.lockOptions}, nil
+}
+
+// errAtInHost is Open's error for a URL whose host contains an '@'. It
+// names no part of the URL.
+var errAtInHost = errors.New("parse database URL: '@' in the user name or password must be percent-encoded (%40)")
+
+// hostHasAt tells whether the host of cfg or of one of its fallbacks
+// contains an '@'. pgx splits the user information at the first '@', so
+// the rest of a password with an unescaped '@' ends up in the host, and
+// pgx's connect errors would print it.
+func hostHasAt(cfg *pgx.ConnConfig) bool {
+	if strings.Contains(cfg.Host, "@") {
+		return true
+	}
+	for _, fb := range cfg.Fallbacks {
+		if strings.Contains(fb.Host, "@") {
+			return true
+		}
+	}
+	return false
 }
 
 // Close releases all connections.

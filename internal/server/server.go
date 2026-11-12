@@ -28,11 +28,14 @@ const (
 type Server struct {
 	db  Pinger
 	log *slog.Logger
+	// healthTimeout bounds the database check of /healthz (healthTimeout;
+	// tests shorten it).
+	healthTimeout time.Duration
 }
 
 // New returns a server whose health endpoint checks db.
 func New(db Pinger, log *slog.Logger) *Server {
-	return &Server{db: db, log: log}
+	return &Server{db: db, log: log, healthTimeout: healthTimeout}
 }
 
 // Handler returns the routes:
@@ -48,7 +51,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), healthTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), s.healthTimeout)
 	defer cancel()
 	h := w.Header()
 	h.Set("Content-Type", "text/plain; charset=utf-8")

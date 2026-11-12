@@ -40,7 +40,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: check-action-pins [root]")
 		return 2
 	}
-	if st, err := os.Stat(root); err != nil || !st.IsDir() {
+	if st, err := os.Stat(root); err != nil || !st.IsDir() { //nolint:gosec // root is the tool's own argument: the tree to check; CI runs it with contents: read
 		fmt.Fprintf(stderr, "check-action-pins: no directory %s\n", root)
 		return 2
 	}
@@ -68,7 +68,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	bad := 0
 	for i := 0; i < len(queue); i++ {
 		f := queue[i]
-		src, err := os.ReadFile(f)
+		src, err := os.ReadFile(f) //nolint:gosec // f is a workflow or action file under root; local action paths that leave root are dropped (localActionFiles, the ".." check)
 		if err != nil {
 			fmt.Fprintf(stdout, "%s: %v\n", f, err)
 			bad++
@@ -113,7 +113,7 @@ func workflowFiles(root string) ([]string, error) {
 			return nil, err
 		}
 		for _, f := range m {
-			if st, err := os.Stat(f); err == nil && st.Mode().IsRegular() {
+			if st, err := os.Stat(f); err == nil && st.Mode().IsRegular() { //nolint:gosec // f is a glob match under root, the tree the tool is told to check
 				files = append(files, f)
 			}
 		}
@@ -126,11 +126,11 @@ func workflowFiles(root string) ([]string, error) {
 // <root>/.github/actions, at any depth. A missing directory gives none.
 func actionFiles(root string) ([]string, error) {
 	dir := filepath.Join(root, ".github", "actions")
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) { //nolint:gosec // dir is <root>/.github/actions, under the tree the tool is told to check
 		return nil, nil
 	}
 	var files []string
-	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error { //nolint:gosec // dir is <root>/.github/actions, under the tree the tool is told to check
 		if err != nil {
 			return err
 		}
@@ -156,7 +156,7 @@ func localActionFiles(root, ref string) []string {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return nil
 	}
-	st, err := os.Stat(p)
+	st, err := os.Stat(p) //nolint:gosec // p stays under root: the ".." check above drops a ref that leaves it
 	if err != nil {
 		return nil
 	}
@@ -169,7 +169,7 @@ func localActionFiles(root, ref string) []string {
 	var files []string
 	for _, name := range []string{"action.yml", "action.yaml"} {
 		f := filepath.Join(p, name)
-		if st, err := os.Stat(f); err == nil && st.Mode().IsRegular() {
+		if st, err := os.Stat(f); err == nil && st.Mode().IsRegular() { //nolint:gosec // f is in p, which the ".." check keeps under root
 			files = append(files, f)
 		}
 	}
