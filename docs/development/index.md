@@ -25,7 +25,7 @@ make build   # bin/keepia-mail
 
 | Variable | Default | Used by |
 |---|---|---|
-| `KEEPIA_DATABASE_URL` | none (required) | `serve`, `migrate`; holds the password and is never logged. Percent-encode `@`, `/`, `?` and `#` in the user or password (`%40`, `%2F`, `%3F`, `%23`); a URL with a stray `@` is rejected without showing any part of it |
+| `KEEPIA_DATABASE_URL` | none (required) | `serve`, `migrate`; holds the password and is never logged. URL form only: it must start with exactly `postgres://` or `postgresql://`, without spaces around it (the keyword/value form `host=… password=…` is rejected). Percent-encode `@`, `/`, `?` and `#` in the user or password and `@` in a query value (`%40`, `%2F`, `%3F`, `%23`); a URL that breaks these rules is rejected without showing any part of it |
 | `KEEPIA_LISTEN` | `127.0.0.1:8080` | `serve` and `healthcheck`; flag `--listen` |
 | `KEEPIA_LOG_LEVEL` | `info` | `serve` (`debug`, `info`, `warn`, `error`) |
 

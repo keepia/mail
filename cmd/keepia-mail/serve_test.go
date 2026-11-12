@@ -229,6 +229,14 @@ func TestServeErrorHidesPassword(t *testing.T) {
 		// Only a '/' in the password, after a number: the rest lands in
 		// the database name.
 		"slash, port-like": "postgres://keepia:5432/pa-three@" + closedPort(t) + "/keepia?connect_timeout=5",
+		// Not a URL to pgx: it would read these as keyword/value, with
+		// the whole URL as a parameter name that a server echoes, or with
+		// a password that sets the host.
+		"not a URL, leading space": " postgres://keepia:pa-one@" + closedPort(t) + "/keepia?sslmode=disable",
+		"not a URL, upper case":    "POSTGRES://keepia:pa-one@" + closedPort(t) + "/keepia?sslmode=disable",
+		"not a URL, mixed case":    "Postgres://keepia:pa-one@" + closedPort(t) + "/keepia",
+		"not a URL, trailing tab":  "postgres://keepia:pa-one@" + closedPort(t) + "/keepia?sslmode=disable\t",
+		"not a URL, keyword/value": "host=127.0.0.1 port=1 user=keepia password=pa-one host=pa-two dbname=keepia",
 		// Percent-encoded as it must be: the URL is used, and the
 		// connect fails without showing the password.
 		"encoded": "postgres://keepia:pa-one%40pa-two%2Fpa-three@" + closedPort(t) + "/keepia?sslmode=disable&connect_timeout=5",
@@ -244,6 +252,9 @@ func TestServeErrorHidesPassword(t *testing.T) {
 					if !strings.Contains(err.Error(), "%40") {
 						t.Errorf("%v: %v, want the percent-encoding error", args, err)
 					}
+				}
+				if strings.HasPrefix(name, "not a URL, ") && !strings.Contains(err.Error(), "must start with postgres:// or postgresql://") {
+					t.Errorf("%v: %v, want the URL-form error", args, err)
 				}
 				if name == "encoded" && !strings.Contains(err.Error(), "connect to database") {
 					t.Errorf("%v: %v, want a connect error: the encoded URL must be used", args, err)

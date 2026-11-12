@@ -127,20 +127,21 @@ func TestMigrationsHaveDown(t *testing.T) {
 	}
 }
 
-// Open rejects a connection string with a stray '@' (an unescaped '@' in
-// the password, or in a host) before it connects, with a text that names
-// no part of it: URLs (strayAt) and the keyword/value form, whose host
-// and fallback hosts hostHasAt checks.
-func TestOpenRejectsAtInHost(t *testing.T) {
-	for _, dbURL := range []string{
-		"postgres://keepia:sec@ret-not-real@127.0.0.1:1/keepia",
-		"postgres://keepia:sec@127.0.0.1:1,ret@not-real:2/keepia",
-		"host=sec@ret-not-real port=1 user=keepia dbname=keepia",
-		"host=127.0.0.1,sec@ret-not-real port=1,2 user=keepia dbname=keepia",
+// Open rejects, before it connects and with a text that names no part of
+// it, a URL with a stray '@' (an unescaped '@' in the password, also with
+// a fallback host) and every string that is not a URL, such as the
+// keyword/value form.
+func TestOpenRejectsUnsafeURL(t *testing.T) {
+	for dbURL, want := range map[string]string{
+		"postgres://keepia:sec@ret-not-real@127.0.0.1:1/keepia":              "%40",
+		"postgres://keepia:sec@127.0.0.1:1,ret@not-real:2/keepia":            "%40",
+		"host=sec@ret-not-real port=1 user=keepia dbname=keepia":             "must start with postgres://",
+		"host=127.0.0.1 port=1 user=keepia password=sec host=ret-not-real":   "must start with postgres://",
+		"host=127.0.0.1,sec@ret-not-real port=1,2 user=keepia dbname=keepia": "must start with postgres://",
 	} {
 		_, err := store.Open(context.Background(), dbURL)
-		if err == nil || !strings.Contains(err.Error(), "%40") {
-			t.Errorf("%s: %v, want the percent-encoding error", dbURL, err)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want an error with %q", dbURL, err, want)
 			continue
 		}
 		for _, s := range []string{"sec", "ret-not", "not-real", "127.0.0.1"} {

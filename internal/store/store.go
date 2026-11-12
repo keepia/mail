@@ -84,39 +84,41 @@ func WithMigrationLockTimeout(period, tries uint64) Option {
 	}
 }
 
-// Open connects to the database. Its error never contains the password of
-// url. These are rejected with a fixed text that names no part of url,
-// before anything connects:
+// Open connects to the database at url, a PostgreSQL URL. Its error never
+// contains the password of url, nor any other part of url's user
+// information. These are rejected before anything parses or connects,
+// each with a fixed text that names no part of url:
 //
-//   - a URL (postgres:// or postgresql://) with an unescaped '@' anywhere
-//     but as the single separator between the user information and the
-//     host (strayAt): an unescaped '@', '/', '?' or '#' in the user or
-//     password, which would put part of the password into the host, the
-//     database name or the query, where pgx's errors print it;
-//   - a connection string that does not parse;
-//   - a keyword/value connection string whose host or a fallback host
-//     contains an '@' (hostHasAt).
+//   - anything but a URL that starts with exactly postgres:// or
+//     postgresql:// (lowercase), with no leading or trailing white space
+//     (isURL). pgx reads any other string as keyword/value, where a
+//     malformed URL becomes a parameter name and a password can redirect
+//     the host; the keyword/value form is not supported;
+//   - a URL with an unescaped '@' anywhere but as the single separator
+//     between the user information and the host (strayAt): an unescaped
+//     '@', '/', '?' or '#' in the user or password, which would put part
+//     of the password into the host, the database name or the query,
+//     where pgx's errors print it;
+//   - a URL that does not parse.
 //
-// For the URL form this holds for every password: the error shows no part
-// of it. A password that is percent-encoded as it must be (%40 for '@')
-// is used as given.
+// A password that is percent-encoded as it must be (%40 for '@', %2F,
+// %3F, %23) is used as given.
 func Open(ctx context.Context, url string, opts ...Option) (*Store, error) {
 	var oc openConfig
 	for _, o := range opts {
 		o(&oc)
+	}
+	if !isURL(url) {
+		return nil, errNotURL
 	}
 	if strayAt(url) {
 		return nil, errUnescapedAt
 	}
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
-		// pgx's parse error quotes the URL (with the password masked,
-		// but not a password fragment after an unescaped '@'); say only
-		// what is wrong with it.
+		// pgx's parse error quotes the URL (with the password masked);
+		// say only what is wrong with it.
 		return nil, errors.New("parse database URL: invalid connection string")
-	}
-	if hostHasAt(cfg.ConnConfig) {
-		return nil, errUnescapedAt
 	}
 	if settings := oc.settings; len(settings) > 0 {
 		cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
@@ -142,23 +144,30 @@ func Open(ctx context.Context, url string, opts ...Option) (*Store, error) {
 	return &Store{pool: pool, lockOptions: oc.lockOptions}, nil
 }
 
-// errUnescapedAt is Open's error for a connection string with a stray '@'
-// (strayAt, hostHasAt). It names no part of the connection string.
-var errUnescapedAt = errors.New("parse database URL: '@' in the user name or password must be percent-encoded (%40), and so must '/', '?' and '#'")
+// Open's fixed errors for a rejected database URL. They name no part of it.
+var (
+	errNotURL      = errors.New("parse database URL: it must start with postgres:// or postgresql://, without spaces around it")
+	errUnescapedAt = errors.New("parse database URL: '@', '/', '?' and '#' in the user name or password, and '@' in a query value, must be percent-encoded (%40, %2F, %3F, %23)")
+)
 
-// strayAt tells whether s is a URL-form connection string (scheme postgres
-// or postgresql, in any case) with an unescaped '@' that is not the one
-// separator between the user information and the host: more than one '@',
-// or an '@' after the authority (the part up to the first '/', '?' or '#'
-// after "://"). Either means a user name or password with an unescaped
-// '@', '/', '?' or '#', whose rest pgx would read as host, database name
-// or query and print in its errors. A percent-encoded %40 is not an '@'.
-// It fails closed: such a URL is never parsed.
+// isURL tells whether s starts with exactly postgres:// or postgresql://
+// and has no leading or trailing white space: the only strings pgx parses
+// as a URL.
+func isURL(s string) bool {
+	return s == strings.TrimSpace(s) &&
+		(strings.HasPrefix(s, "postgres://") || strings.HasPrefix(s, "postgresql://"))
+}
+
+// strayAt tells whether the URL s (isURL) has an unescaped '@' that is not
+// the one separator between the user information and the host: more than
+// one '@', or an '@' after the authority (the part up to the first '/',
+// '?' or '#' after "://"). Either means a user name or password with an
+// unescaped '@', '/', '?' or '#', whose rest pgx would read as host,
+// database name or query and print in its errors, or an '@' in the query.
+// A percent-encoded %40 is not an '@'. It fails closed: such a URL is
+// never parsed.
 func strayAt(s string) bool {
-	scheme, rest, ok := strings.Cut(s, "://")
-	if !ok || (!strings.EqualFold(scheme, "postgres") && !strings.EqualFold(scheme, "postgresql")) {
-		return false
-	}
+	_, rest, _ := strings.Cut(s, "://")
 	switch strings.Count(s, "@") {
 	case 0:
 		return false
@@ -171,22 +180,6 @@ func strayAt(s string) bool {
 	default:
 		return true
 	}
-}
-
-// hostHasAt tells whether the host of cfg or of one of its fallbacks
-// contains an '@'. It guards the keyword/value form (host=…), which
-// strayAt does not read; for a URL, strayAt already rejects every stray
-// '@'.
-func hostHasAt(cfg *pgx.ConnConfig) bool {
-	if strings.Contains(cfg.Host, "@") {
-		return true
-	}
-	for _, fb := range cfg.Fallbacks {
-		if strings.Contains(fb.Host, "@") {
-			return true
-		}
-	}
-	return false
 }
 
 // Close releases all connections.
