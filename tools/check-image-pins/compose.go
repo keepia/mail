@@ -152,7 +152,7 @@ func checkService(line int, name string, svc map[string]any, add func(int, strin
 		}
 		return ""
 	}
-	if !strings.HasPrefix(ownImageName(imageStr), "${KEEPIA_REGISTRY") {
+	if !ownImageNameRE.MatchString(ownImageName(imageStr)) {
 		add(line, "service %s builds an image; name it exactly %s (or as ${KEEPIA_<NAME>_IMAGE:-<that name>})", name, ownImageForm)
 	}
 	context, dockerfile := ".", "Dockerfile"

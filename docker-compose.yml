@@ -233,6 +233,9 @@ services:
     # (RFC 5737, RFC 3849) that no host has, so nothing is published by
     # accident; a wildcard is refused by edge-addresses, so never on every
     # interface.
+    depends_on:
+      edge-addresses:
+        condition: service_completed_successfully
     ports:
       - "${EDGE_IPV4:-192.0.2.10}:25:25"
       - "[${EDGE_IPV6:-2001:db8::10}]:25:25"
@@ -568,6 +571,7 @@ networks:
   groupware-private:
     internal: true
     enable_ipv6: true
+    driver_opts: *isolated
     ipam:
       config:
         - subnet: ${KEEPIA_SUBNET4:-172.29}.6.0/24

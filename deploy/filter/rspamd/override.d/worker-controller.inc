@@ -3,4 +3,4 @@
 # RSPAMD_LOCAL_ADDR, which the Compose file sets to the container's private
 # address for the normal and proxy workers; override.d wins over that
 # (priority 10). Nothing outside the container reaches the controller.
-bind_socket = "172.29.7.10:11334";
+bind_socket = "127.0.0.1:11334";
