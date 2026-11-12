@@ -12,9 +12,17 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// registryPrefix is how an own image is named in the Compose file: under
-// the registry variable, so the release bundle can pin it (part 4).
-const registryPrefix = "${KEEPIA_REGISTRY"
+// ownImageForm is how an own image is named in the Compose file, so the
+// release bundle can pin it (part 4): under the registry variable with
+// exactly the default ghcr.io/keepia, as mail or mail-<name>, with an
+// optional literal tag or ${KEEPIA_VERSION:-<tag>}. The whole name must
+// match: a check of only the prefix ${KEEPIA_REGISTRY let
+// ${KEEPIA_REGISTRY:-docker.io/evil} and ${KEEPIA_REGISTRYX:-busybox}
+// through (#61). The values set at run time are not checked here.
+const ownImageForm = "${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail[-<name>][:<tag>|:${KEEPIA_VERSION:-<tag>}]"
+
+var ownImageNameRE = regexp.MustCompile(`^\$\{KEEPIA_REGISTRY:-ghcr\.io/keepia\}/mail(?:-[a-z0-9]+)?` +
+	`(?::(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|\$\{KEEPIA_VERSION:-[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\}))?$`)
 
 // parseYAML parses every document of src. It returns the document nodes,
 // or an error when src does not parse.
@@ -63,7 +71,7 @@ func root(doc *yaml.Node) *yaml.Node {
 
 // CheckCompose applies rule 4 of the image pin check to a Compose file:
 // a service without build: names image: name:tag@sha256:<64 hex>; a
-// service with build: names its image under ${KEEPIA_REGISTRY...} and
+// service with build: names its image in ownImageForm and
 // builds from a local context. build may only use the keys in
 // composeBuildKeys (so x-bake, additional_contexts, dockerfile_inline and
 // any new key are reported), and its args may not set BUILDKIT_SYNTAX. A
@@ -144,8 +152,8 @@ func checkService(line int, name string, svc map[string]any, add func(int, strin
 		}
 		return ""
 	}
-	if !strings.HasPrefix(ownImageName(imageStr), registryPrefix) {
-		add(line, "service %s builds an image; name it under %s...} (or as ${KEEPIA_<NAME>_IMAGE:-<that name>})", name, registryPrefix)
+	if !ownImageNameRE.MatchString(ownImageName(imageStr)) {
+		add(line, "service %s builds an image; name it exactly %s (or as ${KEEPIA_<NAME>_IMAGE:-<that name>})", name, ownImageForm)
 	}
 	context, dockerfile := ".", "Dockerfile"
 	switch b := build.(type) {

@@ -218,7 +218,7 @@ func TestKmMissingImage(t *testing.T) {
 	code, out, calls := runKm(t, fakeDocker{withDockerfile: true, missing: []string{testDep}}, "migrate")
 	want := imageCheck(inspect(testImage), inspect(testDep))
 	if code == 0 || !strings.Contains(out, "make images") || !strings.Contains(out, testDep) ||
-		!strings.Contains(out, "keepia or a service it depends on") ||
+		!strings.Contains(out, "(Compose service postgres or keepia, or a service they depend on)") ||
 		!slices.EqualFunc(calls, want, slices.Equal) {
 		t.Errorf("exit %d\n%s\ndocker calls:\n%swant a non-zero exit, a message with %q and %q, and only:\n%s",
 			code, out, show(calls), "make images", testDep, show(want))

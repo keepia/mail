@@ -40,7 +40,7 @@ for image in $images; do
 		fi
 		;;
 	*)
-		echo "km: the image $image (Compose service keepia or a service it depends on) is missing." >&2
+		echo "km: the image $image (Compose service postgres or keepia, or a service they depend on) is missing." >&2
 		echo "km: build it with \`make images\`; km does not build or pull images." >&2
 		exit 1
 		;;

@@ -7,7 +7,8 @@
 //  3. every ADD from http(s):// has --checksum=sha256:<64 hex>; ADD of a
 //     git URL, and an ADD source with a variable, are reported;
 //  4. a Compose file's services: image by digest, or a build of an image
-//     under ${KEEPIA_REGISTRY...} from a local context;
+//     named exactly ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail[-<name>]...
+//     from a local context;
 //  5. the bake definition, as `docker buildx bake --print` resolves it:
 //     every context is a relative path, and there are no named contexts,
 //     no dockerfile-inline and no BUILDKIT_SYNTAX argument;
