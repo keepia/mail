@@ -82,6 +82,8 @@ exit status is the command's. That is the contract the Compose template of
 `/healthz` answers 200), because the image has no curl. The tests use a fake
 `docker` (`cmd/keepia-mail/km_test.go`).
 
+Architecture and resource budget: [architecture.md](architecture.md).
+
 ## Security checks
 
 The required checks are `secret-scan`, `links` and `workflows`. Each runs on
