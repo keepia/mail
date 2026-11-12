@@ -6,7 +6,11 @@
 # It runs as the fixed uid 10053 with no capabilities: Docker sets
 # net.ipv4.ip_unprivileged_port_start to 0 in the container, so port 53
 # needs none (#5 plan, M4).
-FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+# PROOF COMMIT (plan test 4), never to be merged: a well-formed digest
+# that no image has, so both unbound rows fail to build and the docker
+# aggregate must turn red. The pin check still passes (the form is
+# pinned), which isolates test 4 from tests 1-2.
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b3
 
 # The fixed id before the package would pick its own (coordinator
 # decision C7).
