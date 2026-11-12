@@ -6,7 +6,7 @@ Current state only. At session end replace these sections; never append. History
 - None. No release is possible before #5 (release pipeline).
 
 ## Open PRs
-- None.
+- Runbook skeleton for the mailcow migration (#28, part 1 of #13), docs only.
 
 ## Open tickets
 - **0.1.0 (Foundation):**
@@ -16,13 +16,13 @@ Current state only. At session end replace these sections; never append. History
   - #2 architecture plan (`docs`; defines the resource budget in `docs/development/architecture.md`);
   - #5 Docker images and release pipeline;
   - #6 Go skeleton: service, CLI, Postgres migrations, health endpoint.
-- **Not in a milestone:** #13 migration runbook and import command: mailcow to Keepia Mail (new).
+- **Not in a milestone (MQ4 open):** #13 migration runbook and import command: mailcow to Keepia Mail (`ready`); parts #28 (runbook skeleton, in PR), #29–#32 (outlines, each built after its plan revision is approved). Open maintainer questions on #13: MQ1, MQ2, MQ4–MQ7.
 
 ## Active decisions
 - **Operating model:** one shared instance run by the operator; customers are separated by groups.
 - **Public, MIT licence.**
 - **Brand** lives in keepia/design-system (#7, 2026-11-11).
-- The reference installation moves from mailcow to Keepia Mail with 1.0.0 (#13).
+- The reference installation moves from mailcow to Keepia Mail with 1.0.0 (#13). Its runbook is `docs/operations/mailcow-migration.md`, placeholders only: no real value of the installation in the repository or on GitHub; reviewers of every #13 pull request run the plan's placeholder check.
 - **Coordinator autonomy** (maintainer, 2026-11-11): as in `CLAUDE.md`.
 - **Merge mechanics:** squash merge pinned to the reviewed head SHA (`expectedHeadSha`); a branch behind `main` is refused for required checks, so bring `main` in first.
 - **CI before the Go jobs:** every job in `ci.yml` counts as required for merges until the ruleset lists it. #6 adds `test`, `lint` and `vulncheck`; #5 adds `docker` and `compose`. After their first green run the maintainer adds them to the ruleset.
