@@ -615,9 +615,10 @@ func looksLikeScript(w string) bool {
 }
 
 // forwardedArg is an argument that passes on the caller's positional
-// parameters: "$@", "$*", "${@}", "$N", "${N}", also with an operator
-// ("${@:2}", "${1:-x}").
-var forwardedArg = regexp.MustCompile(`^\$(?:[0-9]+|[@*]|\{(?:[0-9]+|[@*])(?:[:#%/^,@-][^}]*)?\})$`)
+// parameters: "$@", "$*", "${@}", "$N", "${N}", also with any operator
+// after the parameter ("${@:2}", "${1:-x}", the portable ${1+"$@"},
+// "${1?msg}"; #68 review B, B1).
+var forwardedArg = regexp.MustCompile(`^\$(?:[0-9]+|[@*]|\{(?:[0-9]+|[@*])[^}]*\})$`)
 
 // shellScope is what command reads a command of a shell text with: the
 // variables the text assigns only literal command names
@@ -701,6 +702,25 @@ func forwardedCall(call []string, fwd map[string]bool) (string, bool) {
 	return "", false
 }
 
+// variableCall returns the first argument with a variable or a command
+// substitution ($ or `) in a call of a forwarding function; call starts
+// at the command word. At the top level such an argument is reported:
+// the function runs it as a command, and the check cannot read what it
+// holds ("${args[@]}" after args=("$@"), $cmd after cmd="$*"; #68
+// review B, B1). Only forwardedArg makes a function forwarding
+// (runsPositional), so a body that passes "$x" on stays as it is.
+func variableCall(call []string, fwd map[string]bool) (string, bool) {
+	if !fwd[call[0]] {
+		return "", false
+	}
+	for _, a := range call[1:] {
+		if strings.ContainsAny(a, "$`") {
+			return a, true
+		}
+	}
+	return "", false
+}
+
 // replaceWord returns words with the word at i replaced by with.
 func replaceWord(words []string, i int, with []string) []string {
 	out := append(slices.Clone(words[:i]), with...)
@@ -745,8 +765,9 @@ func (w *refWalk) commands(text string, dirs []string, file string, depth int, o
 // caller's arguments as a command. The check does not model that
 // (shift, set --, forwarding through more scripts): it is reported
 // (#50 delta review B 2; coordinator, G17). So is a call at the top level
-// that passes them to a forwarding function (`main "$@"` with
-// `main() { for i in 1 2 3; do "$@" && return 0; done; }`; #67), and
+// that passes them, or any other variable, to a forwarding function
+// (`main "$@"` with `main() { for i in 1 2 3; do "$@" && return 0; done; }`;
+// #67; variableCall), and
 // any other command word with a variable ("$SAVE", the "$CMD" of
 // sh -c "$CMD"; #50 review B, finding 3).
 func (w *refWalk) command(words []string, sc shellScope, inFunc bool, dirs []string, file string, depth int) {
@@ -770,7 +791,7 @@ func (w *refWalk) command(words []string, sc shellScope, inFunc bool, dirs []str
 			w.problem("it forwards its arguments as a command (%s), which the check cannot resolve; call the command directly", words[i])
 			return
 		}
-		if arg, ok := forwardedCall(words[i:], sc.fwd); ok && !inFunc {
+		if arg, ok := variableCall(words[i:], sc.fwd); ok && !inFunc {
 			w.problem("it forwards its arguments as a command (%s, through the function %s), which the check cannot resolve; call the command directly", arg, words[i])
 			return
 		}

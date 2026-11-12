@@ -93,6 +93,13 @@ func TestFunctionForwarding(t *testing.T) {
 		{"a() { \"$@\"; }\nb() { a \"$@\"; }\nc() { b \"$1\" x; }\nif c \"$@\"; then :; fi", "$@, through the function c)"},
 		{"main() { \"$@\"; }\neval 'main \"$@\"'", "$@, through the function main)"},
 		{"main() { \"$@\"; }\nout=$(main \"$@\")", "$@, through the function main)"},
+		// #68 review B, B1: any operator, and any variable at the top level.
+		{"main() { \"$@\"; }\nmain ${1+\"$@\"}", "${1+\"$@\"}, through the function main)"},
+		{"main() { \"$@\"; }\nmain \"${1=x}\"", "${1=x}, through the function main)"},
+		{"inner() { \"$@\"; }\nmain() { inner ${1+\"$@\"}; }\nmain \"$@\"", "$@, through the function main)"},
+		{"main() { \"$@\"; }\nargs=(\"$@\")\nmain \"${args[@]}\"", "${args[@]}, through the function main)"},
+		{"main() { \"$@\"; }\ncmd=\"$*\"\nmain $cmd", "$cmd, through the function main)"},
+		{"main() { \"$@\"; }\nmain \"$(cat cmd.txt)\"", "$(cat cmd.txt), through the function main)"},
 	} {
 		_, problems := referencedTexts(root, c.text, "", true)
 		if !slices.Contains(problems, msg+c.want+", which the check cannot resolve; call the command directly") {
@@ -108,6 +115,10 @@ func TestFunctionForwarding(t *testing.T) {
 		"run() { \"$@\"; }\nouter() { run \"$@\"; }\nouter make --version",
 		"run() { \"$@\"; }\necho run \"$@\"",
 		"inner() { \"$@\"; }\nmain() { inner date; }\nmain \"$@\"",
+		// A body that passes a variable on does not make its function
+		// forwarding; only the top-level call is held to that.
+		"inner() { \"$@\"; }\nmain() { x=date; inner \"$x\"; }\nmain \"$@\"",
+		"say() { echo \"$1\"; }\nsay \"$HOME\" `date`",
 	} {
 		if _, problems := referencedTexts(root, text, "", true); len(problems) > 0 {
 			t.Errorf("referencedTexts(%q): problems %q, want none", text, problems)

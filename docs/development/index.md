@@ -559,9 +559,12 @@ lives, also under a skipped path.
          it forwards the caller's arguments as a command, which the check
          does not model (`shift`, `set --`, forwarding through more
          scripts): it is reported, and the fix is to call the command
-         directly. A call at the top level that passes `"$@"`, `"$*"`,
-         `"${@}"` or `"$N"` to a function whose body runs its positional
-         parameters as a command word is reported in the same way (#67):
+         directly. A call at the top level that passes its arguments
+         (`"$@"`, `"$*"`, `"$N"`, also with any operator such as
+         `${1+"$@"}` or `"${1?msg}"`), or any other variable or command
+         substitution (`"${args[@]}"`, `$cmd`), to a function whose body
+         runs its positional parameters as a command word is reported in
+         the same way (#67):
          the `main` idiom `main() { for i in 1 2 3; do "$@" && return 0;
          done; return 1; }; main "$@"`, also with a `while` loop, `shift`
          before the call or in the body, a prefix such as `exec` or
@@ -659,7 +662,8 @@ lives, also under a skipped path.
   arguments; so does a command given as literal words to a function that
   runs its arguments (`retry make publish` with `retry() { "$@"; }`),
   whose words are read only as words of the text; a function is known
-  only in the text that defines it, not in a file that sources it; and
+  only in the text that defines it and its inline commands (`eval`,
+  `sh -c`), not in a file that sources it; and
   reading `make` takes in the whole Makefile, which over-reports.
 - A pull request that edits the check itself, or deliberately disables or
   routes around it (for example a build command assembled at run time, or
