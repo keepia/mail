@@ -18,7 +18,7 @@ var minFixtures = map[string]int{
 	"dockerfile": 33,
 	"compose":    16,
 	"workflow":   9,
-	"repos":      28,
+	"repos":      41,
 }
 
 // fixtureKind maps a testdata directory of single files to the rules its

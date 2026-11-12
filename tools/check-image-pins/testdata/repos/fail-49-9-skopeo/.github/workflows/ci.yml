@@ -1,0 +1,26 @@
+# #49 point 9 (review A note 5): skopeo copy docker-daemon: reads the
+# image by name from the store, after the build. f360066 did not see it,
+# with or without a verify step before it.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - run: skopeo copy docker-daemon:ghcr.io/keepia/mail-postfix:dev oci-archive:image.tar
+      - id: verify
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - run: skopeo copy docker-daemon:ghcr.io/keepia/mail-postfix:dev docker://ghcr.io/keepia/mail-postfix:dev

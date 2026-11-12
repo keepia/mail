@@ -1,0 +1,10 @@
+job build: step 3 tests, saves, pushes or tags the image; the step right before must be
+job build: step 3 pushes ghcr.io/keepia/mail-root:dev by a name it did not tag from "$VERIFIED_IMAGE"
+job build: step 4 tests, saves, pushes or tags the image; the step right before must be
+job build: step 4 pushes ghcr.io/keepia/mail-root:dev by a name it did not tag from "$VERIFIED_IMAGE"
+job build: step 5 tests, saves, pushes or tags the image; the step right before must be
+job build: step 5 pushes ghcr.io/keepia/mail-root:dev by a name it did not tag from "$VERIFIED_IMAGE"
+job build: step 6: it forwards its arguments as a command ($@), which the check cannot resolve; call the command directly; in a job that builds with bake
+job build: step 7: it forwards its arguments as a command ($@), which the check cannot resolve; call the command directly; in a job that builds with bake
+job build: step 8: it forwards its arguments as a command ($@), which the check cannot resolve; call the command directly; in a job that builds with bake
+job build: step 9: it forwards its arguments as a command ($@), which the check cannot resolve; call the command directly; in a job that builds with bake

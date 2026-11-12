@@ -1,0 +1,3 @@
+job build: step 3: it runs $SAVE, which the check cannot resolve to a file in the repository
+job build: step 4: it runs $CMD, which the check cannot resolve to a file in the repository
+job build: step 5: it runs $CMD, which the check cannot resolve to a file in the repository

@@ -1,8 +1,9 @@
 job build: step 1 runs "buildx bake"
 job build: the docker/bake-action step needs id: build
-job build: the step right before docker/bake-action must be exactly `run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"`, without env, if or continue-on-error
+job build: the step right before docker/bake-action must be exactly `run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"`, without env, if or continue-on-error
 job build: workflow env BUILDX_BAKE_FILE is not allowed
 job build: job env CTX is not allowed
 job build: BAKE_SET line "app.contexts.base=docker-image://busybox:latest" sets "base"
 job build: BAKE_SET line "${{ matrix.attr }}=x" sets ""
 scripts/build.sh:3: runs "buildx bake"
+job build: step 2: it runs make, but the check finds no Makefile for it

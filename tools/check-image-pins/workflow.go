@@ -50,6 +50,7 @@ func CheckWorkflow(src []byte, release bool, resolve resolver) ([]Finding, []str
 	var wf struct {
 		Permissions any `yaml:"permissions"`
 		Env         any `yaml:"env"`
+		Defaults    any `yaml:"defaults"`
 	}
 	top := root(docs[0])
 	if err := top.Decode(&wf); err != nil {
@@ -72,7 +73,7 @@ func CheckWorkflow(src []byte, release bool, resolve resolver) ([]Finding, []str
 			continue
 		}
 		checkJobImages(name.Line, name.Value, job, add)
-		runs = append(runs, checkJobBuilds(name.Line, name.Value, wf.Env, job, resolve, add)...)
+		runs = append(runs, checkJobBuilds(name.Line, name.Value, wf.Env, wf.Defaults, job, resolve, add)...)
 		if release {
 			continue
 		}

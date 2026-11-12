@@ -1,0 +1,27 @@
+# #49 point 7 (review B finding 4): GITHUB_ENV and GITHUB_PATH writes
+# f360066 did not read (a script by its $GITHUB_WORKSPACE path, a nested
+# local action, core.exportVariable in github-script), and the check step
+# in f360066's form, without -mod=readonly: a vendor/ directory an
+# earlier step creates would replace the tool's checked dependencies.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: bash "$GITHUB_WORKSPACE/scripts/env.sh"
+      - uses: ./.github/actions/outer
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: core.exportVariable('GOFLAGS', '-mod=vendor')
+      - run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true

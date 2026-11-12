@@ -2,10 +2,10 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
+	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -42,10 +42,33 @@ func normalizeShell(text string) string {
 	return strings.ToLower(shellQuoting.Replace(text))
 }
 
+// joinBrackets replaces a newline inside open ( or [ by a space: a list
+// or a call split over lines, as black and gofmt write them
+// (`subprocess.run(\n    [\n        "docker",\n        "build", …`), reads
+// as one command (#49 point 3). An unbalanced bracket joins the rest of
+// the text, which only adds matches.
+func joinBrackets(text string) string {
+	b := []byte(text)
+	depth := 0
+	for i, c := range b {
+		switch c {
+		case '(', '[':
+			depth++
+		case ')', ']':
+			depth = max(depth-1, 0)
+		case '\n':
+			if depth > 0 {
+				b[i] = ' '
+			}
+		}
+	}
+	return string(b)
+}
+
 // commands splits text into commands of words (normalised).
 func commands(text string) [][]string {
 	var out [][]string
-	for _, c := range commandSplit.Split(normalizeShell(text), -1) {
+	for _, c := range commandSplit.Split(joinBrackets(normalizeShell(text)), -1) {
 		var words []string
 		for _, w := range wordSplit.Split(c, -1) {
 			if w != "" {
@@ -65,7 +88,7 @@ func commands(text string) [][]string {
 var knownVerbs = map[string]bool{
 	"build": true, "bake": true, "b": true, "bud": true, "image": true, "builder": true,
 	"buildx": true, "compose": true, "up": true, "run": true, "create": true, "watch": true,
-	"save": true, "push": true, "tag": true,
+	"save": true, "push": true, "tag": true, "imagetools": true,
 }
 
 // boolOptions are global options known to take no value, so the word
@@ -114,14 +137,23 @@ func subcommand(rest []string) (string, []string) {
 var engines = map[string]bool{"docker": true, "podman": true, "nerdctl": true}
 
 // composeBuild returns the build a Compose command runs: `build`,
-// `watch`, or any subcommand with --build (up, run, create).
+// `watch`, any subcommand with --build or --build=<value>, up and create
+// without --no-build, and every run: they build each service that has
+// `build:` and no image yet (#49 point 2). Compose's run has no
+// --no-build (Compose v5.6.1: "unknown flag"), so it is always a build;
+// start services with `up -d --no-build` and use `exec` instead (#50
+// review A, finding 1).
 func composeBuild(rest []string) string {
 	sub, after := subcommand(rest)
 	switch {
 	case sub == "build" || sub == "watch":
 		return "compose " + sub
-	case sub != "" && slices.Contains(after, "--build"):
+	case sub != "" && slices.ContainsFunc(after, func(w string) bool { return w == "--build" || strings.HasPrefix(w, "--build=") }):
 		return "compose " + sub + " --build"
+	case sub == "run":
+		return "compose run, which builds and has no --no-build (use up -d --no-build and exec)"
+	case (sub == "up" || sub == "create") && !slices.Contains(after, "--no-build"):
+		return "compose " + sub + " without --no-build"
 	}
 	return ""
 }
@@ -129,8 +161,9 @@ func composeBuild(rest []string) string {
 // buildCommands returns the image build commands in a text: build,
 // image build and builder build of docker, podman and nerdctl; any buildx
 // build/bake/b (also as the docker-buildx plugin binary); Compose builds
-// (`docker compose build`, `… up --build`, `docker-compose build`,
-// `podman-compose`, `nerdctl compose`); buildctl; and buildah build.
+// (`docker compose build`, `… up --build`, `… up` without --no-build,
+// `docker-compose build`, `podman-compose`, `nerdctl compose`); buildctl;
+// and buildah build.
 // Global options before a subcommand are skipped.
 func buildCommands(text string) []string {
 	var found []string
@@ -175,26 +208,54 @@ func buildCommands(text string) []string {
 
 // imageUses returns what a text does with an existing image that the
 // verify rule covers (#46, A3): docker (or podman, nerdctl) save, push
-// and tag, also as `image save|push|tag`.
+// and tag, also as `image save|push|tag`; and the other ways an image
+// leaves the runner (#49 point 5): Compose push, `buildx imagetools
+// create`, crane and skopeo (also `skopeo copy docker-daemon:`, point 9).
 func imageUses(text string) []string {
 	var found []string
 	for _, words := range commands(text) {
 		for i, w := range words {
 			base := w[strings.LastIndex(w, "/")+1:]
-			if !engines[base] {
-				continue
-			}
-			sub, after := subcommand(words[i+1:])
-			if sub == "image" {
-				sub, _ = subcommand(after)
-			}
-			if sub == "save" || sub == "push" || sub == "tag" {
-				found = append(found, "docker "+sub)
+			rest := words[i+1:]
+			switch {
+			case engines[base]:
+				sub, after := subcommand(rest)
+				switch sub {
+				case "image":
+					sub, _ = subcommand(after)
+				case "compose":
+					if s, _ := subcommand(after); s == "push" {
+						found = append(found, "compose push")
+					}
+					continue
+				}
+				if sub == "save" || sub == "push" || sub == "tag" {
+					found = append(found, "docker "+sub)
+				}
+			case base == "docker-compose" || base == "podman-compose":
+				if s, _ := subcommand(rest); s == "push" {
+					found = append(found, "compose push")
+				}
+			case base == "buildx" || base == "docker-buildx":
+				if s, after := subcommand(rest); s == "imagetools" {
+					if s2, _ := subcommand(after); s2 == "create" {
+						found = append(found, "buildx imagetools create")
+					}
+				}
+			case base == "crane" || base == "gcrane":
+				found = append(found, "crane")
+			case base == "skopeo":
+				found = append(found, "skopeo")
 			}
 		}
 	}
 	return found
 }
+
+// otherPushes are the image uses that are reported after the build in
+// any form: the image leaves the runner only by `docker push` of a name
+// the same step tagged from the verified image ID.
+var otherPushes = map[string]bool{"compose push": true, "buildx imagetools create": true, "crane": true, "skopeo": true}
 
 // isBuildAction reports whether a `uses:` names an action that builds
 // images: docker/build-push-action, docker/bake-action and any other
@@ -229,6 +290,13 @@ func isBuildAction(uses string) bool {
 // mode keeps these from its caller (passEnv) so the docker CLI finds
 // itself, its plugins and its daemon, and make passes its own value of
 // an environment variable to a recipe even without `export`.
+//
+// And it reports what reroutes `$(GO) run ./tools/check-image-pins
+// -bake-local` itself or hides lines from this rule (#49 point 8): SHELL
+// or .SHELLFLAGS set; GOFLAGS, GOENV or GOWORK set or exported (CI fixes
+// them in the check steps' prefix); GO set to anything but `go`; an
+// include of a file that is not a literal *.mk path the walk reads; and a
+// variable name that is computed (`export PA$(E)TH`).
 func CheckMakefile(src []byte) []Finding {
 	var out []Finding
 	for _, l := range makeLogicalLines(src) {
@@ -246,6 +314,10 @@ func CheckMakefile(src []byte) []Finding {
 			out = append(out, Finding{l.line, "a Makefile may not set or export " + m[1] + m[2] + ": `check-image-pins -bake-local` passes it to docker"})
 			continue
 		}
+		if msg := makeToolInputs(raw); msg != "" {
+			out = append(out, Finding{l.line, msg})
+			continue
+		}
 		for _, c := range buildCommands(l.text) {
 			out = append(out, Finding{l.line, fmt.Sprintf("a Makefile runs %q: images are built only through `check-image-pins -bake-local`", c)})
 		}
@@ -261,6 +333,63 @@ var (
 	makeDockerEnv = regexp.MustCompile(`\bDOCKER_(?:CONFIG|HOST|CONTEXT)\b`)
 	makeSetEnv    = regexp.MustCompile(`\b(PATH|HOME)\s*(?::{1,3}|[?+!])?=|\b(?:export|unexport|override|define)\b[^=#]*?\b(PATH|HOME)\b`)
 )
+
+// The Makefile forms of #49 point 8.
+var (
+	makeShell    = regexp.MustCompile(`(?:^|[^\w.])(SHELL|\.SHELLFLAGS)\s*(?::{1,3}|[?+!])?=|\b(?:export|unexport|override|define)\b[^=#]*?(?:^|[^\w.])(SHELL|\.SHELLFLAGS)\b`)
+	makeGoEnv    = regexp.MustCompile(`\b(GOFLAGS|GOENV|GOWORK)\s*(?::{1,3}|[?+!])?=|\b(?:export|unexport|override|define)\b[^=#]*?\b(GOFLAGS|GOENV|GOWORK)\b`)
+	makeGoVar    = regexp.MustCompile(`\bGO\s*(?::{1,3}|[?+!])?=\s*([^\s)]*)`)
+	makeInclude  = regexp.MustCompile(`^\s*(?:-|s)?include\s+(.*)$`)
+	makeVarName  = regexp.MustCompile(`([^\s=:?+!;#]+)\s*(?::{1,3}|[?+!])?=`)
+	makeDirectve = regexp.MustCompile(`\b(?:export|unexport|override|define|undefine)\s+([^=#]*)`)
+)
+
+// makeToolInputs returns the finding for one Makefile line under the
+// rules of #49 point 8, or "".
+func makeToolInputs(raw string) string {
+	if m := makeShell.FindStringSubmatch(raw); m != nil {
+		return "a Makefile may not set " + m[1] + m[2] + ": every recipe, `check-image-pins -bake-local` included, would run through it"
+	}
+	if m := makeGoEnv.FindStringSubmatch(raw); m != nil {
+		return "a Makefile may not set or export " + m[1] + m[2] + ": it changes how `go run` builds `check-image-pins` itself"
+	}
+	if m := makeGoVar.FindStringSubmatch(raw); m != nil && m[1] != "go" {
+		return "a Makefile may set GO only to `go` (got " + strconv.Quote(m[1]) + "): `make images` runs `$(GO) run ./tools/check-image-pins`"
+	}
+	if m := makeInclude.FindStringSubmatch(raw); m != nil {
+		for _, f := range strings.Fields(m[1]) {
+			if strings.ContainsAny(f, "$`*?[") || !strings.HasSuffix(f, ".mk") || skippedPath(f) {
+				return "a Makefile may include only literal *.mk files the check reads (got " + strconv.Quote(f) + ")"
+			}
+		}
+	}
+	noShellVars := strings.ReplaceAll(raw, "$$", "")
+	var names []string
+	for _, m := range makeVarName.FindAllStringSubmatch(noShellVars, -1) {
+		names = append(names, m[1])
+	}
+	for _, m := range makeDirectve.FindAllStringSubmatch(noShellVars, -1) {
+		names = append(names, strings.Fields(m[1])...)
+	}
+	for _, n := range names {
+		if strings.Contains(n, "$") {
+			return "a Makefile may not compute a variable name (" + strconv.Quote(n) + "): the check cannot see which variable it sets"
+		}
+	}
+	return ""
+}
+
+// skippedPath reports whether a root-relative path is inside a directory
+// the walk skips.
+func skippedPath(p string) bool {
+	p = path.Clean(strings.TrimPrefix(p, "./"))
+	for s := range skipPaths {
+		if p == s || strings.HasPrefix(p, s+"/") {
+			return true
+		}
+	}
+	return strings.HasPrefix(p, "../") || path.IsAbs(p)
+}
 
 type makeLine struct {
 	line int
@@ -287,10 +416,12 @@ func makeLogicalLines(src []byte) []makeLine {
 	return out
 }
 
-// CheckScriptText reports the build commands in a script, by line.
+// CheckScriptText reports the build commands in a script, by line. Lines
+// inside an open ( or [ are read as one with the line that opens it, so
+// a list split over lines matches (#49 point 3).
 func CheckScriptText(src []byte) []Finding {
 	var out []Finding
-	for _, l := range makeLogicalLines(src) {
+	for _, l := range bracketLines(makeLogicalLines(src)) {
 		for _, c := range buildCommands(l.text) {
 			out = append(out, Finding{l.line, fmt.Sprintf("runs %q: images are built only through make images or the checked docker/bake-action step", c)})
 		}
@@ -298,57 +429,25 @@ func CheckScriptText(src []byte) []Finding {
 	return out
 }
 
-// maxReferenced bounds how many files referencedTexts follows.
-const maxReferenced = 200
-
-// referencedTexts returns the files a command text names under root
-// (referencedFiles), and the files those name, recursively, each once,
-// with their paths relative to root. A file that cannot be read is
-// returned with its error as text, so a rule that looks for a word
-// cannot pass it silently.
-func referencedTexts(root, text string) []refText {
-	var out []refText
-	seen := map[string]bool{}
-	queue := []string{text}
-	for len(queue) > 0 && len(seen) < maxReferenced {
-		t := queue[0]
-		queue = queue[1:]
-		for _, p := range referencedFiles(root, t) {
-			p = filepath.Clean(p)
-			if seen[p] {
-				continue
+// bracketLines joins each line inside an open ( or [ to the line that
+// opened it.
+func bracketLines(lines []makeLine) []makeLine {
+	var out []makeLine
+	depth := 0
+	for _, l := range lines {
+		if depth > 0 {
+			out[len(out)-1].text += "\n" + l.text
+		} else {
+			out = append(out, l)
+		}
+		for _, c := range normalizeShell(l.text) {
+			switch c {
+			case '(', '[':
+				depth++
+			case ')', ']':
+				depth = max(depth-1, 0)
 			}
-			seen[p] = true
-			src, err := os.ReadFile(p) //nolint:gosec // p stays under root
-			body := string(src)
-			if err != nil {
-				body = err.Error()
-			}
-			out = append(out, refText{filepath.ToSlash(mustRel(root, p)), body})
-			queue = append(queue, body)
 		}
 	}
 	return out
-}
-
-// referencedFiles returns the regular files under root that words of a
-// command text name (`sh scripts/build`, `./scripts/x`, `bash x.txt`): a
-// script runs whatever its name or extension.
-func referencedFiles(root, text string) []string {
-	var files []string
-	for _, w := range shellSplit.Split(shellQuoting.Replace(text), -1) {
-		w = strings.TrimPrefix(w, "./")
-		if w == "" || strings.ContainsAny(w, "$*?=") || filepath.IsAbs(w) || strings.HasPrefix(w, "-") {
-			continue
-		}
-		p := filepath.Join(root, filepath.FromSlash(w))
-		rel, err := filepath.Rel(root, p)
-		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
-			continue
-		}
-		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() { //nolint:gosec // p stays under root
-			files = append(files, p)
-		}
-	}
-	return files
 }

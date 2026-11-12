@@ -1,0 +1,18 @@
+job build: step 3 tests, saves, pushes or tags the image; the step right before must be
+job build: step 3 runs docker save: save the image with
+job build: step 4 tests, saves, pushes or tags the image; the step right before must be
+job build: step 4 runs docker save: save the image with
+job build: step 5 tests, saves, pushes or tags the image; the step right before must be
+job build: step 5 runs docker save: save the image with
+job build: step 6 tests, saves, pushes or tags the image; the step right before must be
+job build: step 6 runs docker save: save the image with
+job build: step 7 tests, saves, pushes or tags the image; the step right before must be
+job build: step 7 runs docker save: save the image with
+job build: step 8 tests, saves, pushes or tags the image; the step right before must be
+job build: step 8 runs docker save: save the image with
+job build: step 9 tests, saves, pushes or tags the image; the step right before must be
+job build: step 9 runs docker save: save the image with
+job build: step 10: it runs $SAVE_SCRIPT, which the check cannot resolve to a file in the repository
+job build: step 11: it runs /tmp/save.sh, which the check cannot resolve to a file in the repository
+job build: step 12: it runs scripts/missing.sh, which the check cannot resolve to a file in the repository
+job build: step 13: it runs make with the target $TARGET, which the check cannot resolve

@@ -1,0 +1,24 @@
+# #50 review B finding 2: push.sh at the root does nothing, sub/push.sh
+# pushes. After cd sub, or under working-directory: sub, ./push.sh runs
+# sub/push.sh; ae164e4 followed the root's and reported nothing. Both
+# steps come after the build with no verify step before them.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - run: cd sub && ./push.sh
+      - working-directory: sub
+        run: ./push.sh

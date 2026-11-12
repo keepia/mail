@@ -1,0 +1,35 @@
+# #49 point 1 (review B finding 1): after the build, steps that save the
+# image through a script, with no verify step before them. f360066 read
+# none of these scripts: $GITHUB_WORKSPACE, ${{ github.workspace }},
+# working-directory, cd, $(dirname "$0") in a script, make <target>, and
+# a nested local action. The last four steps name scripts the check
+# cannot resolve at all.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - run: bash "$GITHUB_WORKSPACE/scripts/save.sh"
+      - run: bash ${{ github.workspace }}/scripts/save.sh
+      - working-directory: scripts
+        run: ./save.sh
+      - run: cd scripts && sh save.sh
+      - run: sh scripts/ci.sh
+      - run: make publish
+      - uses: ./.github/actions/outer
+      - run: sh "$SAVE_SCRIPT"
+      - run: bash /tmp/save.sh
+      - run: sh scripts/missing.sh
+      - run: make "$TARGET"

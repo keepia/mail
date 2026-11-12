@@ -41,11 +41,11 @@ func TestBuildCommands(t *testing.T) {
 		{`subprocess.run(["docker", "build", "."])`, []string{"docker build"}},
 		{`execFileSync('docker', ['compose', 'up', '--build'])`, []string{"docker compose up --build"}},
 		{"sudo /usr/bin/docker build .", []string{"docker build"}},
-		{"docker compose up -d", nil},
-		{"docker compose up -d && echo --build", nil},
+		{"docker compose up --no-build -d", nil},
+		{"docker compose up --no-build -d && echo --build", nil},
 		{"docker --context x run --rm busybox build", nil},
 		{"docker -D run --rm busybox build", nil},
-		{"docker compose run --rm a build", nil},
+		{"docker compose exec -T a build", nil},
 		{"docker image inspect a", nil},
 	}
 	for _, c := range cases {
@@ -74,7 +74,7 @@ func TestCheckMakefileEnv(t *testing.T) {
 		"SECRETS_PATH := x":                     false,
 		"\t@echo $(PATH) $$HOME":                false,
 		"X := $(PATH)":                          false,
-		"export GOFLAGS := -mod=mod":            false,
+		"export GOFLAGS := -mod=mod":            true,
 	}
 	for line, want := range cases {
 		got := len(CheckMakefile([]byte(line+"\n"))) > 0
@@ -195,7 +195,7 @@ func TestVerifySavedTar(t *testing.T) {
 		{"Docker Hub name", builtImage{Name: "docker.io/library/x:dev", Digest: a.index}, saveTar(t, "docker.io/library/x:dev", a, nil, false), ""},
 		{"re-tagged, classic", classic, saveTar(t, name, b, nil, false), "which is not the checked build's output"},
 		{"re-tagged, containerd", containerd, saveTar(t, name, b, nil, false), "which is not the checked build's output"},
-		{"index and manifest.json disagree", containerd, saveTar(t, name, b, &a, false), "which is not the checked build's output"},
+		{"index and manifest.json disagree", containerd, saveTar(t, name, b, &a, false), "does not name the config manifest.json names"},
 		{"changed layer", classic, saveTar(t, name, a, nil, true), "has the content of"},
 		{"other name", classic, saveTar(t, "ghcr.io/keepia/other:dev", a, nil, false), "has no image named " + name},
 		{"not a tar", classic, []byte("nope"), "does not read"},

@@ -1,0 +1,32 @@
+# #50 review B finding 3: a script run through a variable command word
+# ("$SAVE"), and an inline command held in a variable (sh -c "$CMD",
+# eval "$CMD"). ae164e4 reported none of them. The last step runs a
+# script that uses "$sudo" (assigned only literal command names) and
+# "$@" in a helper, and is not reported.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - env:
+          SAVE: scripts/push.sh
+        run: '"$SAVE"'
+      - env:
+          CMD: sh scripts/push.sh
+        run: sh -c "$CMD"
+      - env:
+          CMD: sh scripts/push.sh
+        run: eval "$CMD"
+      - run: bash scripts/helper.sh

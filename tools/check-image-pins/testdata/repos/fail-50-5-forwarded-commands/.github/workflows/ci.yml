@@ -1,0 +1,41 @@
+# #50 delta reviews B 1/2 and B 2 (and review A delta, finding 2):
+# commands that earlier exceptions skipped whole. scripts/ci.sh runs
+# `make publish`, and publish pushes by tag. Each step runs after the
+# build with no verify step before it.
+# - a command word in a variable that holds a plain command name: $SUDO
+#   is a prefix, "$shell" an interpreter, also two in a row;
+# - "$@" at the top level of a script forwards the caller's arguments as
+#   a command: retry.sh, retry-n.sh (after shift), fwd.sh (through
+#   retry.sh) and a variable argument are reported, not modelled;
+# - control: "$@" inside a function body, in a script and in the step's
+#   own text, and $SUDO set to nothing.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - run: SUDO=sudo; $SUDO sh scripts/ci.sh
+      - run: shell=bash; "$shell" scripts/ci.sh
+      - run: SUDO=sudo; sh=sh; "$SUDO" "$sh" scripts/ci.sh
+      - run: sh scripts/retry.sh make publish
+      - run: sh scripts/retry-n.sh 3 make publish
+      - run: sh scripts/fwd.sh make publish
+      - env:
+          SAVE: scripts/ci.sh
+        run: sh scripts/retry.sh "$SAVE"
+      - run: SUDO=; $SUDO true && sh scripts/quiet.sh "$RUNNER_TEMP"
+      - run: |
+          quietly() { "$@" >/dev/null; }
+          quietly docker image ls
