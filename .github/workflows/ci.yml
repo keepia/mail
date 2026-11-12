@@ -190,17 +190,6 @@ jobs:
           targets: ${{ env.BAKE_TARGET }}
           load: true
           set: ${{ env.BAKE_SET }}
-      # PROOF COMMIT (artifact verification), never to be merged: replaces
-      # the built image under its tag without a build command (docker
-      # create + docker commit gives a new image ID). The static rules pass;
-      # the verify step below must fail in every row.
-      - name: PROOF replace the built image
-        env:
-          IMAGE: ${{ matrix.image }}
-        run: |
-          case $IMAGE in keepia) repo=mail ;; *) repo=mail-$IMAGE ;; esac
-          docker create --name proof "ghcr.io/keepia/$repo:dev" true
-          docker commit proof "ghcr.io/keepia/$repo:dev"
       # The image tested and the image saved are the checked build's output:
       # the local image ID must equal the digest in the build's metadata.
       # The check requires this step right before every step that tests or
