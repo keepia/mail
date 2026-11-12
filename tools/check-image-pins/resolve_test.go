@@ -73,6 +73,48 @@ func TestReferencedTexts(t *testing.T) {
 	}
 }
 
+// TestFunctionForwarding (#67): a top-level call that passes positional
+// parameters to a function that runs them as a command (directly or
+// through more functions) is reported like top-level forwarding; a
+// function that takes them as arguments, or a forwarding function called
+// with literal words or from inside another function, is not.
+func TestFunctionForwarding(t *testing.T) {
+	root := t.TempDir()
+	const msg = "it forwards its arguments as a command ("
+	for _, c := range []struct{ text, want string }{
+		{"main() { for i in 1 2 3; do \"$@\" && return 0; done; return 1; }\nmain \"$@\"", "$@, through the function main)"},
+		{"function main { while ! \"$@\"; do sleep 1; done; }\nmain \"$@\"", "$@, through the function main)"},
+		{"main()\n{\n\texec \"${@}\"\n}\nmain \"${@}\"", "${@}, through the function main)"},
+		{"r() { sudo -E \"$1\"; }\nr \"$1\"", "$1, through the function r)"},
+		{"r() { \"$@\"; }\nr --verbose \"${@:2}\"", "${@:2}, through the function r)"},
+		{"r() { n=$1; shift; timeout 5 \"$@\"; }\nr \"$*\"", "$*, through the function r)"},
+		{"S=sudo\nr() { $S \"$@\"; }\nr \"$@\"", "$@, through the function r)"},
+		{"main() { inner() { \"$@\"; }; inner \"$@\"; }\nmain \"$@\"", "$@, through the function main)"},
+		{"a() { \"$@\"; }\nb() { a \"$@\"; }\nc() { b \"$1\" x; }\nif c \"$@\"; then :; fi", "$@, through the function c)"},
+		{"main() { \"$@\"; }\neval 'main \"$@\"'", "$@, through the function main)"},
+		{"main() { \"$@\"; }\nout=$(main \"$@\")", "$@, through the function main)"},
+	} {
+		_, problems := referencedTexts(root, c.text, "", true)
+		if !slices.Contains(problems, msg+c.want+", which the check cannot resolve; call the command directly") {
+			t.Errorf("referencedTexts(%q): problems %q, want %q", c.text, problems, msg+c.want)
+		}
+	}
+	for _, text := range []string{
+		"say() { echo \"$1\"; }\nsay \"$@\"",
+		"flag() { git log --format \"$1\"; }\nflag \"$1\"",
+		"stamp() { date -u; }\nstamp \"$@\"",
+		"each() { for a in \"$@\"; do echo \"$a\"; done; }\neach \"$@\"",
+		"quietly() { \"$@\" >/dev/null; }\nquietly date -u",
+		"run() { \"$@\"; }\nouter() { run \"$@\"; }\nouter make --version",
+		"run() { \"$@\"; }\necho run \"$@\"",
+		"inner() { \"$@\"; }\nmain() { inner date; }\nmain \"$@\"",
+	} {
+		if _, problems := referencedTexts(root, text, "", true); len(problems) > 0 {
+			t.Errorf("referencedTexts(%q): problems %q, want none", text, problems)
+		}
+	}
+}
+
 // TestShellCommands: quotes, substitutions and comments.
 func TestShellCommands(t *testing.T) {
 	got := shellCommands("a \"b c\" 'd e' $(f g)/h # i\nj ${K:-x}/l `m n`; o")

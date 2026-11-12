@@ -1,0 +1,25 @@
+# #67: forwarding through a function after shift. retry-n.sh shifts the
+# count off at its top level and passes the rest to a function that runs
+# it in a while loop; retry-fn.sh passes all its arguments and the
+# function shifts the count off itself. Both run make publish, and
+# publish pushes by tag with no verify step before it. The check does not
+# model shift: each top-level call is reported like top-level forwarding.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - run: sh scripts/retry-n.sh 3 make publish
+      - run: sh scripts/retry-fn.sh 3 make publish

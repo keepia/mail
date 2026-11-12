@@ -1,0 +1,32 @@
+# #67 controls: top-level calls that pass "$@", "$1" or "${@}" to a
+# function that does not run them as a command stay clean:
+# - args.sh: a function that uses $1 only as an argument (echo "$1",
+#   ls --color=never "$1"), one that runs a fixed command, and one that
+#   prints "$@";
+# - the step's own text: the same in a step, a wrapper called with literal
+#   words, and a function whose name is passed as an argument.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - run: sh scripts/args.sh a b c
+      - run: |
+          say() { echo "$1"; }
+          quietly() { "$@" >/dev/null; }
+          set -- "$GITHUB_SHA"
+          say "$@"
+          quietly date -u
+          echo quietly "$@"

@@ -1,0 +1,31 @@
+# #67: forwarding through more than one function. The function the top
+# level calls does not run "$@" itself; it passes it on:
+# - nested.sh: to a function defined inside it;
+# - chain.sh: through two more functions;
+# - the step's own text: through a function, after set --.
+# publish pushes by tag with no verify step before it. Each top-level call
+# is reported like top-level forwarding.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - run: sh scripts/nested.sh make publish
+      - run: sh scripts/chain.sh make publish
+      - run: |
+          run() { "$@"; }
+          main() { run "$@"; }
+          set -- make publish
+          main "$@"

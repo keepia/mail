@@ -1,0 +1,3 @@
+job build: step 3: it forwards its arguments as a command (${@}, through the function wrap), which the check cannot resolve; call the command directly; in a job that builds with bake
+job build: step 4: it forwards its arguments as a command ($1, through the function run_one), which the check cannot resolve; call the command directly; in a job that builds with bake
+job build: step 5: it forwards its arguments as a command ($*, through the function as_root), which the check cannot resolve; call the command directly; in a job that builds with bake

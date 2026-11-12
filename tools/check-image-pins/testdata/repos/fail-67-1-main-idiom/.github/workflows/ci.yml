@@ -1,0 +1,25 @@
+# #67 (#51 comment 6824486889; #50 review B delta 3, note 1): the common
+# main idiom. A script's top level passes "$@" to a function whose body
+# runs its positional parameters as a command, in a for loop (main.sh) or
+# a while loop (until-ok.sh). `sh scripts/main.sh make publish` really
+# runs make publish, and publish pushes by tag with no verify step
+# before it. Each call is reported like top-level forwarding.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - run: sh scripts/main.sh make publish
+      - run: bash scripts/until-ok.sh make publish
