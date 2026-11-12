@@ -1,0 +1,54 @@
+#!/bin/sh
+# keepia-apt-install: installs Debian packages in an image build and
+# records every installed package in /usr/share/keepia/packages.txt
+# (#5 coordinator decision C4: Debian packages are recorded, not pinned).
+# The Dockerfiles bind-mount it for one RUN, so it is not in the image.
+#
+# Usage: keepia-apt-install PACKAGE...
+#
+# Local builds behind a TLS-inspecting proxy pass a CA bundle as the
+# optional BuildKit secret "ca" (make images with KEEPIA_BUILD_CA). Then,
+# and only then, apt fetches from the same Debian archive over https with
+# that bundle, through $HTTPS_PROXY when it is set. The image's own apt
+# sources stay as Debian ships them, and the bundle never enters a layer.
+# CI passes no secret: apt uses the image's sources unchanged.
+set -eu
+
+if [ $# -eq 0 ]; then
+	echo "usage: keepia-apt-install PACKAGE..." >&2
+	exit 2
+fi
+
+ca=/run/secrets/ca
+if [ -s "$ca" ]; then
+	parts=$(mktemp -d)
+	sed 's|http://deb.debian.org/|https://deb.debian.org/|g' \
+		/etc/apt/sources.list.d/debian.sources >"$parts/debian.sources"
+	chmod 0755 "$parts"
+	chmod 0644 "$parts/debian.sources"
+	set -- -o "Dir::Etc::SourceParts=$parts" -o "Acquire::https::CAInfo=$ca" \
+		${HTTPS_PROXY:+-o "Acquire::https::Proxy=$HTTPS_PROXY"} -- "$@"
+else
+	set -- -- "$@"
+fi
+
+# Options before the "--" marker go to both apt-get calls; the packages
+# after it only to install.
+opts=
+while [ "$1" != -- ]; do
+	opts="$opts $1"
+	shift
+done
+shift
+
+# shellcheck disable=SC2086 # opts holds -o pairs without spaces in values
+apt-get $opts update
+# shellcheck disable=SC2086
+DEBIAN_FRONTEND=noninteractive apt-get $opts install -y --no-install-recommends "$@"
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+[ -z "${parts:-}" ] || rm -rf "$parts"
+
+mkdir -p /usr/share/keepia
+dpkg-query -W -f '${Package}\t${Version}\t${Architecture}\n' | sort >/usr/share/keepia/packages.txt
+echo "keepia-apt-install: $(wc -l </usr/share/keepia/packages.txt) packages recorded in /usr/share/keepia/packages.txt"

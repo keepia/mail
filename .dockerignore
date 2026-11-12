@@ -1,0 +1,9 @@
+# Build context of the root Dockerfile (Keepia): only what the Go build
+# reads, so a change elsewhere does not invalidate the layer cache and no
+# local file (.env, bin/) reaches the build.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
+!scripts/check-go-toolchain.sh

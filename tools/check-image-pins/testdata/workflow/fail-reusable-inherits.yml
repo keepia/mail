@@ -1,0 +1,10 @@
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  a:
+    uses: ./.github/workflows/publish.yml
+  b:
+    uses: example/workflows/.github/workflows/x.yml@0123456789abcdef0123456789abcdef01234567 # v1.0.0
+    secrets: inherit
+# want-lines: 5 7

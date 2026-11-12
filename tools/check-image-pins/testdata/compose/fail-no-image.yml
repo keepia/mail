@@ -1,0 +1,7 @@
+services:
+  postgres:
+    environment:
+      A: b
+  other:
+    image: [postgres]
+# want-lines: 2 5

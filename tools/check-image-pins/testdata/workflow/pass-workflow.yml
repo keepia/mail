@@ -1,0 +1,26 @@
+name: CI
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+  label:
+    permissions:
+      contents: read
+      pull-requests: write
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+  reuse:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/other.yml
+  packages-read:
+    permissions:
+      packages: read
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true

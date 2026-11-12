@@ -20,3 +20,14 @@ updates:
     labels: [dependencies]
     cooldown:
       default-days: 14
+  # Base images and the # syntax frontend of the own images (tag and digest
+  # together). Each image directory is listed: images/common has no
+  # Dockerfile. A new image adds its directory; the Compose file's upstream
+  # images join with the template (docker-compose, #5 part 3).
+  - package-ecosystem: docker
+    directories: ["/", "/images/postfix", "/images/unbound"]
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+    cooldown:
+      default-days: 14

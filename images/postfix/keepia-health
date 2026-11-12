@@ -1,0 +1,34 @@
+#!/bin/bash
+# keepia-health: the Postfix image's health probe. It needs the SMTP
+# greeting, not only an open port or a running master: it connects to
+# $KEEPIA_HEALTH_ADDR:25 (default 127.0.0.1; Compose sets the container's
+# private address), reads one line, requires "220 ", then sends QUIT.
+# Postfix 3.10 answers a client that talks first with "554 ... SMTP
+# protocol synchronization", so it reads before it writes.
+#
+# Measured red (#5 plan, M14/M15): Debian's master.cf with chroot = y,
+# where every smtpd dies while `postfix status` still says running, and a
+# master stopped with SIGSTOP.
+set -u
+
+addr=${KEEPIA_HEALTH_ADDR:-127.0.0.1}
+port=25
+
+if ! exec 3<>"/dev/tcp/$addr/$port"; then
+	echo "no connection to $addr:$port"
+	exit 1
+fi
+if ! IFS= read -r -t 4 line <&3; then
+	echo "no greeting from $addr:$port within 4 s"
+	exit 1
+fi
+line=${line%$'\r'}
+case $line in
+"220 "*) ;;
+*)
+	echo "unexpected greeting from $addr:$port: $line"
+	exit 1
+	;;
+esac
+printf 'QUIT\r\n' >&3
+echo "$line"

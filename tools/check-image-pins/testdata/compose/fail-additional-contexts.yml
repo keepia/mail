@@ -1,0 +1,14 @@
+services:
+  a:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-a:dev
+    build:
+      context: images
+      additional_contexts:
+        base: docker-image://debian:trixie-slim
+  b:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-b:dev
+    build:
+      context: images
+      dockerfile_inline: |
+        FROM debian:trixie-slim
+# want-lines: 2 8

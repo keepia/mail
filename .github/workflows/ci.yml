@@ -97,6 +97,9 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      # The Go toolchain check that the Dockerfile runs, with its own tests
+      # (scripts/check-go-toolchain.sh, byte-identical with mail-archive).
+      - run: sh scripts/check-go-toolchain-test.sh
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.14.0
@@ -115,3 +118,99 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make vuln
+
+  # The own images (docker-bake.hcl), one row per image and platform, each on
+  # a native GitHub-hosted runner (no QEMU). A row builds its image into the
+  # runner's Docker store, then runs scripts/image-test.sh: the smoke command,
+  # the package list, user and capabilities, the healthcheck green and red,
+  # and for Postfix and Unbound the reload watcher. CI never logs in to a
+  # registry and never pushes; release.yml (#5 part 4) is the only publisher.
+  docker-build:
+    name: docker-build (${{ matrix.image }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    # Room for a cold build without the layer cache.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [keepia, postfix, unbound]
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sh scripts/ci-docker-mirror.sh
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # BuildKit in the builder container pulls the base images and the
+          # # syntax frontend through the mirror, with Docker Hub as the
+          # fallback.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      # Layer timestamps from the commit, so a rebuild of the same commit
+      # gives the same layers where the inputs are the same.
+      - name: Commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
+      # bake-action exposes the GitHub Actions cache runtime to BuildKit; a
+      # plain `docker buildx bake` in a run step could not use type=gha.
+      # The cache scope is per image and platform. Only pushes to main write
+      # the cache (mode=max: every stage), so pull requests cannot crowd
+      # main's entries out of the 10 GB cache; they only read it.
+      - name: Build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        env:
+          PLATFORM: linux/${{ matrix.arch }}
+        with:
+          source: .
+          targets: ${{ matrix.image }}
+          load: true
+          set: |
+            ${{ matrix.image }}.cache-from=type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+            ${{ github.event_name == 'push' && format('{0}.cache-to=type=gha,mode=max,scope={0}-{1}', matrix.image, matrix.arch) || '' }}
+      - name: Smoke, health and reload tests
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: make image-test IMAGE="$IMAGE" VERSION=dev
+      # The compose job (#5 part 3) loads the amd64 images from here instead
+      # of building them again.
+      - name: Save the image
+        if: matrix.arch == 'amd64'
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          case $IMAGE in keepia) repo=mail ;; *) repo=mail-$IMAGE ;; esac
+          docker save "ghcr.io/keepia/$repo:dev" | zstd -q -T0 -o "$RUNNER_TEMP/image-$IMAGE.tar.zst"
+      - if: matrix.arch == 'amd64'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.image }}
+          path: ${{ runner.temp }}/image-${{ matrix.image }}.tar.zst
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
+  # The docker check: every docker-build row passed (a failed, cancelled or
+  # skipped row turns it red, so it never shows green or skipped while a row
+  # failed), then the image pin check (tools/check-image-pins) after its
+  # tests.
+  docker:
+    name: docker
+    needs: docker-build
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Every docker-build row passed
+        env:
+          RESULT: ${{ needs.docker-build.result }}
+        run: |
+          echo "docker-build: $RESULT"
+          test "$RESULT" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make image-pins-test image-pins

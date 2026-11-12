@@ -1,0 +1,13 @@
+on: pull_request
+jobs:
+  a:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+  b:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+# want-lines: 3

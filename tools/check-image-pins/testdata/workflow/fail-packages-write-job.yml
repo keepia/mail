@@ -1,0 +1,18 @@
+on: pull_request
+permissions:
+  contents: read
+x-perms: &perms
+  packages: write
+jobs:
+  a:
+    permissions:
+      packages: write
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+  b:
+    permissions: *perms
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+# want-lines: 7 13

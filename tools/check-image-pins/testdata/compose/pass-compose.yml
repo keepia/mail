@@ -1,0 +1,21 @@
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  postgres:
+    <<: *hardening
+    image: postgres:18.6-trixie@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+  keepia:
+    <<: *hardening
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail:${KEEPIA_VERSION:-dev}
+    build: .
+  edge-postfix:
+    image: "${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-postfix:${KEEPIA_VERSION:-dev}"
+    build:
+      context: images
+      dockerfile: postfix/Dockerfile
+  edge-unbound:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-unbound:${KEEPIA_VERSION:-dev}
+    build:
+      dockerfile: images/unbound/Dockerfile

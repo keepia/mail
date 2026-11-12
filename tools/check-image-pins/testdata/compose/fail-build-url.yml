@@ -1,0 +1,9 @@
+services:
+  a:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-a:dev
+    build: https://example.org/team/repo.git#main
+  b:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-b:dev
+    build:
+      context: git@example.org:team/repo.git
+# want-lines: 2 5

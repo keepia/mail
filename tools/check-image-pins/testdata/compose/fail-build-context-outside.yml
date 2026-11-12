@@ -1,0 +1,17 @@
+services:
+  a:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-a:dev
+    build: ../other
+  b:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-b:dev
+    build:
+      context: /srv/src
+  c:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-c:dev
+    build:
+      context: ${SRC}
+  d:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-d:dev
+    build:
+      context: [a]
+# want-lines: 2 5 9 13
