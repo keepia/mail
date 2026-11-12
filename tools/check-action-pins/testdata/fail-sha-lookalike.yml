@@ -1,0 +1,21 @@
+# want-lines: 8 9 10 11 12 13 14 15 16 17 18 19 20 21
+name: fixture
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1-evil # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1a # v7.0.1
+      - uses: actions/checkout@abcdefghijklmnopqrstuvwxyzabcdefghijklmn # v7.0.1
+      - uses: actions/checkout@3D3C42E5AAC5BA805825DA76410C181273BA90B1 # v7.0.1
+      - uses: "evil actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" # v7.0.1
+      - uses: evil/act/sub./x@main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # x #v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1.2
+      - uses: docker://alpine@sha256:ab
+      - uses: docker://alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x
+      - uses: "evil docker://alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      - uses: docker://alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

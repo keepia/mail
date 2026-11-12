@@ -48,9 +48,9 @@ $(ACTIONLINT):
 # No shellcheck/pyflakes: the result must not depend on what is installed.
 workflows: $(ACTIONLINT)
 	$(ACTIONLINT) -shellcheck= -pyflakes=
-	sh scripts/check-action-pins.sh
+	$(GO) run ./tools/check-action-pins
 	jq empty .github/labels.json
 
-## workflows-test: self-test of the action pin check (fixtures, no network)
+## workflows-test: tests of the action pin check (fixtures, no network)
 workflows-test:
-	sh scripts/check-action-pins-test.sh
+	$(GO) test -count=1 ./tools/check-action-pins/

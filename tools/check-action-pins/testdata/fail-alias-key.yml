@@ -1,0 +1,11 @@
+# want-lines: 9 10
+name: fixture
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: &k uses
+      - *k : actions/checkout@v7
+      - ? *k
+        : actions/checkout@v7

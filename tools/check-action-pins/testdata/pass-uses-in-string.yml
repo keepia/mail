@@ -1,0 +1,17 @@
+name: fixture
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: "echo uses: foo"
+      - run: 'echo uses: actions/checkout@v7'
+      - run: |
+          echo "uses: actions/checkout@v7"
+          printf '%s\n' 'a\b' | sed 's/#/x/'
+      - run: make all # uses: the Makefile
+      - name: 'it''s fine # x'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: "a # b"
+          path: a#b
