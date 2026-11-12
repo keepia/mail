@@ -706,7 +706,7 @@ else
 	fail "test 11: edge-vmail is not empty: $(xargs <<<"$edge_files" | cut -c1-200)"
 fi
 anon=0
-for s in "${expected_services[@]}"; do
+for s in "${expected_services[@]}" "${oneshot_services[@]}"; do
 	c=$(container "$s")
 	[ -n "$c" ] || continue
 	while read -r vname dest; do

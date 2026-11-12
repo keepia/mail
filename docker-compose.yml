@@ -196,6 +196,10 @@ services:
     read_only: true
     restart: "no"
     network_mode: none
+    # The image's VOLUME /srv/vmail would otherwise be a new anonymous
+    # volume at every start.
+    tmpfs:
+      - /srv/vmail:size=4k,mode=0500
     mem_limit: 16m
     pids_limit: 16
     environment:
