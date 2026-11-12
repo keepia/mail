@@ -64,6 +64,7 @@ of this file.
 | #13 integrity | [#13 comment on read-time integrity][p13hash] |
 | review 1 to review 7 | The plan reviews of #2, in order: [review 1][rv1], [review 2][rv2], [review 3][rv3], [review 4][rv4], [review 5][rv5], [review 6][rv6], [review 7][rv7], [approval][approval] |
 | Coordinator decisions on #2 | [T1 to T10][cd] |
+| Reviews of PR #36 | [first review][ra36], [second review][rb36] (findings on this document; no measured values cited from them) |
 
 Prototype files are cited as permalinks to commit `46ebffe`, so the citations
 survive #5 removing `prototypes/`.
@@ -72,7 +73,7 @@ survive #5 removing `prototypes/`.
 
 | Role | Containers | Purpose |
 |---|---|---|
-| **control** | `keepia` (`keepia-mail serve`: API, admin UI, internal CA, ACME client, desired-state API for agents), `postgres`, `valkey` | The only authoritative state. |
+| **control** | `keepia` (`keepia-mail serve`: API, admin UI, the internal anchors (section 5a), ACME client, desired-state API for agents), `postgres`, `valkey` | The only authoritative state. |
 | **edge** | `postfix` (MX 25, submission 587/465), `dovecot` (proxy only: IMAP, POP3, ManageSieve, LMTP proxy), `keepia-edge` (`keepia-mail edge`: Postfix socketmap, Dovecot auth backend, Dovecot auth-policy server, HTTPS front for autoconfig/autodiscover, MTA-STS, ACME HTTP-01, reverse proxy to admin UI and webmail), `rspamd-proxy` (milter) | Internet-facing; stateless apart from the Postfix queue. |
 | **store** | `dovecot` (mail storage, LMTP, Sieve/Pigeonhole, mail_crypt and mail_compress) | Holds the mailboxes placed on it. |
 | **filter** | `rspamd` (normal workers), `clamd` (with freshclam), `olefy` | Scanning, DKIM signing, Bayes, greylisting, rate limits. |
@@ -429,7 +430,8 @@ instead are at the end of this section.
 ### Accepted risks of M1
 
 Stated for the maintainer's decision (M1).
-Default until the maintainer decides M1: these are the risks the maintainer accepts if M1 is answered as recommended.
+Default until the maintainer decides M1: these are the risks the
+maintainer accepts if M1 is answered as recommended.
 
 - A compromised edge reaches every mailbox (all hashes, cleartext passwords,
   the master credential, the edge certificate).
@@ -566,8 +568,8 @@ their distribution are as the plan recommends.
 - **Version skew:** the agent API accepts the current and the previous
   release, so a multi-server deployment upgrades server by server.
 - **Keys:** Default until the maintainer decides M1: the control plane
-  stores secrets (DKIM private keys, the mail_crypt private key, the internal
-  CA key, TOTP secrets) encrypted with a key-encryption key in a file on the
+  stores secrets (DKIM private keys, the mail_crypt private key, the anchor
+  keys, TOTP secrets) encrypted with a key-encryption key in a file on the
   control server, not in Postgres, so a database dump alone reveals none. The
   quarantine key is not stored: control derives it from the key-encryption
   key (section 12).
@@ -697,9 +699,8 @@ their own role's gate:
   edge gate's address, every login and delivery failed the host-name check
   (`SSL certificate doesn't match expected host name`; IMAP answered
   `NO [SERVERBUG] Account is temporarily unavailable.`, not `[UNAVAILABLE]`,
-  measured on 2.4.5 in [review 7][rv7] and the [second review of
-  PR #36][rb36]). Store gate
-  certificates carry their name as a DNS SAN. The agent → control and
+  measured on 2.4.5 in [review 7][rv7]). Store gate certificates carry their
+  name as a DNS SAN. The agent → control and
   `keepia-edge` → groupware passthroughs follow the same rule (the remote
   gate's name for verification, the local egress address to connect). A move
   changes the name, the port or both;
@@ -736,15 +737,15 @@ refused.
 | filter | rspamd workers for `rspamd-proxy` | service | `edge` |
 | edge | internal submission | service | `store`, `control` |
 
-**Gate server certificates.** The gates' own server certificates come from
-a fifth dedicated anchor, gate-server, with only the serverAuth EKU and the
-gate's name as DNS SAN; the four client anchors never issue server
-certificates. Every caller that checks a gate (the edge Dovecot's client CA
-file for the `host` name check, the agent, `keepia-edge`, and a gate
-originating mTLS in egress mode) trusts only the gate-server anchor for the
-server side. This is an implementer's choice within R-TRUST-ANCHORS (one
-anchor per purpose, narrowest EKUs), added after review; the plan left the
-server anchor implicit.
+**Gate server certificates.** The plan leaves open which anchor issues the
+gates' own server certificates (a known gap for 0.2.0, section 14). Given
+constraints only:
+
+- the certificate has the serverAuth EKU;
+- it carries the gate's name as DNS SAN;
+- callers verify that name (R-ROUTE-VALID);
+- [review 7][rv7] measured the name check with a server certificate issued
+  by the service anchor.
 
 **Not reachable from other roles at all:** the doveadm HTTP API (local agent
 on the private network only), clamd, olefy, memcached, and the edge auth
@@ -798,7 +799,7 @@ From [review 4, N14 to N16][rv4] and [review 5, N20][rv5].
   host kernel setup, authenticates hosts rather than purposes, and protects
   nothing on a single server where every container shares the host.
 - **A service mesh (Envoy, Linkerd, Istio):** Kubernetes-oriented, a new
-  external image, and more configuration than five anchors need.
+  external image, and more configuration than four anchors need.
 - **An off-the-shelf TLS proxy such as ghostunnel:** a new external image
   whose revocation and purpose checks would still need our own wrapping; the
   Go gate shares the image, the anchors and the tests.
@@ -1008,7 +1009,7 @@ predicted values in this table ([coordinator decision T9][cd]).
 | edge | dovecot proxy | measured idle 9.7–11.0 MiB ([#3 F7][p3]), plus login processes per connection | 256 MiB |
 | edge | keepia-edge | predicted (replica of all mailboxes in memory) | 128 MiB |
 | edge | rspamd-proxy | predicted | 128 MiB |
-| store | dovecot | measured idle 9.8–10.3 MiB ([#3 F7][p3]), peak 13–19 MiB for one session in another configuration ([#4 F6][p4]); per session about 9.2 MiB (19 − 9.8, predicted until 0.2.0 measures it; an upper bound: the peak includes the fetch of a 2 MB message) | 128 MiB + about 9.2 MiB × concurrent sessions; 512 MiB covers about 42 (predicted) |
+| store | dovecot | measured idle 9.8–10.3 MiB ([#3 F7][p3]), peak 13–19 MiB for one session in another configuration ([#4 F6][p4]); per session about 9.2 MiB (19 − 9.8, predicted until 0.2.0 measures it; an upper bound: the peak includes the fetch of a 2 MB message) | 128 MiB + about 9.2 MiB × concurrent sessions; 512 MiB covers about 41 (predicted) |
 | filter | rspamd | predicted | 512 MiB |
 | filter | clamd + freshclam | upstream: 1.2 GiB for the engine, about 2.4 GiB during the daily concurrent reload; 3 GiB minimum, 4 GiB preferred | 3 GiB |
 | filter | olefy | predicted | 128 MiB |
@@ -1036,7 +1037,7 @@ control 768 MiB, edge 640 MiB, store 512 MiB, filter 3712 MiB, groupware
 - **The store limit scales with sessions** ([review 1, N8][rv1]): IDLE clients
   hold sessions, which an idle measurement does not show. Sessions are
   bounded by `mail_max_userip_connections` and `process_limit`, and 0.2.0
-  measures the per-session cost. The all-roles minimum assumes about 42
+  measures the per-session cost. The all-roles minimum assumes about 41
   concurrent sessions; each further 100 sessions add up to about 920 MiB
   (predicted until 0.2.0; the per-session figure subtracts #3's idle value
   from #4's peak, which ran in another configuration, [second review of
@@ -1187,7 +1188,8 @@ MTA-STS policies, so 1.0 makes no such fetches.
 ### Known gaps
 
 The approved plan leaves these open; the reviews of PR #36 ([first
-review][ra36], F1 and F2; [second review][rb36], follow-up) found them. This
+review][ra36], F1, F2 and its delta review; [second review][rb36], follow-up)
+found them. This
 document does not design the fixes. The plan of the milestone named in each
 entry must close it.
 
@@ -1201,6 +1203,13 @@ entry must close it.
 - **`keepia-edge` has no gated path to the control admin UI** (0.4.0, which
   builds the admin login). Section 1 has the edge's HTTPS front reverse-proxy
   the admin UI, but control's gate lists no admin UI listener (section 5a).
+- **Gate server certificates** (0.2.0, which builds the gates). The plan
+  leaves open which anchor issues them (section 5a, "Gate server
+  certificates"); who checks their revocation on the caller side (section
+  5a's revocation rules cover client certificates only, and a client-side
+  CRL check in the edge Dovecot is not measured); and which fingerprint the
+  join token carries so the joining agent can verify control's join listener
+  (section 5 says the agent anchor's). 0.2.0's plan decides all three.
 - **Mailbox deletion has no mechanism that fits the stated privileges**
   (0.6.0, security property 5). Section 12 has the store's agent delete after
   `delete_after`, but role containers mount the agent's volumes read-only,
