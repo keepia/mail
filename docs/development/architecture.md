@@ -36,20 +36,19 @@ each rule builds and tests it.
 - **(upstream)**: from upstream documentation, not run here.
 - **(predicted)**: an estimate, to be measured where the text says.
 
-### Pending maintainer decisions
+### Maintainer decisions
 
-The maintainer has not yet answered M1 to M5 of the plan. Until then the
-plan's defaults apply, and every place where a default applies says
-"Default until the maintainer decides M<n>". When an answer comes, the pull
-request that folds it in replaces each of these markers.
+The maintainer answered the plan's questions M1 to M5 in
+[the decision comment][mdec] (6816994463). This document is written to these
+decisions.
 
-| Question | Topic | Default applied | Marked in |
+| Question | Topic | Decision | Applied in |
 |---|---|---|---|
-| M1 | Trust boundaries: who holds which secret and who verifies passwords | Written as recommended; sections pending M1 | sections [4](#4-authentication-who-verifies-passwords), [4a](#4a-groupware-logins-webmail-and-dav), [5](#5-agent-and-control-plane) |
-| M2 | Refined security properties and ban behaviour on Valkey loss | The five unrefined properties; bans fail open with the per-edge counter | sections [6](#6-shared-state-postgres-and-valkey-only), [13](#13-security-properties) |
-| M3 | MTA-STS in 1.0: publish only, or also enforce outbound | Publish only in 1.0; enforcement is a 1.x feature | sections [12](#12-the-10-feature-scope-mapped-to-roles), [14](#14-external-services-the-architecture-implies) |
-| M4 | Does the reference server meet the all-roles minimum (answered yes or no only, no values on GitHub) | Assumed yes | section [9](#9-resource-budget) |
-| M5 | Write method for new mail: crypt only, or crypt plus compression | Crypt only, for new mail only | section [8](#8-dovecot-24-constraints) |
+| M1 | Trust boundaries: who holds which secret and who verifies passwords | Approved as recommended; all listed risks accepted, including the two added in PR #36 | sections [4](#4-authentication-who-verifies-passwords), [4a](#4a-groupware-logins-webmail-and-dav), [5](#5-agent-and-control-plane) |
+| M2 | Refined security properties and ban behaviour on Valkey loss | The refined five properties are binding; bans fail open with the per-edge counter | sections [6](#6-shared-state-postgres-and-valkey-only), [13](#13-security-properties) |
+| M3 | MTA-STS in 1.0: publish only, or also enforce outbound | 1.0 publishes and also enforces receivers' policies outbound, in `keepia-edge`'s TLS-policy socketmap; no new component | sections [12](#12-the-10-feature-scope-mapped-to-roles), [14](#14-external-services-the-architecture-implies) |
+| M4 | Does the reference server meet the all-roles minimum (answered in chat only, no values on GitHub) | Confirmed | section [9](#9-resource-budget) |
+| M5 | Write method for new mail | Crypt only, for new mail | section [8](#8-dovecot-24-constraints) |
 
 ### Sources
 
@@ -64,6 +63,7 @@ of this file.
 | #13 integrity | [#13 comment on read-time integrity][p13hash] |
 | review 1 to review 7 | The plan reviews of #2, in order: [review 1][rv1], [review 2][rv2], [review 3][rv3], [review 4][rv4], [review 5][rv5], [review 6][rv6], [review 7][rv7], [approval][approval] |
 | Coordinator decisions on #2 | [T1 to T10][cd] |
+| Maintainer decisions on #2 | [M1 to M5][mdec] |
 | Reviews of PR #36 | [first review][ra36], [second review][rb36] (findings on this document; no measured values cited from them) |
 
 Prototype files are cited as permalinks to commit `46ebffe`, so the citations
@@ -398,11 +398,9 @@ image has it ([review 1][rv1], measured).
 
 ## 4. Authentication: who verifies passwords
 
-**Status: pending M1.** Default until the maintainer decides M1: this section
-is written as the plan recommends. The alternatives the maintainer may choose
-instead are at the end of this section.
+Decided by the maintainer (M1, [6816994463][mdec]): approved as recommended.
 
-- **Decision (recommended in M1): the edge verifies every password once**, in
+- **Decision (M1): the edge verifies every password once**, in
   `keepia-edge` (Lua `auth_password_verify` mode), against the mailbox
   password or an app password allowed for that protocol, with the hash
   schemes the migration brings (#13). Postfix submission uses Dovecot SASL on
@@ -429,9 +427,8 @@ instead are at the end of this section.
 
 ### Accepted risks of M1
 
-Stated for the maintainer's decision (M1).
-Default until the maintainer decides M1: these are the risks the
-maintainer accepts if M1 is answered as recommended.
+These risks are accepted by the maintainer (M1, comment
+[6816994463][mdec]).
 
 - A compromised edge reaches every mailbox (all hashes, cleartext passwords,
   the master credential, the edge certificate).
@@ -471,14 +468,14 @@ maintainer accepts if M1 is answered as recommended.
   a groupware master credential (one secret on the groupware opens every
   mailbox); that comes back to the maintainer before 0.5.0 builds it.
 
-**Alternatives for M1:** stores verify passwords as in #3; SOGo with a view
-of the password hashes.
+**Rejected (M1):** stores verify passwords as in #3 (see the forwarding
+rejection above); SOGo with a view of the password hashes (section 4a).
 
 ## 4a. Groupware logins: webmail and DAV
 
-**Status: pending M1.** Default until the maintainer decides M1: the edge's
-HTTPS front authenticates every webmail and DAV request through the same Go
-auth path, and SOGo never sees a password hash.
+**Decision (M1, [6816994463][mdec]):** the edge's HTTPS front authenticates
+every webmail and DAV request through the same Go auth path, and SOGo never
+sees a password hash.
 
 - **DAV** (CalDAV and CardDAV clients): HTTP Basic on every request, checked
   by `keepia-edge` against the mailbox password or an app password of
@@ -537,8 +534,8 @@ auth path, and SOGo never sees a password hash.
 
 ## 5. Agent and control plane
 
-**Status: pending M1.** Default until the maintainer decides M1: secrets and
-their distribution are as the plan recommends.
+Secrets and their distribution are as the plan recommends, approved by the
+maintainer (M1, [6816994463][mdec]).
 
 - **One agent per server**, `keepia-mail agent`, **pulls** desired state over
   mutual TLS from the control plane: rendered config per role, the routing
@@ -567,9 +564,8 @@ their distribution are as the plan recommends.
   mailbox is ready.
 - **Version skew:** the agent API accepts the current and the previous
   release, so a multi-server deployment upgrades server by server.
-- **Keys:** Default until the maintainer decides M1: the control plane
-  stores secrets (DKIM private keys, the mail_crypt private key, the anchor
-  keys, TOTP secrets) encrypted with a key-encryption key in a file on the
+- **Keys** (M1): the control plane stores secrets (DKIM private keys, the
+  mail_crypt private key, the anchor keys, TOTP secrets) encrypted with a key-encryption key in a file on the
   control server, not in Postgres, so a database dump alone reveals none. The
   quarantine key is not stored: control derives it from the key-encryption
   key (section 12).
@@ -855,15 +851,15 @@ the groupware listeners to the same test.
 ### Loss of Valkey
 
 - rspamd modules generally skip on Redis errors ([review 1, N5][rv1]), so
-  deferring inbound mail instead of accepting it unscanned (proposed property
-  3, section 13) needs explicit configuration and a test that stops Valkey
+  deferring inbound mail instead of accepting it unscanned (property 3,
+  section 13) needs explicit configuration and a test that stops Valkey
   (predicted; 0.3.0 tests).
-- **Bans on Valkey loss.** Default until the maintainer decides M2: bans fail
-  open with a per-edge in-memory counter. Bans keep working per edge, logins
-  are otherwise allowed, and the outage is logged. Dovecot's default
-  `auth_policy_reject_on_fail = no` is fail-open (upstream). **Alternative
-  (M2):** fail closed (`auth_policy_reject_on_fail = yes`), which allows no
-  login on any edge while Valkey is down.
+- **Bans on Valkey loss** (M2, [6816994463][mdec]): bans fail open with a
+  per-edge in-memory counter. Bans keep working per edge, logins are
+  otherwise allowed, and the outage is logged. Dovecot's default
+  `auth_policy_reject_on_fail = no` is fail-open (upstream). **Rejected:**
+  fail closed (`auth_policy_reject_on_fail = yes`), because no login on any
+  edge works while Valkey is down.
 - **Consequence: control is in the mail path.** With Valkey on the control
   role and inbound mail deferred on Valkey loss, a control-server outage
   defers all inbound mail. This qualifies sections 3 and 5a: edges keep
@@ -961,12 +957,12 @@ From #3 and #4.
 
 ### Write method for new mail
 
-Default until the maintainer decides M5: **crypt only for new mail.** Only
-new mail is affected, so a later switch is reversible.
+**Decision (M5, [6816994463][mdec]): crypt only for new mail.** Only new
+mail is affected.
 
 Reading compressed mail stays enabled, because migrated mailcow mail is
 crypt plus lz4, gz or zstd ([#4 F5][p4], measured). The configuration for
-the default is `mail_plugins { mail_compress = yes; mail_crypt = yes }`
+this decision is `mail_plugins { mail_compress = yes; mail_crypt = yes }`
 **without** `mail_compress_write_method`: new mail is written encrypted and
 uncompressed, and compressed mail is still read. Measured in [review 2][rv2],
 probe 4: a 171 089 B test message was stored as 171 360 B (1 242 B with lz4);
@@ -986,7 +982,7 @@ both were read from one mailbox; a flipped bit gave `MAC error`.
   checks below, never by reading.
 - **Rejected: crypt + zstd** until measured: its read-time detection is
   unknown.
-- **Migrated mail stays lz4** whatever M5 decides, so its integrity is checked
+- **Migrated mail stays lz4**, so its integrity is checked
   by hashes: the import compares IMAP `BODY[]` sha256 with mailcow's source
   per message (#13) and keeps the per-message hashes in the import report;
   moves (1.1.0) and restores (0.6.0) compare against the source in the same
@@ -1030,10 +1026,9 @@ control 768 MiB, edge 640 MiB, store 512 MiB, filter 3712 MiB, groupware
   (predicted from the limits). Disk: images (Dovecot 267 MB and Postfix 198
   MB measured, [#3 F7][p3]; the rest predicted, about 2 GB in total), 5 GiB
   free for ClamAV (upstream), plus mail.
-- **The reference installation:** Default until the maintainer decides M4:
-  the reference server is assumed to meet this minimum. The answer is a plain
-  yes or no; no values of the installation go into this repository or onto
-  GitHub.
+- **The reference installation:** confirmed by the maintainer (M4): the
+  reference server meets this minimum. The answer was given in chat; no values
+  of the installation go into this repository or onto GitHub.
 - **The store limit scales with sessions** ([review 1, N8][rv1]): IDLE clients
   hold sessions, which an idle measurement does not show. Sessions are
   bounded by `mail_max_userip_connections` and `process_limit`, and 0.2.0
@@ -1111,7 +1106,7 @@ out of scope for 1.0. Nothing in this design blocks them.
 | Quarantine with notifications | filter → control (`quarantine`): rspamd's metadata exporter posts the message through the filter's egress gate to the control gate (section 5a; predicted, 0.3.0), and control encrypts the body under a quarantine key derived from the key-encryption key; control sends the notifications via the internal submission relay | 0.3.0 |
 | A validating resolver | `unbound` per role (edge, filter, control) | 0.3.0 |
 | Journaling copies (BCC maps per sender and recipient, also for alias domains) to an archive over a transport map | edge socketmap | 0.6.0 |
-| MTA-STS policies per domain | edge HTTPS front publishes each domain's policy. Default until the maintainer decides M3: publishing only in 1.0; enforcing receivers' policies outbound is a 1.x feature (if M3 includes it, it goes into `keepia-edge`'s TLS-policy socketmap, no new component) | 0.4.0 |
+| MTA-STS policies per domain | edge HTTPS front publishes each domain's policy; outbound, `keepia-edge`'s TLS-policy socketmap (`smtp_tls_policy_maps`) enforces receivers' MTA-STS policies, with no new component (M3, [6816994463][mdec]) | 0.4.0 |
 | Autodiscover and autoconfig | edge HTTPS front | 0.4.0 |
 | Outbound TLS policy | edge socketmap `smtp_tls_policy_maps`, DANE through `unbound` | 0.4.0 |
 | Admin login with TOTP and passkeys | control | 0.4.0 |
@@ -1128,23 +1123,11 @@ footers.
 
 ## 13. Security properties
 
-Default until the maintainer decides M2: **the five unrefined properties
-apply**, as approved in [#1's maintainer decisions][d1] (item 3) and listed in
-[`.claude/agents/reviewer.md:24-29`][reviewer] at `46ebffe`:
-
-1. No open relay.
-2. No access across mailboxes or customer groups.
-3. A routing or store failure delays mail and never bounces or misdelivers
-   it.
-4. Secrets and keys stay protected.
-5. Deletion and retention affect only the intended data.
-
-### Proposed refinement
-
-The properties were approved "to be refined with #2". This refinement is
-proposed for M2 and is **not in force** until the maintainer approves it.
-The rules it names (sections 2, 5a and 6) are part of this design either
-way; M2 decides whether they become review properties.
+The five properties of [#1's maintainer decisions][d1] (item 3; listed in
+[`.claude/agents/reviewer.md:24-29`][reviewer] at `46ebffe`) were approved
+"to be refined with #2". The maintainer approved this refinement (M2,
+[6816994463][mdec]); it replaces the unrefined wording and is binding for
+reviews. The bold parts are the refinement.
 
 1. No open relay; **`nopassword` is never returned on a socket a SASL client
    uses (measured open relay); internal submission is reachable only through
@@ -1167,7 +1150,8 @@ way; M2 decides whether they become review properties.
    container gets the Docker socket**.
 5. Deletion and retention affect only the intended data.
 
-M2 also decides the ban behaviour on Valkey loss (section 6).
+M2 also decided the ban behaviour on Valkey loss: fail open with the
+per-edge counter (section 6).
 
 ## 14. External services the architecture implies
 
@@ -1181,9 +1165,10 @@ the maintainer's OK):
 - DNS blocklist providers;
 - GHCR and the upstream image registries (#5).
 
-Outbound MTA-STS policy fetches would go to the recipients' own domains, like
-SMTP itself. Default until the maintainer decides M3: 1.0 only publishes
-MTA-STS policies, so 1.0 makes no such fetches.
+1.0 enforces receivers' MTA-STS policies outbound (M3, [6816994463][mdec]),
+so `keepia-edge` fetches their policies over HTTPS from the recipients' own
+domains, through the edge's egress network, like SMTP itself (0.4.0). This
+adds no third-party service.
 
 ### Known gaps
 
@@ -1223,6 +1208,7 @@ entry must close it.
 [approval]: https://github.com/keepia/mail/issues/2#issuecomment-6811052026
 [cnote]: https://github.com/keepia/mail/issues/2#issuecomment-6812519896
 [cd]: https://github.com/keepia/mail/issues/2#issuecomment-6809518948
+[mdec]: https://github.com/keepia/mail/issues/2#issuecomment-6816994463
 [rv1]: https://github.com/keepia/mail/issues/2#issuecomment-6809666159
 [rv2]: https://github.com/keepia/mail/issues/2#issuecomment-6809863803
 [rv3]: https://github.com/keepia/mail/issues/2#issuecomment-6810000681
