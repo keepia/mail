@@ -19,23 +19,42 @@ import (
 // argument on a line of its own, so argument boundaries are kept.
 const callEnd = "--end-of-call--"
 
-// testImage is the image name the fake docker gives for the Compose
-// service keepia (`compose ... config --images keepia`).
-const testImage = "ghcr.io/keepia/mail:dev"
+// Image names the fake docker prints for `compose ... config --images
+// keepia`: Compose lists the service's own image and those of the
+// services it depends on (#57, B1).
+const (
+	testImage = "registry.example.org/keepia/mail:dev"
+	testDep   = "registry.example.org/keepia/mail-dep:dev"
+	// testPinned is an upstream image pinned by digest, which km does not
+	// check.
+	testPinned = "registry.example.org/library/postgres:18@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
 
-// fakeDocker sets what the fake docker does: execExit is its exit status
-// on `compose ... exec`, imageExit on `image ...` (1: the image is
-// missing), and withDockerfile puts a Dockerfile next to km, as in a
-// source checkout.
+// fakeDocker sets what the fake docker does: images are the lines it
+// prints on `compose ... config` (default: testImage and testDep),
+// `image ...` exits 1 when an argument is one of missing, execExit is its
+// exit status on `compose ... exec`, withDockerfile puts a Dockerfile
+// next to km, as in a source checkout, and noDaemon fails every call that
+// needs a Docker daemon with a connection error.
 type fakeDocker struct {
-	withDockerfile      bool
-	execExit, imageExit string
+	withDockerfile  bool
+	noDaemon        bool
+	images, missing []string
+	execExit        string
+}
+
+// imageList returns the images the fake prints.
+func (f fakeDocker) imageList() []string {
+	if f.images == nil {
+		return []string{testImage, testDep}
+	}
+	return f.images
 }
 
 // runKm runs a copy of the repository's ./km in a directory of its own,
-// with a docker that only logs its arguments, prints testImage on
-// `compose ... config` and exits as fake says. It returns km's exit code,
-// its output and the docker calls, each as its list of arguments.
+// with a docker that only logs its arguments and answers as fake says.
+// It returns km's exit code, its output and the docker calls, each as its
+// list of arguments.
 func runKm(t *testing.T, fake fakeDocker, args ...string) (int, string, [][]string) {
 	t.Helper()
 	if _, err := exec.LookPath("sh"); err != nil {
@@ -60,11 +79,24 @@ func runKm(t *testing.T, fake fakeDocker, args ...string) (int, string, [][]stri
 		}
 	}
 	bin, log := t.TempDir(), filepath.Join(t.TempDir(), "docker.log")
-	shim := "#!/bin/sh\nprintf '%s\\n' \"$@\" '" + callEnd + "' >> '" + log + "'\n" +
+	missing := "''"
+	if len(fake.missing) > 0 {
+		missing = "'" + strings.Join(fake.missing, "'|'") + "'"
+	}
+	noDaemon := ""
+	if fake.noDaemon {
+		// As with a real docker: every call that needs the daemon fails
+		// with a connection error; `compose config` needs none.
+		noDaemon = "case \"$1 $4\" in 'compose config') ;; *)\n" +
+			"\techo 'failed to connect to the docker API at unix:///var/run/docker.sock' >&2; exit 1 ;; esac\n"
+	}
+	shim := "#!/bin/sh\nprintf '%s\\n' \"$@\" '" + callEnd + "' >> '" + log + "'\n" + noDaemon +
+		"if [ \"$1\" = image ]; then\n" +
+		"\tfor a; do case $a in " + missing + ") exit 1 ;; esac; done\n" +
+		"\texit 0\nfi\n" +
 		"case \"$1 $4\" in\n" +
-		"'compose config') echo '" + testImage + "' ;;\n" +
+		"'compose config') printf '%s\\n' '" + strings.Join(fake.imageList(), "' '") + "' ;;\n" +
 		"'compose exec') exit " + orZero(fake.execExit) + " ;;\n" +
-		"'image '*) exit " + orZero(fake.imageExit) + " ;;\n" +
 		"esac\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(shim), 0o700); err != nil { //nolint:gosec // an executable test script
 		t.Fatal(err)
@@ -116,30 +148,39 @@ func orZero(s string) string {
 	return s
 }
 
-// imageCheck are the docker calls km makes first: the image name of the
-// Compose service keepia, then whether that image is in the local store.
-var imageCheck = [][]string{
-	{"compose", "--progress", "quiet", "config", "--images", "keepia"},
-	{"image", "inspect", testImage},
+// daemonCheck is km's first docker call: is the Docker daemon reachable.
+var daemonCheck = []string{"version", "--format", "{{.Server.Version}}"}
+
+// imageCheck are the docker calls km makes first: the daemon check, the
+// images of the Compose service keepia and the services it depends on,
+// then whether each image is in the local store.
+func imageCheck(inspected ...string) [][]string {
+	calls := [][]string{daemonCheck, {"compose", "--progress", "quiet", "config", "--images", "keepia"}}
+	for _, image := range inspected {
+		calls = append(calls, []string{"image", "inspect", "--", image})
+	}
+	return calls
 }
 
-// kmCalls are all docker calls of `./km args...` when the image is there:
-// the image check, PostgreSQL and keepia started without building (#56),
-// and the command run in the running keepia container.
-func kmCalls(args ...string) [][]string {
-	return append(slices.Clone(imageCheck),
+// kmCalls are all docker calls of `./km args...` when the images are
+// there: the image check of the inspected images, PostgreSQL and keepia
+// started without building (#56) and without pulling keepia or its
+// dependencies (#57, B2), and the command run in the running keepia
+// container.
+func kmCalls(inspected []string, args ...string) [][]string {
+	return append(imageCheck(inspected...),
 		[]string{"compose", "--progress", "quiet", "up", "-d", "--wait", "--no-build", "postgres"},
-		[]string{"compose", "--progress", "quiet", "up", "-d", "--no-build", "keepia"},
+		[]string{"compose", "--progress", "quiet", "up", "-d", "--no-build", "--pull", "never", "keepia"},
 		append([]string{"compose", "--progress", "quiet", "exec", "-T", "keepia", "keepia-mail"}, args...),
 	)
 }
 
-// ./km migrate checks the image, starts PostgreSQL and keepia, then runs
-// the command in the keepia container: exactly these docker calls, with
-// every argument passed on as one argument, also one with a space.
+// ./km migrate checks every image, starts PostgreSQL and keepia, then
+// runs the command in the keepia container: exactly these docker calls,
+// with every argument passed on as one argument, also one with a space.
 func TestKmRunsCommand(t *testing.T) {
 	code, out, calls := runKm(t, fakeDocker{}, "migrate", "status", "a b")
-	want := kmCalls("migrate", "status", "a b")
+	want := kmCalls([]string{testImage, testDep}, "migrate", "status", "a b")
 	if code != 0 || !slices.EqualFunc(calls, want, slices.Equal) {
 		t.Errorf("exit %d\n%s\ndocker calls:\n%swant:\n%s", code, out, show(calls), show(want))
 	}
@@ -157,19 +198,45 @@ func TestKmExitStatus(t *testing.T) {
 // `make images` or CI's checked bake step (#56, .claude/rules/docker.md).
 func TestKmNeverBuilds(t *testing.T) {
 	code, out, calls := runKm(t, fakeDocker{withDockerfile: true}, "migrate")
-	want := kmCalls("migrate")
+	want := kmCalls([]string{testImage, testDep}, "migrate")
 	if code != 0 || !slices.EqualFunc(calls, want, slices.Equal) {
 		t.Errorf("exit %d\n%s\ndocker calls:\n%swant:\n%s", code, out, show(calls), show(want))
 	}
 }
 
-// Without the keepia image, km starts nothing, exits non-zero and names
-// `make images`, which builds it.
+// When an image is missing, here that of a service keepia depends on (the
+// second line of `config --images`), km starts nothing, exits non-zero,
+// and names the image and `make images`, which builds it.
 func TestKmMissingImage(t *testing.T) {
-	code, out, calls := runKm(t, fakeDocker{withDockerfile: true, imageExit: "1"}, "migrate")
-	if code == 0 || !strings.Contains(out, "make images") || !strings.Contains(out, testImage) ||
-		!slices.EqualFunc(calls, imageCheck, slices.Equal) {
+	code, out, calls := runKm(t, fakeDocker{withDockerfile: true, missing: []string{testDep}}, "migrate")
+	want := imageCheck(testImage, testDep)
+	if code == 0 || !strings.Contains(out, "make images") || !strings.Contains(out, testDep) ||
+		!strings.Contains(out, "keepia or a service it depends on") ||
+		!slices.EqualFunc(calls, want, slices.Equal) {
 		t.Errorf("exit %d\n%s\ndocker calls:\n%swant a non-zero exit, a message with %q and %q, and only:\n%s",
-			code, out, show(calls), "make images", testImage, show(imageCheck))
+			code, out, show(calls), "make images", testDep, show(want))
+	}
+}
+
+// An upstream image pinned by digest is not checked: km runs even when it
+// is not in the local store yet (`up` of postgres pulls it by digest).
+func TestKmSkipsPinnedImage(t *testing.T) {
+	fake := fakeDocker{images: []string{testImage, testPinned}, missing: []string{testPinned}}
+	code, out, calls := runKm(t, fake, "migrate")
+	want := kmCalls([]string{testImage}, "migrate")
+	if code != 0 || !slices.EqualFunc(calls, want, slices.Equal) {
+		t.Errorf("exit %d\n%s\ndocker calls:\n%swant:\n%s", code, out, show(calls), show(want))
+	}
+}
+
+// Without a reachable Docker daemon, km stops with docker's own error and
+// does not claim that an image is missing.
+func TestKmNoDaemon(t *testing.T) {
+	code, out, calls := runKm(t, fakeDocker{noDaemon: true}, "migrate")
+	want := [][]string{daemonCheck}
+	if code == 0 || strings.Contains(out, "make images") || !strings.Contains(out, "failed to connect") ||
+		!slices.EqualFunc(calls, want, slices.Equal) {
+		t.Errorf("exit %d\n%s\ndocker calls:\n%swant a non-zero exit, docker's error, no %q, and only:\n%s",
+			code, out, show(calls), "make images", show(want))
 	}
 }
