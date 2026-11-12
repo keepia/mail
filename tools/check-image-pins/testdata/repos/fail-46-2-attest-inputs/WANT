@@ -1,0 +1,2 @@
+job build: docker/bake-action input "provenance" is not allowed
+job build: docker/bake-action input "sbom" is not allowed

@@ -1,6 +1,7 @@
 # The repository's docker-build shape: one job-level definition of the
-# build's inputs, the build-mode check right before the build, and the
-# verify step right before every step that tests or saves the image.
+# build's inputs, the build-mode check right before the build, the verify
+# step right before the test, which runs the verified image ID, and the
+# save through verify's own -save.
 on: pull_request
 permissions:
   contents: read
@@ -18,8 +19,11 @@ jobs:
         ${{ matrix.image }}.cache-from=type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
         ${{ matrix.image }}.cache-to=${{ github.event_name == 'push' && format('type=gha,mode=max,scope={0}-{1}', matrix.image, matrix.arch) || '' }}
     steps:
+      - run: sh scripts/ci-docker-mirror.sh
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - run: go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - name: Commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
+      - run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
       - name: Build
         id: build
         uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
@@ -28,16 +32,16 @@ jobs:
           targets: ${{ env.BAKE_TARGET }}
           load: true
           set: ${{ env.BAKE_SET }}
-      - env:
+      - id: verify
+        env:
           BAKE_METADATA: ${{ steps.build.outputs.metadata }}
-        run: go run ./tools/check-image-pins -verify-built
+        run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built
       - name: Test
         env:
           IMAGE: ${{ matrix.image }}
-        run: make image-test IMAGE="$IMAGE"
+          VERIFIED_IMAGE: ${{ steps.verify.outputs.image }}
+        run: bash scripts/image-test.sh "$IMAGE" "$VERIFIED_IMAGE"
       - if: matrix.arch == 'amd64'
         env:
           BAKE_METADATA: ${{ steps.build.outputs.metadata }}
-        run: go run ./tools/check-image-pins -verify-built
-      - if: matrix.arch == 'amd64'
-        run: docker save "ghcr.io/keepia/$BAKE_TARGET:dev" | zstd -q -o image.tar.zst
+        run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built -save "$RUNNER_TEMP/image.tar"

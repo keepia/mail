@@ -1,0 +1,6 @@
+job build: step 2, run: echo "GOFLAGS=-overlay=$PWD/tools/ov.json" >> "$GITHUB_ENV": a job that builds with bake may not write GITHUB_ENV or GITHUB_PATH
+job build: step 3, scripts/env.sh: echo "GOWORK=$PWD/tools/go.work" >>"$GITHUB_ENV": a job
+job build: step 3, scripts/env.sh: echo "$PWD/tools/bin" >>"$GITHUB_PATH": a job
+job build: step 3, scripts/env.sh: echo "DOCKER_CONFIG=$DOCKER_CONFIG" >>"$GITHUB_ENV": a job
+job build: the step right before docker/bake-action must be exactly `run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build
+job build: step 7 tests, saves, pushes or tags the image; the step right before must be `run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built`

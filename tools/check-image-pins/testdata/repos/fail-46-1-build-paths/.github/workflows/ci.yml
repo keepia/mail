@@ -1,0 +1,37 @@
+# #46 point 1 (review A delta 3, finding 1): build forms the matcher
+# missed, each in its own step of a compliant job: global options before
+# the subcommand, Compose builds, nerdctl, and a non-shell step. The last
+# steps run images without building them and are not reported.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - run: docker buildx --builder b build .
+      - run: docker --context x build .
+      - run: docker -H unix:///run/x.sock image build .
+      - run: docker compose build
+      - run: docker compose -f compose.yml up --build -d
+      - run: docker-compose build postfix
+      - run: nerdctl build .
+      - shell: python
+        run: |
+          import subprocess
+          subprocess.run(["docker", "build", "."], check=True)
+      - run: python3 tools/build.py
+      - run: |
+          docker compose up -d
+          docker --context x run --rm busybox build
+          docker compose run --rm postfix true

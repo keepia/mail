@@ -85,11 +85,23 @@ var targetKeys = map[string]bool{
 }
 
 // bake runs `docker buildx bake` in dir. files, when set, are passed with
-// --file. env, when not nil, replaces the environment.
+// --file. env, when not nil, replaces the environment. bin, when set, is
+// the docker binary's absolute path (local mode resolves it once, so the
+// resolve and the build run the same binary); otherwise each run looks
+// docker up in PATH.
 type bake struct {
 	dir   string
 	files []string
 	env   []string
+	bin   string
+}
+
+// docker is the program a bake run executes.
+func (b bake) docker() string {
+	if b.bin != "" {
+		return b.bin
+	}
+	return "docker"
 }
 
 // cleanEnv is a cleaned bake environment: passEnv from ours, plus the
@@ -121,14 +133,14 @@ func (b bake) argv(args ...string) []string {
 
 func (b bake) run(args ...string) ([]byte, error) {
 	full := b.argv(append([]string{"--progress=quiet"}, args...)...)
-	cmd := exec.Command("docker", full...) //nolint:gosec // fixed program; file names are buildx's default names, --set lines come from typed options, target names match bakeTargetName and follow --
+	cmd := exec.Command(b.docker(), full...) //nolint:gosec // the docker CLI; file names are buildx's default names, --set lines come from typed options, target names match bakeTargetName and follow --
 	cmd.Dir = b.dir
 	cmd.Env = b.env
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("docker %s: %w: %s", strings.Join(full, " "), err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("%s %s: %w: %s", b.docker(), strings.Join(full, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
 }

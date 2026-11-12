@@ -1,0 +1,6 @@
+job build: step 3 tests, saves, pushes or tags the image; the step right before must be
+job build: step 3 runs docker save: save the image with
+job build: step 4 tests, saves, pushes or tags the image; the step right before must be
+job build: step 5 tests, saves, pushes or tags the image; the step right before must be
+job build: step 6 tests, saves, pushes or tags the image; the step right before must be
+job build: step 8 tests the image; it must test the verified image ID

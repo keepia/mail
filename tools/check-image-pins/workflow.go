@@ -31,8 +31,9 @@ import (
 // reported.
 //
 // It also returns the text of every run step, so the caller can check the
-// scripts they run.
-func CheckWorkflow(src []byte, release bool) ([]Finding, []string, error) {
+// scripts they run. resolve (nil in single-file fixtures) gives the files
+// a step's text names, for the rules on what a step runs.
+func CheckWorkflow(src []byte, release bool, resolve resolver) ([]Finding, []string, error) {
 	docs, err := parseYAML(src)
 	if err != nil {
 		return nil, nil, err
@@ -71,7 +72,7 @@ func CheckWorkflow(src []byte, release bool) ([]Finding, []string, error) {
 			continue
 		}
 		checkJobImages(name.Line, name.Value, job, add)
-		runs = append(runs, checkJobBuilds(name.Line, name.Value, wf.Env, job, add)...)
+		runs = append(runs, checkJobBuilds(name.Line, name.Value, wf.Env, job, resolve, add)...)
 		if release {
 			continue
 		}

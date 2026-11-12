@@ -1,0 +1,30 @@
+# #46 point 3 (review A delta 3, finding 3): a save inside a script the
+# step runs, docker push and docker (image) tag, in a run step or a local
+# action, all without a verify step right before; and a test right after
+# verify that tests a tag of another VERSION instead of the verified image.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - run: sh scripts/save.sh
+      - run: docker push ghcr.io/keepia/mail-postfix:dev
+      - run: docker --context x image tag ghcr.io/keepia/mail-postfix:dev ghcr.io/keepia/mail-postfix:x
+      - uses: ./.github/actions/push
+      - id: verify
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built
+      - run: make image-test IMAGE=postfix VERSION=other
