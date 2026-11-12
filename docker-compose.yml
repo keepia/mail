@@ -230,6 +230,8 @@ services:
     # the first step: with a wildcard the container exits 1 before Postfix
     # runs, however it was started (#61). The check sees the addresses this
     # container was created with, the same ones as its port bindings.
+    entrypoint: ["/usr/bin/tini", "--", "sh", "/etc/keepia/check-edge-addresses.sh", "/usr/local/bin/keepia-reload-watch"]
+    command: ["postfix", "start-fg"]
     environment:
       KEEPIA_HEALTH_ADDR: ${KEEPIA_SUBNET4:-172.29}.2.10
       EDGE_IPV4: ${EDGE_IPV4:-192.0.2.10}
@@ -522,7 +524,7 @@ services:
     read_only: true
     mem_limit: 64m
     pids_limit: 64
-    command: ["memcached", "-l", "${KEEPIA_SUBNET4:-172.29}.6.11", "-U", "11211", "-m", "48"]
+    command: ["memcached", "-l", "${KEEPIA_SUBNET4:-172.29}.6.11", "-U", "0", "-m", "48"]
     healthcheck:
       <<: *health
       test:
@@ -626,7 +628,6 @@ configs:
       server:
         interface: ${KEEPIA_SUBNET4:-172.29}.2.53
         access-control: ${KEEPIA_SUBNET4:-172.29}.2.0/24 allow
-        do-tcp: no
   filter-unbound:
     content: |
       include: "/etc/unbound/unbound.conf"
