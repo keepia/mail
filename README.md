@@ -19,6 +19,12 @@ How work is planned, reviewed and merged is described in
 run on every pull request are in
 [docs/development/index.md](docs/development/index.md).
 
+## Operations
+
+Moving the reference installation from mailcow to Keepia Mail:
+[docs/operations/mailcow-migration.md](docs/operations/mailcow-migration.md)
+(a skeleton that grows with the milestones).
+
 ## Security
 
 Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
