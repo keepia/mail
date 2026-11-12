@@ -327,9 +327,12 @@ lives, also under a skipped path.
          reported. An exception may skip a word, never a whole command: a
          variable the script sets only to plain command names (`SUDO=sudo`)
          is replaced by its value and the command read again; `"$@"` or
-         `"$N"` at a script's top level is replaced by the words its caller
-         passed after the script's path, and is skipped only inside a
-         function body, where the arguments are words of the same text;
+         `"$N"` as a command is skipped only inside a function body, where
+         the arguments are words of the same text. At a script's top level
+         it forwards the caller's arguments as a command, which the check
+         does not model (`shift`, `set --`, forwarding through more
+         scripts): it is reported, and the fix is to call the command
+         directly or wrap it in a function;
        - no step of the job writes `GITHUB_ENV` or `GITHUB_PATH` (in what it
          runs, as above, or with `core.exportVariable`/`core.addPath` in a
          github-script), except the commit time (`SOURCE_DATE_EPOCH`) and
@@ -417,6 +420,11 @@ lives, also under a skipped path.
   job may not write `GITHUB_ENV` or `GITHUB_PATH` otherwise, so an earlier
   step cannot reroute the tool's own build; locally the Makefile may not
   set `SHELL`, `GO` or the Go variables the tool is built with.
+- Known limits of following what a step runs (#51): a word on PATH or a
+  shell function that runs its arguments as a command (`xargs make
+  publish`, or `retry make publish` with `retry() { "$@"; }`) hides those
+  arguments, and reading `make` takes in the whole Makefile, which
+  over-reports.
 - A pull request that edits the check itself, or deliberately disables or
   routes around it (for example a build command assembled at run time, or
   a process started earlier that changes the image store or a file
