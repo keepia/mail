@@ -1,15 +1,14 @@
-# The repository's make images shape: the allowed --set keys only, in a
-# variable the bake line uses.
+# The repository's make images shape: the tool is the only build path.
 VERSION ?= dev
 REGISTRY ?= ghcr.io/keepia
 KEEPIA_BUILD_CA ?=
-comma := ,
-BAKE_CA_FLAGS = $(if $(KEEPIA_BUILD_CA),--allow fs.read=$(abspath $(dir $(KEEPIA_BUILD_CA))) \
-	--allow network.host --set '*.secrets=id=ca$(comma)src=$(abspath $(KEEPIA_BUILD_CA))' \
-	--set '*.network=host' --set '*.args.HTTPS_PROXY=$(HTTPS_PROXY)')
+LOCAL_BUILD_OPTIONS = $(if $(KEEPIA_BUILD_CA),-ca "$(KEEPIA_BUILD_CA)" -host-network -https-proxy "$(HTTPS_PROXY)")
 
 images:
-	VERSION=$(VERSION) REGISTRY=$(REGISTRY) docker buildx bake --load $(BAKE_CA_FLAGS)
+	go run ./tools/check-image-pins -bake-local -version "$(VERSION)" -registry "$(REGISTRY)" $(LOCAL_BUILD_OPTIONS)
+
+image-test:
+	bash scripts/image-test.sh $(IMAGE)
 
 clean:
 	rm -f bin/x

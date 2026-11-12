@@ -1,0 +1,3 @@
+#!/bin/sh
+# Review B delta 2, W4: a script without .sh that a workflow runs.
+docker buildx bake --load --file=m.txt postfix

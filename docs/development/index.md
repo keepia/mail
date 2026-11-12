@@ -122,8 +122,10 @@ make image-pins-test image-pins   # the pin check: tests, then the repository
   only as the BuildKit secret `ca`, never a layer; apt then fetches from the
   same Debian archive over https, and the build runs on the host network so
   `HTTPS_PROXY` (a predefined build argument, kept out of the image
-  history) is reachable. bake needs the explicit `--allow fs.read=…` grant
-  for the secret file, which the Makefile adds.
+  history) is reachable. `make images` runs `go run ./tools/check-image-pins
+  -bake-local` with the typed options `-ca`, `-host-network` and
+  `-https-proxy`, and the tool adds the matching `--set` and `--allow`
+  arguments itself.
 - **Reload watcher.** Postfix and Unbound start under `tini` with
   [`images/common/keepia-reload-watch`](../../images/common/keepia-reload-watch):
   when `/run/keepia/generation/` exists (the agent's read-only volume from
@@ -151,12 +153,16 @@ make image-pins-test image-pins   # the pin check: tests, then the repository
   QEMU). It points dockerd and BuildKit at `mirror.gcr.io` with Docker Hub
   as the fallback (`scripts/ci-docker-mirror.sh`). The build's bake inputs
   are defined once, in the job's env (`BAKE_TARGET`, `PLATFORM`,
-  `BAKE_SET`). `make image-pins-build`, the step right before the build,
+  `BAKE_SET`). The step right before the build, `go run
+  ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"`,
   resolves exactly those inputs in the build's environment and checks
   them (rule 5, build mode). The job then builds with `docker/bake-action`
-  (which gives BuildKit the GitHub Actions cache: one scope per image and
-  platform, written only by pushes to `main`), runs
-  `make image-test`, and on amd64 uploads the image for the `compose` job
+  (`id: build`; it gives BuildKit the GitHub Actions cache: one scope per
+  image and platform, written only by pushes to `main`).
+  `go run ./tools/check-image-pins -verify-built` then compares each built
+  image's local ID with the digest in the build's metadata, right before
+  `make image-test` and again right before `docker save`. Finally the job
+  runs `make image-test`, and on amd64 uploads the image for the `compose` job
   of #5 part 3 (artifact `image-<name>`, kept 1 day). CI never logs in to a
   registry and never pushes.
 - **`docker`**: fails unless every `docker-build` row succeeded (a failed or
@@ -200,11 +206,42 @@ lives, also under a skipped path.
    `cache_from` and any new key are reported), and `args` may not set
    `BUILDKIT_SYNTAX`; a URL context, `extends` and `include` are reported;
 5. the bake definition **exactly as each build resolves it**, never its HCL
-   lines. In every resolved target, `context` must be a relative path
-   inside the repository; named `contexts`, `dockerfile-inline` and a
-   `BUILDKIT_SYNTAX` argument are reported, and every target's Dockerfile
-   is read with rules 1–3. The principle is that no input may change the
-   definition unless the check sees it too.
+   lines. In every resolved target:
+   - only these keys may appear: `context`, `dockerfile`, `args`,
+     `labels`, `tags`, `platforms`, `target`, and, as the mode allows,
+     `cache-from`/`cache-to`, `secret`, `network` and `entitlements`.
+     `output`, `ssh`, `call`, `attest` and any new key are reported;
+   - `context` must be a relative path inside the repository;
+   - named `contexts`, `dockerfile-inline` and a `BUILDKIT_SYNTAX`
+     argument are reported;
+   - every target's Dockerfile is read with rules 1–3.
+
+   The check is part of every build invocation.
+   - **Local mode** (`-bake-local`, the only local build path; `make
+     images`):
+     - The tool builds the bake argument list itself: the root's default
+       files with `--file`, and `--set` lines only from its typed options.
+       `-ca` gives the secret `id=ca` and `--allow fs.read`;
+       `-host-network` gives `network=host` and `--allow network.host`;
+       `-https-proxy` gives `args.HTTPS_PROXY`.
+     - It uses a cleaned environment plus `VERSION`, `REGISTRY` and
+       `PLATFORM` from `-version`, `-registry` and `-platform`.
+     - It resolves `--print` with exactly that, checks it, and then runs
+       `docker buildx bake --load` with the same arguments and environment.
+       No cache is allowed. `-dry-run` prints the command instead of
+       building.
+   - **Build mode** (`-build`, CI): resolves the build step's targets, `--set`
+     lines and environment, as described below. The cache may only be
+     `type=gha` with this row's scope (`<target>-<arch>`, from `PLATFORM`)
+     and no other key: a foreign cache would stand in for build steps by
+     their cache keys.
+   - **Verify mode** (`-verify-built`, CI): the images a job tests and saves
+     are the checked build's output.
+     - It reads bake-action's metadata output (`BAKE_METADATA`) and
+       compares every image name's local ID with the digest the build
+       reported: `containerimage.digest` for Docker's containerd store, or
+       `containerimage.config.digest` for the classic store.
+     - Any other build, `docker tag` or `docker load` in between fails it.
    - **Repository mode** (`make image-pins`):
      - The tool passes every one of buildx's default files present at the
        root to `docker buildx bake` with `--file`, in buildx's order:
@@ -212,9 +249,10 @@ lives, also under a skipped path.
        `docker-compose.yaml`, `docker-bake.json`, `docker-bake.hcl`,
        `docker-bake.override.json`, `docker-bake.override.hcl`. A Compose
        file alone counts too.
-     - It runs bake in a cleaned environment: only `PATH`, `HOME` and
-       `DOCKER_CONFIG`, so no `BUILDX_BAKE_*` and no bake variable from the
-       caller.
+     - It runs bake in a cleaned environment: only `PATH`, `HOME`,
+       `DOCKER_CONFIG`, `DOCKER_HOST` and `DOCKER_CONTEXT` (what the CLI
+       needs to find its plugin and daemon), so no `BUILDX_*` and no bake
+       variable from the caller. Local mode uses the same environment.
      - Target names come only from `--list` and are passed after `--`.
        Hidden targets are checked through the targets that inherit them.
      - It then resolves again with every declared variable at a sentinel
@@ -223,24 +261,44 @@ lives, also under a skipped path.
        a build's environment could move it. Known variables have sentinels
        that still resolve (`PLATFORM` must be a platform). If the definition
        does not resolve with the sentinels, the check fails.
-   - **Build mode** (`make image-pins-build`, in CI): the exact targets
-     (`BAKE_TARGET`), `--set` lines (`BAKE_SET`) and environment of the build
-     step that follows it, with buildx's own file lookup.
-   - **Every build input must be visible to the check.**
-     - In workflows, bake runs only through `docker/bake-action`:
+     - This mode is best effort. One sentinel value per variable cannot
+       show a condition on another value, and a `timestamp()` condition
+       fires only on its day. The local and build modes are authoritative,
+       because they check what is actually built.
+   - **Build mode in CI**: the exact targets (`BAKE_TARGET`), `--set` lines
+     (`BAKE_SET`) and environment of the build step that follows it, with
+     buildx's own file lookup.
+   - **Every build input is visible to the check.**
+     - In workflows, a job builds images only through one
+       `docker/bake-action` step:
        - inputs only `source: .`, `targets: ${{ env.BAKE_TARGET }}`,
          `set: ${{ env.BAKE_SET }}`, `load`, `push`, `provenance`, `sbom`,
-         `no-cache` and `pull` (no `files`, `workdir` or `vars`);
+         `no-cache` and `pull` (no `files`, `workdir` or `vars`), and
+         `id: build`;
        - no step env, and job and workflow env only `BAKE_TARGET`,
-         `BAKE_SET` and `PLATFORM`;
-       - `BAKE_SET` lines may set only `cache-from` and `cache-to`;
-       - the step right before is `run: make image-pins-build`, with no env,
-         `if` or `continue-on-error`.
-     - No `run:` step or shell script calls `buildx bake` itself.
-     - In a Makefile, the `buildx bake` lines and the make variables they
-       use may not contain `-f` or `--file`. `--set` keys there are limited
-       to `*.secrets`, `*.network` and `*.args.HTTPS_PROXY`, which local
-       proxy builds need. No `BUILDX_` variable may appear anywhere in it.
+         `BAKE_SET` and `PLATFORM`, whose expressions may read only
+         `matrix.*` and `github.event_name`;
+       - `BAKE_SET` lines may set only `cache-from` and `cache-to`, and a
+         literal cache value must be `type=gha`;
+       - the step right before is exactly `run: go run
+         ./tools/check-image-pins -build "$BAKE_TARGET" -build-set
+         "$BAKE_SET"`, with no env, `if` or `continue-on-error`;
+       - the step right before every step that runs `image-test` or
+         `docker save` is the verify step.
+     - **Other build paths are reported** (defence in depth; verify mode is
+       the real guarantee):
+       - `docker build`, `docker image build`, `buildx build`/`bake`/`b`,
+         `buildctl` and `podman`/`buildah build`, matched word by word after
+         quotes and backslashes are removed (`ba""ke` matches);
+       - in workflow `run:` steps, composite actions under
+         `.github/actions/`, `*.sh` files, and any file a workflow, action or
+         Makefile names in a command (`sh scripts/build`);
+       - any build action in `uses:` (`docker/build-push-action`, other
+         `docker/*` actions except the setup, login and metadata ones,
+         `bake-action` outside the allowed step);
+       - a job that calls a remote reusable workflow.
+     - A Makefile or `*.mk` file holds no `buildx` and no `BUILDX_` at all
+       (after quotes are removed), and no other build command.
    - Any `*.hcl` other than the root's `docker-bake.hcl` and
      `docker-bake.override.hcl` is reported, unless it is on the tool's
      `hclAllowlist`, which is empty. A JSON bake file is reported;
@@ -250,6 +308,19 @@ lives, also under a skipped path.
    a workflow without them are reported. In every workflow, `release.yml`
    included, each job's `container` and `services` image is
    `name:tag@sha256:<64 hex>`.
+
+**Threat model.**
+- The check catches accidental unpinned references and fails closed on
+  forms it cannot resolve.
+- The local and build modes are authoritative, together with verify mode in
+  CI: they check what is actually built, with the real environment.
+- Repository mode is best effort for value-conditional HCL expressions.
+  Its known limits are the single-value sentinel and `timestamp()`
+  conditions.
+- A pull request that edits the check itself, or deliberately disables or
+  routes around it (for example a build command assembled at run time), is
+  the reviewers' responsibility, not the tool's. The rule file
+  `.claude/rules/docker.md` says so as well.
 
 **Rule 5 needs Docker.** It runs the `docker` CLI with the buildx plugin
 (no daemon needed; buildx resolves the file itself). Without it, `make

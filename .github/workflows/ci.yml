@@ -176,22 +176,35 @@ jobs:
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
       # Rule 5 in build mode: resolves exactly what the next step builds
       # (BAKE_TARGET, BAKE_SET and this job's environment, including what
-      # earlier steps wrote to GITHUB_ENV) and checks it. It must stay the
-      # step right before Build.
-      - run: make image-pins-build
+      # earlier steps wrote to GITHUB_ENV) and checks it, the cache
+      # included (only type=gha with this row's scope). The check requires
+      # this exact command right before Build.
+      - run: go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
       # bake-action exposes the GitHub Actions cache runtime to BuildKit; a
       # plain `docker buildx bake` in a run step could not use type=gha.
       - name: Build
+        id: build
         uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
         with:
           source: .
           targets: ${{ env.BAKE_TARGET }}
           load: true
           set: ${{ env.BAKE_SET }}
+      # The image tested and the image saved are the checked build's output:
+      # the local image ID must equal the digest in the build's metadata.
+      # The check requires this step right before every step that tests or
+      # saves the image.
+      - env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: go run ./tools/check-image-pins -verify-built
       - name: Smoke, health and reload tests
         env:
           IMAGE: ${{ matrix.image }}
         run: make image-test IMAGE="$IMAGE" VERSION=dev
+      - if: matrix.arch == 'amd64'
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: go run ./tools/check-image-pins -verify-built
       # The compose job (#5 part 3) loads the amd64 images from here instead
       # of building them again.
       - name: Save the image

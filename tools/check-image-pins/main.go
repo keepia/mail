@@ -73,6 +73,7 @@ const (
 	kindStrayHCL
 	kindMakefile
 	kindScript
+	kindAction
 )
 
 // hclAllowlist lists HCL files (relative to the root) that are not bake
@@ -95,6 +96,8 @@ func classify(rel string) kind {
 			return kindReleaseWorkflow
 		}
 		return kindWorkflow
+	case strings.HasPrefix(dir+"/", ".github/actions/") && (lower == "action.yml" || lower == "action.yaml"):
+		return kindAction
 	case lower == "dockerfile" || lower == "containerfile" ||
 		strings.HasPrefix(lower, "dockerfile.") || strings.HasSuffix(lower, ".dockerfile"):
 		return kindDockerfile
@@ -144,7 +147,37 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	build := flags.String("build", "", "build mode: the bake targets one build step builds (space or comma separated)")
 	buildSet := flags.String("build-set", "", "build mode: that step's --set values, one per line")
+	verify := flags.Bool("verify-built", false, "verify mode: the local images are the output in $BAKE_METADATA")
+	local := flags.Bool("bake-local", false, "local mode: check, then build the given targets (default: the default group)")
+	var lo localOptions
+	flags.StringVar(&lo.version, "version", "", "local mode: the bake variable VERSION")
+	flags.StringVar(&lo.registry, "registry", "", "local mode: the bake variable REGISTRY")
+	flags.StringVar(&lo.platform, "platform", "", "local mode: the bake variable PLATFORM")
+	flags.StringVar(&lo.ca, "ca", "", "local mode: a CA bundle file, passed as the BuildKit secret ca")
+	flags.BoolVar(&lo.hostNetwork, "host-network", false, "local mode: build on the host network")
+	flags.StringVar(&lo.httpsProxy, "https-proxy", "", "local mode: the HTTPS_PROXY build argument, http(s)://host[:port]")
+	flags.BoolVar(&lo.dryRun, "dry-run", false, "local mode: check and print the bake command, do not build")
+	localRoot := flags.String("root", ".", "local mode: the repository root")
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	switch {
+	case *verify:
+		if *local || *build != "" || flags.NArg() > 0 {
+			fmt.Fprintln(stderr, "usage: check-image-pins -verify-built")
+			return 2
+		}
+		return runVerify(stdout)
+	case *local:
+		if *build != "" || *buildSet != "" {
+			fmt.Fprintln(stderr, "check-image-pins: -bake-local takes no -build or -build-set")
+			return 2
+		}
+		lo.targets = flags.Args()
+		return runLocal(*localRoot, lo, stdout, stderr)
+	case lo.version != "" || lo.registry != "" || lo.platform != "" || lo.ca != "" ||
+		lo.hostNetwork || lo.httpsProxy != "" || lo.dryRun || *localRoot != ".":
+		fmt.Fprintln(stderr, "check-image-pins: -version, -registry, -platform, -ca, -host-network, -https-proxy, -dry-run and -root need -bake-local")
 		return 2
 	}
 	root := "."
@@ -255,6 +288,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 	}
+	// Other build paths: Makefiles, composite actions and scripts. A script
+	// is any *.sh, and any file a workflow, action or Makefile names in a
+	// command, whatever its name.
+	var commandTexts []string
 	for _, p := range files[kindMakefile] {
 		src, err := os.ReadFile(p) //nolint:gosec // p is a file found by walking root
 		if err != nil {
@@ -262,18 +299,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 			continue
 		}
 		r.addAll(p, CheckMakefile(src))
+		commandTexts = append(commandTexts, string(src))
 	}
-	for _, p := range files[kindScript] {
+	for _, p := range files[kindAction] {
 		src, err := os.ReadFile(p) //nolint:gosec // p is a file found by walking root
 		if err != nil {
 			r.add(p, 0, err.Error())
 			continue
 		}
-		for i, l := range strings.Split(string(src), "\n") {
-			if strings.Contains(strings.Join(strings.Fields(l), " "), "buildx bake") {
-				r.add(p, i+1, "a script runs `buildx bake`; build only through make images or docker/bake-action (rule 5)")
-			}
+		findings, runs, err := CheckAction(src)
+		if err != nil {
+			r.add(p, 0, "does not parse: "+err.Error())
+			continue
 		}
+		r.addAll(p, findings)
+		commandTexts = append(commandTexts, runs...)
 	}
 
 	var dfs []string
@@ -297,13 +337,39 @@ func run(args []string, stdout, stderr io.Writer) int {
 				r.add(p, 0, err.Error())
 				continue
 			}
-			findings, err := CheckWorkflow(src, k == kindReleaseWorkflow)
+			findings, runs, err := CheckWorkflow(src, k == kindReleaseWorkflow)
 			if err != nil {
 				r.add(p, 0, "does not parse: "+err.Error())
 				continue
 			}
 			r.addAll(p, findings)
+			commandTexts = append(commandTexts, runs...)
 		}
+	}
+
+	scripts := map[string]bool{}
+	for _, p := range files[kindScript] {
+		scripts[filepath.Clean(p)] = true
+	}
+	for _, t := range commandTexts {
+		for _, p := range referencedFiles(root, t) {
+			if classify(mustRel(root, p)) == kindNone {
+				scripts[filepath.Clean(p)] = true
+			}
+		}
+	}
+	var scriptList []string
+	for p := range scripts {
+		scriptList = append(scriptList, p)
+	}
+	sort.Strings(scriptList)
+	for _, p := range scriptList {
+		src, err := os.ReadFile(p) //nolint:gosec // p is a script under root
+		if err != nil {
+			r.add(p, 0, err.Error())
+			continue
+		}
+		r.addAll(p, CheckScriptText(src))
 	}
 
 	if len(dfs) == 0 {
@@ -339,30 +405,21 @@ func runBuild(root, targets, sets string, stdout io.Writer) int {
 	for _, f := range findings {
 		r.add(label, 0, f)
 	}
-	seen := map[string]bool{}
-	for _, df := range refs {
-		df = filepath.Clean(df)
-		if seen[df] {
-			continue
-		}
-		seen[df] = true
-		rel, err := filepath.Rel(root, df)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			r.add(label, 0, "names a Dockerfile outside the repository: "+df)
-			continue
-		}
-		src, err := os.ReadFile(df) //nolint:gosec // df is named by the repository's own bake definition, inside root
-		if err != nil {
-			r.add(df, 0, err.Error())
-			continue
-		}
-		r.addAll(df, CheckDockerfile(src))
-	}
+	n := checkDockerfiles(r, root, label, refs)
 	if r.bad > 0 {
 		fmt.Fprintf(stdout, "check-image-pins: %d finding(s) in the definition of build %s.\n", r.bad, strings.Join(names, ","))
 		return 1
 	}
 	fmt.Fprintf(stdout, "check-image-pins: build %s resolves to pinned images and sources (%d Dockerfiles, %d --set lines).\n",
-		strings.Join(names, ","), len(seen), len(setLines))
+		strings.Join(names, ","), n, len(setLines))
 	return 0
+}
+
+// mustRel is p relative to root (p itself if that fails).
+func mustRel(root, p string) string {
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return p
+	}
+	return rel
 }

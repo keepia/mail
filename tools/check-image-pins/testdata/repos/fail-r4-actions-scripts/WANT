@@ -1,0 +1,6 @@
+action.yml:3: step 1 runs "buildx bake"
+action.yml:3: step 2 uses docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e
+scripts/build:3: runs "buildx bake"
+tools/mk-image:3: runs "docker build"
+job build: job env BAKE_TARGET reads github.head_ref
+job build: job env BAKE_SET reads github.event.pull_request.body

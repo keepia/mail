@@ -11,12 +11,19 @@ paths:
 ---
 # Docker
 - **Pins** (`tools/check-image-pins`, `make image-pins`): `# syntax=` is `name:X.Y.Z@sha256:<64 hex>`; every `FROM`, `COPY --from=` and `RUN --mount=…,from=` is an earlier stage or `name:tag@sha256:<64 hex>`; Compose's upstream images are `tag@sha256`; own images are built from local contexts; workflow `container`/`services` images are pinned by digest. Write every `--flag` on the instruction's first line, ADD sources literally (no `$VAR`), no here-documents, no `ONBUILD`, no bake `contexts`. The bake rule reads `docker buildx bake --print`, so `make image-pins` needs Docker with buildx.
-- **Bake inputs only where the check sees them:**
-  - The only bake files are the root's `docker-bake.hcl` (and `docker-bake.override.hcl`); any other `*.hcl` is reported.
-  - In workflows, bake runs only through `docker/bake-action`. Its inputs come from the job env `BAKE_TARGET`/`BAKE_SET`/`PLATFORM`, `BAKE_SET` only sets `cache-from`/`cache-to`, and `make image-pins-build` must be the step right before it.
-  - `make images` never passes `-f`, and `--set` there is limited to `*.secrets`, `*.network` and `*.args.HTTPS_PROXY`.
-  - No `BUILDX_*` variables are set anywhere.
+- **The check is part of every build:**
+  - Locally, images are built only by `go run ./tools/check-image-pins -bake-local` (`make images`). It resolves, checks and then builds with one argument list and a cleaned environment, and takes only typed options (`-ca`, `-host-network`, `-https-proxy`, `-version`, `-registry`, `-platform`).
+  - A Makefile or `*.mk` file names no `buildx`, no `BUILDX_` and no other build command.
+  - In CI, a job builds only through one `docker/bake-action` step (`id: build`, inputs from the job env `BAKE_TARGET`/`BAKE_SET`/`PLATFORM`, with expressions reading only `matrix.*` and `github.event_name`).
+  - `BAKE_SET` sets only a `type=gha` cache in the row's own scope.
+  - The step right before the build is exactly `go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"`, and the step right before any `image-test` or `docker save` is `go run ./tools/check-image-pins -verify-built` with `BAKE_METADATA: ${{ steps.build.outputs.metadata }}`.
+  - No other build path: no `docker build`, `buildx build`/`bake`, build action, remote reusable workflow or building composite action or script. The only bake files are the root's `docker-bake.hcl` and `docker-bake.override.hcl`.
   - A new bake variable needs a sentinel in `tools/check-image-pins/bake.go` if the generic one does not resolve.
+- **Threat model:**
+  - The check catches accidental unpinned references and fails closed on forms it cannot resolve.
+  - Local, build and verify mode are authoritative, because they check what is actually built.
+  - Repository mode is best effort for value-conditional HCL expressions. Its known limits are single-value sentinels and `timestamp()` conditions.
+  - A change that edits the check, or disables or routes around it (a build command assembled at run time, a computed variable name), is caught by review, not by the tool. Reviewers of `second-review` PRs check that every build still goes through the paths above.
 - Compose `build` keys only `context`, `dockerfile`, `args` (no `BUILDKIT_SYNTAX`), `target` and `labels`.
 - **Downloads only by `ADD --checksum=sha256:`**, one URL per `ADD`, from a source the plan lists. No `curl`, `wget`, `pip install` from an index, `git clone` or any other download in `RUN`: the check cannot see them, so review must. Debian packages come from the Debian archive through `images/common/keepia-apt-install`, which records them in `/usr/share/keepia/packages.txt` (recorded, not pinned).
 - A new registry, base image, package source or action is a new external service: the maintainer's OK first.

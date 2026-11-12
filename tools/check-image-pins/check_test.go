@@ -18,7 +18,7 @@ var minFixtures = map[string]int{
 	"dockerfile": 33,
 	"compose":    16,
 	"workflow":   9,
-	"repos":      18,
+	"repos":      22,
 }
 
 // fixtureKind maps a testdata directory of single files to the rules its
@@ -38,7 +38,8 @@ func checkFixture(k kind, src []byte) ([]Finding, error) {
 		f, _, err := CheckCompose(src)
 		return f, err
 	case kindWorkflow:
-		return CheckWorkflow(src, false)
+		f, _, err := CheckWorkflow(src, false)
+		return f, err
 	}
 	return nil, nil
 }
@@ -259,12 +260,20 @@ func TestBuildMode(t *testing.T) {
 		t.Skip("docker buildx is not available")
 	}
 	repo := filepath.Join("testdata", "repos", "pass-bake")
+	// The job's PLATFORM gives the cache scope build mode allows.
+	t.Setenv("PLATFORM", "linux/amd64")
 	cases := []struct {
 		name, targets, sets, env string
 		code                     int
 		want                     string
 	}{
 		{"clean", "a", "a.cache-from=type=gha,scope=a-amd64\na.cache-to=", "", 0, "build a resolves to pinned images"},
+		// Review A delta 2, 1a: a foreign cache stands in for build steps.
+		{"registry cache", "a", "a.cache-from=type=registry,ref=registry.invalid/attacker/cache:latest", "", 1, `cache-from map[ref:registry.invalid/attacker/cache:latest type:registry] is not allowed`},
+		{"other scope", "a", "a.cache-to=type=gha,scope=root-amd64,mode=max", "", 1, "only type=gha with scope=a-amd64"},
+		{"gha with url", "a", "a.cache-from=type=gha,scope=a-amd64,url=https://example.invalid/", "", 1, "no other key"},
+		{"set output", "a", "a.output=type=local,dest=/tmp/x", "", 1, `target "a": output is not allowed`},
+		{"set network", "a", "a.network=host", "", 1, `network "host" is not allowed here`},
 		{"set contexts", "a", "a.contexts.base=docker-image://busybox:latest", "", 1, `target "a": named contexts are not allowed`},
 		{"set syntax", "root", "*.args.BUILDKIT_SYNTAX=docker/dockerfile:latest", "", 1, `target "root": the BUILDKIT_SYNTAX argument`},
 		{"env file", "a", "", "env-bake.hcl", 1, `target "a": context "https://example.invalid/env.git"`},
@@ -286,6 +295,106 @@ func TestBuildMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBakeLocal: local mode resolves and checks exactly the argv and
+// environment it will build with, takes only typed options, and
+// ignores the caller's BUILDX_* and bake variables (review B delta 2:
+// V1 adds --file through a make variable, V5 exports BUILDX_BAKE_FILE).
+func TestBakeLocal(t *testing.T) {
+	if !haveBuildx(t) {
+		t.Skip("docker buildx is not available")
+	}
+	repo := filepath.Join("testdata", "repos", "pass-bake")
+	decoy, err := filepath.Abs(filepath.Join("testdata", "env-bake.hcl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := filepath.Abs(filepath.Join("testdata", "env-bake.hcl")) // any readable file
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		args []string
+		env  map[string]string
+		code int
+		want string
+	}{
+		{"clean", []string{"-root", repo, "-dry-run", "-version", "1.0.0"}, nil, 0, "running docker buildx bake --file docker-bake.hcl --load -- default"},
+		{"proxy options", []string{"-root", repo, "-dry-run", "-ca", ca, "-host-network", "-https-proxy", "http://127.0.0.1:3128"}, nil, 0,
+			"--allow network.host --set *.secrets=id=ca,src=" + ca + " --set *.network=host --set *.args.HTTPS_PROXY=http://127.0.0.1:3128 --load -- default"},
+		// V1: a free --file is not an option of the tool.
+		{"free --file", []string{"-root", repo, "-dry-run", "--file=m.txt"}, nil, 2, ""},
+		// V5 and caller variables: not passed to bake.
+		{"caller env", []string{"-root", repo, "-dry-run", "a"}, map[string]string{"BUILDX_BAKE_FILE": decoy, "CTX": "https://example.invalid/env.git"}, 0, "--load -- a"},
+		{"bad proxy", []string{"-root", repo, "-dry-run", "-https-proxy", "http://x,y"}, nil, 1, `-https-proxy "http://x,y" is not http(s)://host[:port]`},
+		{"bad target", []string{"-root", repo, "-dry-run", "--", "-x"}, nil, 1, `target name "-x" is not a plain name`},
+		{"bad version", []string{"-root", repo, "-dry-run", "-version", "1 --file=x"}, nil, 1, `-version "1 --file=x" has characters outside`},
+		{"bake options outside local mode", []string{"-ca", ca}, nil, 2, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for k, v := range c.env {
+				t.Setenv(k, v)
+			}
+			var out, errOut bytes.Buffer
+			code := run(append([]string{"-bake-local"}, c.args...), &out, &errOut)
+			if c.name == "bake options outside local mode" {
+				code = run(c.args, &out, &errOut)
+			}
+			if code != c.code || !strings.Contains(out.String(), c.want) || strings.Contains(out.String(), "env.git") {
+				t.Fatalf("exit %d, want %d with %q:\n%s%s", code, c.code, c.want, out.String(), errOut.String())
+			}
+		})
+	}
+}
+
+// TestVerifyBuilt: the images a job tests and saves must be the checked
+// build's output (review B delta 2, D2).
+func TestVerifyBuilt(t *testing.T) {
+	const d1 = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	const c1 = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	const other = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+	meta := `{"buildx.build.warnings":[],"postfix":{"image.name":"ghcr.io/keepia/mail-postfix:dev,ghcr.io/keepia/mail-postfix:x","containerimage.digest":"` + d1 + `","containerimage.config.digest":"` + c1 + `"}}`
+	cases := []struct {
+		name     string
+		meta     string
+		ids      map[string]string
+		findings int
+		want     string
+	}{
+		{"manifest digest (containerd store)", meta, map[string]string{"ghcr.io/keepia/mail-postfix:dev": d1, "ghcr.io/keepia/mail-postfix:x": d1}, 0, ""},
+		{"config digest (classic store)", meta, map[string]string{"ghcr.io/keepia/mail-postfix:dev": c1, "ghcr.io/keepia/mail-postfix:x": c1}, 0, ""},
+		// W1: another build or a docker tag replaced one name.
+		{"replaced", meta, map[string]string{"ghcr.io/keepia/mail-postfix:dev": other, "ghcr.io/keepia/mail-postfix:x": d1}, 1, "it was replaced after the build"},
+		{"missing", meta, map[string]string{"ghcr.io/keepia/mail-postfix:x": d1}, 1, "is not in the local store"},
+		{"no image", `{"postfix":{}}`, nil, 1, "names no image or digest"},
+		{"empty", `{}`, nil, 1, "names no image"},
+		{"not JSON", `nope`, nil, 1, "does not parse"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			inspect := func(name string) (string, error) {
+				id, ok := c.ids[name]
+				if !ok {
+					return "", os.ErrNotExist
+				}
+				return id, nil
+			}
+			findings, _ := verifyBuilt([]byte(c.meta), inspect)
+			if len(findings) != c.findings || (c.want != "" && !strings.Contains(strings.Join(findings, "\n"), c.want)) {
+				t.Fatalf("findings %q, want %d with %q", findings, c.findings, c.want)
+			}
+		})
+	}
+	t.Run("no metadata", func(t *testing.T) {
+		t.Setenv("BAKE_METADATA", "")
+		var out, errOut bytes.Buffer
+		if code := run([]string{"-verify-built"}, &out, &errOut); code != 1 {
+			t.Fatalf("exit %d, want 1:\n%s", code, out.String())
+		}
+	})
 }
 
 // TestClassify checks which files the walk checks, and as what.

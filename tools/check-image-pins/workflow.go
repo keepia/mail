@@ -25,18 +25,26 @@ import (
 //     repository's default token permissions, which this check cannot see.
 //
 // Other permission values are left to review.
-func CheckWorkflow(src []byte, release bool) ([]Finding, error) {
+//
+// The rule-5 side (workflow_bake.go): images are built only by the one
+// checked docker/bake-action step per job, and every other build path is
+// reported.
+//
+// It also returns the text of every run step, so the caller can check the
+// scripts they run.
+func CheckWorkflow(src []byte, release bool) ([]Finding, []string, error) {
 	docs, err := parseYAML(src)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var out []Finding
+	var runs []string
 	add := func(line int, format string, a ...any) {
 		out = append(out, Finding{line, fmt.Sprintf(format, a...)})
 	}
 	if len(docs) != 1 {
 		add(0, "a workflow must hold exactly one YAML document, found %d", len(docs))
-		return out, nil
+		return out, runs, nil
 	}
 	var wf struct {
 		Permissions any `yaml:"permissions"`
@@ -45,7 +53,7 @@ func CheckWorkflow(src []byte, release bool) ([]Finding, error) {
 	top := root(docs[0])
 	if err := top.Decode(&wf); err != nil {
 		add(top.Line, "the workflow does not decode: %v", err)
-		return out, nil
+		return out, runs, nil
 	}
 	_, topKey := mappingValue(top, "permissions")
 	if topKey != nil && !release {
@@ -53,7 +61,7 @@ func CheckWorkflow(src []byte, release bool) ([]Finding, error) {
 	}
 	jobs, _ := mappingValue(top, "jobs")
 	if jobs == nil || jobs.Kind != yaml.MappingNode {
-		return out, nil
+		return out, runs, nil
 	}
 	for i := 0; i+1 < len(jobs.Content); i += 2 {
 		name, val := jobs.Content[i], jobs.Content[i+1]
@@ -63,7 +71,7 @@ func CheckWorkflow(src []byte, release bool) ([]Finding, error) {
 			continue
 		}
 		checkJobImages(name.Line, name.Value, job, add)
-		checkBakeSteps(name.Line, name.Value, wf.Env, job, add)
+		runs = append(runs, checkJobBuilds(name.Line, name.Value, wf.Env, job, add)...)
 		if release {
 			continue
 		}
@@ -77,7 +85,7 @@ func CheckWorkflow(src []byte, release bool) ([]Finding, error) {
 			add(name.Line, "job %s has no permissions and the workflow sets none; it gets the repository default", name.Value)
 		}
 	}
-	return out, nil
+	return out, runs, nil
 }
 
 // checkJobImages checks the container and service images of one job. The
