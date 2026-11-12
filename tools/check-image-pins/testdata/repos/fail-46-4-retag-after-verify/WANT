@@ -1,2 +1,5 @@
 job build: step 4 tests the image; it must test the verified image ID
 job build: step 6 runs docker save: save the image with
+job build: step 4 tags mirror.gcr.io/library/busybox:latest: after the build, tag only the verified image ID
+job build: step 6 tags mirror.gcr.io/library/busybox:latest: after the build, tag only the verified image ID
+job build: step 4: it runs make, but the check finds no Makefile for it

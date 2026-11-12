@@ -1,0 +1,55 @@
+# #49 point 5 (review A finding 4, review B finding 2), for release.yml
+# in #27: right after a verify step, a re-tag of another image and a push
+# by that tag; and Compose push, buildx imagetools create and crane, which
+# f360066 did not see. The last step tags the verified image ID and pushes
+# that name, and is not reported.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - id: verify
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - env:
+          VERIFIED_IMAGE: ${{ steps.verify.outputs.image }}
+        run: |
+          docker tag other:x ghcr.io/keepia/mail-postfix:dev
+          docker push ghcr.io/keepia/mail-postfix:dev
+      - id: verify2
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - run: docker compose push
+      - id: verify3
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - run: docker buildx imagetools create -t ghcr.io/keepia/mail-postfix:1 ghcr.io/keepia/mail-postfix:dev
+      - id: verify4
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - run: crane push image.tar ghcr.io/keepia/mail-postfix:dev
+      - id: verify5
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - env:
+          VERIFIED_IMAGE: ${{ steps.verify5.outputs.image }}
+        run: |
+          docker tag "$VERIFIED_IMAGE" ghcr.io/keepia/mail-postfix:dev
+          docker push ghcr.io/keepia/mail-postfix:dev

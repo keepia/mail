@@ -36,10 +36,12 @@ import (
 //     local ID as `image`, and the test step runs that ID; a later
 //     re-tag of the name does not change the image an ID names;
 //   - -save FILE saves the verified names itself and then checks the
-//     tar it wrote: every blob's content matches its digest, and each
-//     name's image is the checked build's output (its config is the
-//     build's config, or its manifest is the build's digest). Only then
-//     is the tar renamed to FILE.
+//     tar it wrote: every blob's content matches its digest, each name
+//     has one entry in manifest.json and one in index.json that agree,
+//     its image is the checked build's output (its config is the build's
+//     config, or its manifest is the build's digest), and its layers are
+//     that image's (checkTarName, #49 point 6). Only then is the tar
+//     renamed to FILE.
 
 type builtImage struct {
 	Name         string `json:"image.name"`
@@ -124,10 +126,11 @@ const maxTarMeta = 4 << 20
 
 // verifySavedTar checks a `docker save` tar of images: every
 // blobs/sha256/<hex> file's content has that digest, and every name of
-// every image is in manifest.json with the checked build's config. With
-// no config digest in the metadata (docker driver, containerd store), the
-// name's index.json entry must be the build's digest, and the config in
-// manifest.json one that digest's manifests name.
+// every image passes checkTarName: in manifest.json with the checked
+// build's config and that image's layers, and in index.json (when there
+// is one) as one entry that names the same config. With no config digest
+// in the metadata (docker driver, containerd store), the name's
+// index.json entry must be the build's digest.
 func verifySavedTar(r io.Reader, images []builtImage) []string {
 	var findings []string
 	sums := map[string]string{}  // file name → sha256:<hex> of its content
@@ -171,52 +174,138 @@ func verifySavedTar(r io.Reader, images []builtImage) []string {
 	if err := json.Unmarshal(small["manifest.json"], &manifest); err != nil {
 		return append(findings, "the saved tar has no readable manifest.json: "+err.Error())
 	}
+	// index.json is what the containerd image store loads, manifest.json
+	// what the classic store loads; older docker save writes no index.json.
 	var index struct {
 		Manifests []struct {
 			Digest      string            `json:"digest"`
 			Annotations map[string]string `json:"annotations"`
 		} `json:"manifests"`
 	}
-	_ = json.Unmarshal(small["index.json"], &index) // optional: older docker save writes none
+	_, hasIndex := sums["index.json"]
+	if hasIndex {
+		if err := json.Unmarshal(small["index.json"], &index); err != nil {
+			return append(findings, "the saved tar's index.json does not read: "+err.Error())
+		}
+	}
 	for _, img := range images {
 		for _, name := range img.names() {
-			fam := familiarName(name)
-			config, found := "", false
-			for _, m := range manifest {
-				if !slices.ContainsFunc(m.RepoTags, func(t string) bool { return familiarName(t) == fam }) {
-					continue
-				}
-				config, found = sums[path.Clean(m.Config)], true
-				for _, l := range m.Layers {
-					if sums[path.Clean(l)] == "" {
-						findings = append(findings, fmt.Sprintf("the saved tar lacks layer %s of %s", l, name))
-					}
-				}
-			}
-			if !found {
-				findings = append(findings, fmt.Sprintf("the saved tar has no image named %s", name))
-				continue
-			}
-			ok := img.ConfigDigest != "" && config == img.ConfigDigest
-			if !ok && img.Digest != "" {
-				for _, e := range index.Manifests {
-					if familiarName(e.Annotations["io.containerd.image.name"]) == fam && e.Digest == img.Digest {
-						ok = slices.Contains(tarConfigs(small, img.Digest, 0), config)
-					}
-				}
-			}
-			if !ok {
-				findings = append(findings, fmt.Sprintf("the saved tar's %s has config %s, which is not the checked build's output (digest %s, config %s): it was replaced after the build", name, config, img.Digest, img.ConfigDigest))
-			}
+			findings = append(findings, checkTarName(name, img, manifestEntries(manifest, name), index.Manifests, hasIndex, sums, small)...)
 		}
 	}
 	return findings
 }
 
-// tarConfigs returns the config digests the manifest or index with this
+type tarManifestEntry = struct {
+	Config   string
+	RepoTags []string
+	Layers   []string
+}
+
+type tarIndexEntry = struct {
+	Digest      string            `json:"digest"`
+	Annotations map[string]string `json:"annotations"`
+}
+
+// manifestEntries are manifest.json's entries that name an image.
+func manifestEntries(manifest []tarManifestEntry, name string) []tarManifestEntry {
+	fam := familiarName(name)
+	var out []tarManifestEntry
+	for _, m := range manifest {
+		if slices.ContainsFunc(m.RepoTags, func(t string) bool { return familiarName(t) == fam }) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// checkTarName checks one name of a saved tar (#49 point 6):
+//   - manifest.json has exactly one entry for it, and index.json (when
+//     there is one) exactly one: the loaders take one of several, the
+//     classic store the last of manifest.json, the containerd store the
+//     last of index.json;
+//   - the index entry names, through its manifests, the config that
+//     manifest.json names, so both stores load the same image;
+//   - that config is the checked build's (config digest), or the index
+//     entry is the build's digest;
+//   - manifest.json's layers are the image's: each layer file's content
+//     is the config's diff_id at that position (an uncompressed layer)
+//     or the layer the index entry's manifest names there. Every file is
+//     hashed, also one outside blobs/.
+func checkTarName(name string, img builtImage, entries []tarManifestEntry, index []tarIndexEntry, hasIndex bool, sums map[string]string, small map[string][]byte) []string {
+	if len(entries) == 0 {
+		return []string{fmt.Sprintf("the saved tar has no image named %s", name)}
+	}
+	if len(entries) > 1 {
+		return []string{fmt.Sprintf("the saved tar's manifest.json has %d entries for %s, want exactly one", len(entries), name)}
+	}
+	m := entries[0]
+	config := sums[path.Clean(m.Config)]
+	if config == "" {
+		return []string{fmt.Sprintf("the saved tar lacks the config %s of %s", m.Config, name)}
+	}
+	var manifest *tarImage
+	digest := ""
+	if hasIndex {
+		fam := familiarName(name)
+		var named []tarIndexEntry
+		for _, e := range index {
+			if familiarName(e.Annotations["io.containerd.image.name"]) == fam {
+				named = append(named, e)
+			}
+		}
+		if len(named) != 1 {
+			return []string{fmt.Sprintf("the saved tar's index.json has %d entries for %s, want exactly one", len(named), name)}
+		}
+		digest = named[0].Digest
+		for _, t := range tarImages(small, digest, 0) {
+			if t.config == config {
+				manifest = &t
+				break
+			}
+		}
+		if manifest == nil {
+			return []string{fmt.Sprintf("the saved tar's index.json entry for %s (%s) does not name the config manifest.json names (%s): the two image stores would load different images", name, digest, config)}
+		}
+	}
+	var findings []string
+	ok := (img.ConfigDigest != "" && config == img.ConfigDigest) || (img.Digest != "" && manifest != nil && digest == img.Digest)
+	if !ok {
+		findings = append(findings, fmt.Sprintf("the saved tar's %s has config %s, which is not the checked build's output (digest %s, config %s): it was replaced after the build", name, config, img.Digest, img.ConfigDigest))
+	}
+	var cfg struct {
+		RootFS struct {
+			DiffIDs []string `json:"diff_ids"`
+		} `json:"rootfs"`
+	}
+	if err := json.Unmarshal(small[path.Clean(m.Config)], &cfg); err != nil {
+		return append(findings, fmt.Sprintf("the saved tar's config %s of %s does not read: %v", m.Config, name, err))
+	}
+	if len(m.Layers) != len(cfg.RootFS.DiffIDs) {
+		return append(findings, fmt.Sprintf("the saved tar names %d layers for %s, but its config has %d", len(m.Layers), name, len(cfg.RootFS.DiffIDs)))
+	}
+	for i, l := range m.Layers {
+		sum := sums[path.Clean(l)]
+		switch {
+		case sum == "":
+			findings = append(findings, fmt.Sprintf("the saved tar lacks layer %s of %s", l, name))
+		case sum != cfg.RootFS.DiffIDs[i] && (manifest == nil || i >= len(manifest.layers) || manifest.layers[i] != sum):
+			findings = append(findings, fmt.Sprintf("the saved tar's layer %s of %s has the content of %s, which is neither layer %d of its config nor of its manifest", l, name, sum, i+1))
+		}
+	}
+	return findings
+}
+
+// tarImage is an image manifest in a saved tar: its config and layers.
+type tarImage struct {
+	config string
+	layers []string
+}
+
+// tarImages returns the image manifests the manifest or index with this
 // digest names in a saved tar (an index: its image manifests, not the
 // attestation manifests).
-func tarConfigs(small map[string][]byte, digest string, depth int) []string {
+func tarImages(small map[string][]byte, digest string, depth int) []tarImage {
 	if depth > 4 {
 		return nil
 	}
@@ -224,6 +313,9 @@ func tarConfigs(small map[string][]byte, digest string, depth int) []string {
 		Config struct {
 			Digest string `json:"digest"`
 		} `json:"config"`
+		Layers []struct {
+			Digest string `json:"digest"`
+		} `json:"layers"`
 		Manifests []struct {
 			Digest      string            `json:"digest"`
 			Annotations map[string]string `json:"annotations"`
@@ -233,14 +325,18 @@ func tarConfigs(small map[string][]byte, digest string, depth int) []string {
 		return nil
 	}
 	if m.Config.Digest != "" {
-		return []string{m.Config.Digest}
+		t := tarImage{config: m.Config.Digest}
+		for _, l := range m.Layers {
+			t.layers = append(t.layers, l.Digest)
+		}
+		return []tarImage{t}
 	}
-	var out []string
+	var out []tarImage
 	for _, e := range m.Manifests {
 		if e.Annotations["vnd.docker.reference.type"] == "attestation-manifest" {
 			continue
 		}
-		out = append(out, tarConfigs(small, e.Digest, depth+1)...)
+		out = append(out, tarImages(small, e.Digest, depth+1)...)
 	}
 	return out
 }

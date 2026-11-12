@@ -1,4 +1,5 @@
 Makefile:6: a Makefile may not mention buildx
+Makefile:11: a Makefile may not compute a variable name ("BUILD$(E)X_BAKE_FILE")
 Makefile:15: a Makefile may not mention buildx
 Makefile:21: a Makefile may not mention buildx
 Makefile:24: a Makefile may not mention buildx

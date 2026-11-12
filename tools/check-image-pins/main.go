@@ -341,8 +341,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 				r.add(p, 0, err.Error())
 				continue
 			}
-			findings, runs, err := CheckWorkflow(src, k == kindReleaseWorkflow, func(text string) []refText {
-				return referencedTexts(root, text)
+			findings, runs, err := CheckWorkflow(src, k == kindReleaseWorkflow, func(text, workdir string, shell bool) ([]refText, []string) {
+				return referencedTexts(root, text, workdir, shell)
 			})
 			if err != nil {
 				r.add(p, 0, "does not parse: "+err.Error())

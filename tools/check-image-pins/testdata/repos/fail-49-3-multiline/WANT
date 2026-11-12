@@ -1,0 +1,4 @@
+job build: step 1 runs "docker build"
+job build: step 3 runs "docker build" in its github-script
+job build: step 4 runs "buildx bake" in its github-script
+tools/build.go:10: runs "docker build"

@@ -1,0 +1,891 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+)
+
+// What a step runs (#49 point 1). The rules on a job that builds with
+// bake (verify placement, GITHUB_ENV writes, tests by the verified ID)
+// read the step's own text and every file it runs. A file is found in two
+// ways:
+//   - any word of a text that names a file under the root is followed,
+//     whatever its position (a wide net: a comment that names a script
+//     pulls it in too);
+//   - the commands of a shell text are read: the script a command runs
+//     (`./x`, `sh x`, `bash "$GITHUB_WORKSPACE/x"`, `. x`), the target
+//     of `make`, and a local action's steps.
+//
+// Paths resolve against the root, the step's working-directory, the
+// directories the text cd's into, and, for $(dirname "$0"), the script's
+// own directory; $GITHUB_WORKSPACE and ${{ github.workspace }} are the
+// root. A command that runs a script the check cannot resolve this way
+// (a variable, an absolute path outside the system directories, a file
+// that is not there, a make target without an explicit rule) is a
+// problem: the caller reports it instead of passing the step unread. So
+// is reaching the limit of maxReferenced files.
+
+// maxReferenced bounds how many files referencedTexts follows.
+const maxReferenced = 200
+
+// rootMark and dirMark stand for the root and for the directory of the
+// script a text is from, after the forms below are replaced.
+const (
+	rootMark = "@ROOT@"
+	dirMark  = "@DIR@"
+)
+
+var (
+	workspacePrefix = regexp.MustCompile(`\$\{\{\s*(?:github\.workspace|env\.GITHUB_WORKSPACE)\s*\}\}|\$\{GITHUB_WORKSPACE\}|\$GITHUB_WORKSPACE\b|\$\(git rev-parse --show-toplevel\)`)
+	cwdPrefix       = regexp.MustCompile(`\$\{PWD\}|\$PWD\b|\$\(pwd\)`)
+	scriptDirExpr   = `\$\(dirname\s+(?:--\s+)?"?\$\{?(?:0|BASH_SOURCE(?:\[0\])?)\}?"?\s*\)|\$\{(?:0|BASH_SOURCE(?:\[0\])?)%/\*\}`
+	scriptDirPrefix = regexp.MustCompile(`\$\(cd\s+(?:--\s+)?"?(?:` + scriptDirExpr + `)"?\s*&&\s*pwd(?:\s+-P)?\s*\)|` + scriptDirExpr)
+	markNames       = strings.NewReplacer(rootMark, "$GITHUB_WORKSPACE", dirMark, `$(dirname "$0")`)
+)
+
+// substitutePrefixes replaces the directory forms the resolver knows by
+// rootMark, dirMark or ".".
+func substitutePrefixes(text string) string {
+	text = scriptDirPrefix.ReplaceAllString(text, dirMark)
+	text = workspacePrefix.ReplaceAllString(text, rootMark)
+	return cwdPrefix.ReplaceAllString(text, ".")
+}
+
+// refText is a file a command names, relative to the root, and its text.
+// exec is set for a text that runs: a step's own text, a script a command
+// runs, a make target's recipe or a local action's step. The other texts
+// are files a word merely names.
+type refText struct {
+	path, text string
+	exec       bool
+}
+
+// refItem is a text waiting to be resolved.
+type refItem struct {
+	text  string
+	dirs  []string // absolute directories relative paths resolve against
+	file  string   // absolute path of the file the text is from; "" for a step's text
+	shell bool     // a shell text: its commands are read
+	depth int
+}
+
+type refWalk struct {
+	root     string
+	out      []refText
+	problems []string
+	src      map[string]string // followed file → its text
+	scanned  map[string]bool   // file → its commands were read
+	queue    []refItem
+}
+
+// referencedTexts returns what a text runs or names under root (see the
+// comment at the top), and the problems: what the check cannot resolve.
+// workdir is the step's working-directory ("" for none); shell is false
+// for a text that is not shell (actions/github-script).
+func referencedTexts(root, text, workdir string, shell bool) ([]refText, []string) {
+	w := &refWalk{root: root, src: map[string]string{}, scanned: map[string]bool{}}
+	dirs := []string{root}
+	if workdir != "" {
+		if d, ok := w.dir(workdir, dirs, ""); ok {
+			dirs = append(dirs, d)
+		} else {
+			w.problem("its working-directory %q is not a directory the check can resolve", workdir)
+		}
+	}
+	w.queue = append(w.queue, refItem{text: text, dirs: dirs, shell: shell})
+	w.run()
+	return w.out, w.problems
+}
+
+// referencedFiles returns the files under root that words of a command
+// text name (`sh scripts/build`, `./scripts/x`, `bash x.txt`): a script
+// runs whatever its name or extension.
+func referencedFiles(root, text string) []string {
+	w := &refWalk{root: root}
+	var files []string
+	for _, word := range shellSplit.Split(shellQuoting.Replace(substitutePrefixes(text)), -1) {
+		files = append(files, w.existing(word, []string{root}, "")...)
+	}
+	return files
+}
+
+func (w *refWalk) problem(format string, a ...any) {
+	p := markNames.Replace(fmt.Sprintf(format, a...))
+	if !slices.Contains(w.problems, p) {
+		w.problems = append(w.problems, p)
+	}
+}
+
+func (w *refWalk) run() {
+	for len(w.queue) > 0 {
+		it := w.queue[0]
+		w.queue = w.queue[1:]
+		text := substitutePrefixes(it.text)
+		dirs := it.dirs
+		if it.shell {
+			dirs = append(slices.Clone(dirs), w.cdDirs(text, it)...)
+		}
+		for _, word := range shellSplit.Split(shellQuoting.Replace(text), -1) {
+			for _, p := range w.existing(word, dirs, it.file) {
+				w.follow(p, false, dirs, it.depth)
+			}
+		}
+		if it.shell {
+			w.commands(text, dirs, it.file, it.depth)
+		}
+	}
+}
+
+// candidates returns the paths a word can name; ok is false for a word
+// the check cannot resolve (a variable, an absolute path, a glob).
+func (w *refWalk) candidates(word string, dirs []string, file string) ([]string, bool) {
+	word = strings.TrimPrefix(word, "./")
+	switch {
+	case word == "":
+		return nil, false
+	case strings.HasPrefix(word, rootMark):
+		return []string{filepath.Join(w.root, filepath.FromSlash(strings.TrimPrefix(word, rootMark)))}, true
+	case strings.HasPrefix(word, dirMark):
+		if file == "" {
+			return nil, false
+		}
+		return []string{filepath.Join(filepath.Dir(file), filepath.FromSlash(strings.TrimPrefix(word, dirMark)))}, true
+	case strings.ContainsAny(word, "$`*?") || strings.Contains(word, rootMark) || strings.Contains(word, dirMark) || filepath.IsAbs(word):
+		return nil, false
+	}
+	var out []string
+	for _, d := range dirs {
+		out = append(out, filepath.Join(d, filepath.FromSlash(word)))
+	}
+	return out, true
+}
+
+// inRoot reports whether p is under the root (not the root itself).
+func (w *refWalk) inRoot(p string) bool {
+	rel, err := filepath.Rel(w.root, p)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// targets returns what a path stands for: a regular file, or a
+// directory's action.yml/action.yaml.
+func targets(p string) ([]string, bool) {
+	st, err := os.Stat(p) //nolint:gosec // p is under the root (inRoot)
+	switch {
+	case err != nil:
+		return nil, false
+	case st.Mode().IsRegular():
+		return []string{p}, true
+	case st.IsDir():
+		var out []string
+		for _, n := range []string{"action.yml", "action.yaml"} {
+			if st, err := os.Stat(filepath.Join(p, n)); err == nil && st.Mode().IsRegular() { //nolint:gosec // under the root
+				out = append(out, filepath.Join(p, n))
+			}
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+// existing returns the files a word names, if any (words that name
+// nothing are arguments, not files).
+func (w *refWalk) existing(word string, dirs []string, file string) []string {
+	if strings.HasPrefix(word, "-") || strings.Contains(word, "=") {
+		return nil
+	}
+	cands, _ := w.candidates(word, dirs, file)
+	for _, c := range cands {
+		if !w.inRoot(c) {
+			continue
+		}
+		if t, ok := targets(c); ok {
+			return t
+		}
+	}
+	return nil
+}
+
+// dir resolves a directory word (a working-directory, a cd target).
+func (w *refWalk) dir(word string, dirs []string, file string) (string, bool) {
+	word = strings.TrimSuffix(substitutePrefixes(word), "/")
+	if word == rootMark || word == "." {
+		return w.root, true
+	}
+	cands, ok := w.candidates(word, dirs, file)
+	if !ok {
+		return "", false
+	}
+	for _, c := range cands {
+		if st, err := os.Stat(c); err == nil && st.IsDir() && (c == w.root || w.inRoot(c)) { //nolint:gosec // under the root
+			return c, true
+		}
+	}
+	return "", false
+}
+
+// cdDirs are the directories a shell text changes into.
+func (w *refWalk) cdDirs(text string, it refItem) []string {
+	var out []string
+	for _, words := range shellCommands(text) {
+		if len(words) < 2 || (words[0] != "cd" && words[0] != "pushd") {
+			continue
+		}
+		for _, a := range words[1:] {
+			if strings.HasPrefix(a, "-") {
+				continue
+			}
+			if d, ok := w.dir(a, it.dirs, it.file); ok {
+				out = append(out, d)
+			}
+			break
+		}
+	}
+	return out
+}
+
+func isActionFile(p string) bool {
+	b := filepath.Base(p)
+	return b == "action.yml" || b == "action.yaml"
+}
+
+// follow adds a file: its text, and the item that resolves what it runs
+// or names. script is set when a command runs it.
+func (w *refWalk) follow(p string, script bool, dirs []string, depth int) {
+	p = filepath.Clean(p)
+	rel := filepath.ToSlash(mustRel(w.root, p))
+	if _, seen := w.src[p]; !seen {
+		if len(w.src) >= maxReferenced {
+			w.problem("it names more than %d files; the check stops following them there", maxReferenced)
+			return
+		}
+		src, err := os.ReadFile(p) //nolint:gosec // p is under the root
+		if err != nil {
+			w.src[p] = ""
+			w.out = append(w.out, refText{rel, err.Error(), false})
+			return
+		}
+		w.src[p] = string(src)
+		if isActionFile(p) {
+			w.action(p, src, depth)
+			return
+		}
+		w.out = append(w.out, refText{rel, string(src), script})
+		w.scanned[p] = script
+		w.queue = append(w.queue, refItem{text: string(src), dirs: dirs, file: p, shell: script, depth: depth})
+		return
+	}
+	if script && !w.scanned[p] && !isActionFile(p) {
+		w.scanned[p] = true
+		for i := range w.out {
+			if w.out[i].path == rel {
+				w.out[i].exec = true
+			}
+		}
+		w.queue = append(w.queue, refItem{text: w.src[p], dirs: dirs, file: p, shell: true, depth: depth})
+	}
+}
+
+// action follows a local action: each step's run text and github-script,
+// the local actions its steps use, and a JavaScript action's files.
+func (w *refWalk) action(p string, src []byte, depth int) {
+	rel := filepath.ToSlash(mustRel(w.root, p))
+	var a struct {
+		Runs struct {
+			Using string           `yaml:"using"`
+			Main  string           `yaml:"main"`
+			Pre   string           `yaml:"pre"`
+			Post  string           `yaml:"post"`
+			Steps []map[string]any `yaml:"steps"`
+		} `yaml:"runs"`
+	}
+	docs, err := parseYAML(src)
+	if err == nil && len(docs) == 1 {
+		err = docs[0].Decode(&a)
+	}
+	if err != nil || len(docs) != 1 {
+		w.out = append(w.out, refText{rel, string(src), false})
+		w.problem("%s does not parse as one action", rel)
+		return
+	}
+	dirs := []string{w.root}
+	for _, f := range []string{a.Runs.Main, a.Runs.Pre, a.Runs.Post} {
+		if f != "" {
+			w.follow(filepath.Join(filepath.Dir(p), filepath.FromSlash(f)), false, dirs, depth)
+		}
+	}
+	for _, step := range a.Runs.Steps {
+		stepDirs := dirs
+		if wd, _ := step["working-directory"].(string); wd != "" {
+			if d, ok := w.dir(wd, dirs, ""); ok {
+				stepDirs = append(slices.Clone(dirs), d)
+			} else {
+				w.problem("%s: working-directory %q is not a directory the check can resolve", rel, wd)
+			}
+		}
+		if run, ok := step["run"].(string); ok {
+			w.out = append(w.out, refText{rel, run, true})
+			w.queue = append(w.queue, refItem{text: run, dirs: stepDirs, shell: true, depth: depth})
+		}
+		if script := githubScript(step); script != "" {
+			w.out = append(w.out, refText{rel, script, true})
+			w.queue = append(w.queue, refItem{text: script, dirs: stepDirs, depth: depth})
+		}
+		if uses, _ := step["uses"].(string); strings.HasPrefix(uses, "./") {
+			w.localAction(uses, depth)
+		}
+	}
+}
+
+// localAction follows `uses: ./…`: the action.yml in that directory.
+func (w *refWalk) localAction(uses string, depth int) {
+	d := filepath.Join(w.root, filepath.FromSlash(strings.TrimSuffix(strings.TrimPrefix(uses, "./"), "/")))
+	if t, _ := targets(d); w.inRoot(d) && len(t) > 0 {
+		for _, p := range t {
+			w.follow(p, false, []string{w.root}, depth)
+		}
+		return
+	}
+	w.problem("it uses %s, which has no action.yml the check can read", uses)
+}
+
+// githubScript returns the script of an actions/github-script step.
+func githubScript(step map[string]any) string {
+	uses, _ := step["uses"].(string)
+	if !strings.HasPrefix(strings.ToLower(uses), "actions/github-script@") {
+		return ""
+	}
+	with, _ := step["with"].(map[string]any)
+	s, _ := with["script"].(string)
+	return s
+}
+
+// shell interpreters: the flag that takes an inline command (the next
+// word), and the flags that take a value.
+type interpreter struct {
+	inline     map[string]bool
+	inlineDash bool // -ec, -xc …: a combined flag with c
+	values     map[string]bool
+	shell      bool // the inline command is shell
+}
+
+var (
+	shellInterp  = interpreter{inline: map[string]bool{"-c": true}, inlineDash: true, values: map[string]bool{"-o": true, "-O": true, "+o": true}, shell: true}
+	interpreters = map[string]interpreter{
+		"sh": shellInterp, "bash": shellInterp, "dash": shellInterp, "zsh": shellInterp, "ksh": shellInterp, "ash": shellInterp, "mksh": shellInterp,
+		"python": {inline: map[string]bool{"-c": true, "-m": true}, values: map[string]bool{"-W": true, "-X": true}},
+		"node":   {inline: map[string]bool{"-e": true, "--eval": true, "-p": true, "--print": true}, values: map[string]bool{"-r": true, "--require": true, "--import": true}},
+		"perl":   {inline: map[string]bool{"-e": true, "-E": true}},
+		"ruby":   {inline: map[string]bool{"-e": true}},
+		"php":    {inline: map[string]bool{"-r": true}},
+		"pwsh":   {inline: map[string]bool{"-c": true, "-Command": true}},
+		"source": {},
+		".":      {},
+	}
+	interpAlias = map[string]string{"python3": "python", "python2": "python", "nodejs": "node", "pwsh-preview": "pwsh"}
+	shellAssign = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\+?=`)
+	// prefixWords run the command after them (and their own options).
+	prefixWords = map[string]bool{
+		"if": true, "then": true, "else": true, "elif": true, "do": true, "while": true, "until": true, "!": true,
+		"exec": true, "time": true, "nohup": true, "command": true, "builtin": true, "sudo": true, "env": true, "nice": true, "timeout": true,
+	}
+	prefixValues = map[string]bool{"-u": true, "-g": true, "-C": true, "-D": true, "-h": true, "-p": true, "-r": true, "-t": true, "-U": true, "-n": true, "-s": true, "-k": true, "--signal": true, "--kill-after": true, "--user": true, "--group": true, "--chdir": true}
+	scriptExts   = []string{".sh", ".bash", ".py", ".pl", ".rb", ".js", ".mjs", ".cjs", ".ts", ".php", ".ps1"}
+	redirect     = regexp.MustCompile(`^[0-9]*(?:>>?|<<?<?|>&|<&|>\|)`)
+	systemDirs   = []string{"/usr/", "/bin/", "/sbin/"}
+)
+
+// dropRedirects removes redirections and their targets from a command.
+func dropRedirects(words []string) []string {
+	var out []string
+	for i := 0; i < len(words); i++ {
+		if m := redirect.FindString(words[i]); m != "" {
+			if m == words[i] {
+				i++
+			}
+			continue
+		}
+		out = append(out, words[i])
+	}
+	return out
+}
+
+// commandTarget returns what a command runs: the script file it names
+// (script), an inline command (inline, shell or not), or make's
+// arguments (isMake).
+func commandTarget(words []string) (script, inline string, inlineShell bool, makeArgs []string, isMake bool) {
+	words = dropRedirects(words)
+	i := commandStart(words)
+	if i >= len(words) {
+		return "", "", false, nil, false
+	}
+	w0, base := words[i], path.Base(words[i])
+	switch base {
+	case "eval":
+		return "", strings.Join(words[i+1:], " "), true, nil, false
+	case "make", "gmake":
+		return "", "", false, words[i+1:], true
+	}
+	name := base
+	if a, ok := interpAlias[name]; ok {
+		name = a
+	}
+	if in, ok := interpreters[name]; ok {
+		for j := i + 1; j < len(words); j++ {
+			a := words[j]
+			switch {
+			case in.inline[a] || (in.inlineDash && len(a) > 2 && a[0] == '-' && a[1] != '-' && strings.HasSuffix(a, "c")):
+				if j+1 < len(words) {
+					return "", words[j+1], in.shell, nil, false
+				}
+				return "", "", false, nil, false
+			case in.values[a]:
+				j++
+			case strings.HasPrefix(a, "-") || strings.HasPrefix(a, "+"):
+			default:
+				return a, "", false, nil, false
+			}
+		}
+		return "", "", false, nil, false
+	}
+	if looksLikeScript(w0) {
+		return w0, "", false, nil, false
+	}
+	return "", "", false, nil, false
+}
+
+// commandStart returns the index of the word a command runs, after
+// assignments and the words that run the rest (sudo, env, exec, if …)
+// with their options.
+func commandStart(words []string) int {
+	i := 0
+	for i < len(words) {
+		base := path.Base(words[i])
+		switch {
+		case shellAssign.MatchString(words[i]):
+			i++
+		case prefixWords[base]:
+			i++
+			for i < len(words) && (strings.HasPrefix(words[i], "-") || (base == "env" && shellAssign.MatchString(words[i]))) {
+				if prefixValues[words[i]] {
+					i++
+				}
+				i++
+			}
+			if base == "timeout" && i < len(words) {
+				i++ // the duration
+			}
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// looksLikeScript reports whether a command word names a file rather
+// than a command on PATH.
+func looksLikeScript(w string) bool {
+	if strings.Contains(w, "/") || strings.HasPrefix(w, rootMark) || strings.HasPrefix(w, dirMark) {
+		return true
+	}
+	for _, e := range scriptExts {
+		if strings.HasSuffix(w, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// commands reads the commands of a shell text: the scripts they run,
+// inline commands, and make.
+func (w *refWalk) commands(text string, dirs []string, file string, depth int) {
+	if depth > 8 {
+		w.problem("its commands nest too deep for the check")
+		return
+	}
+	for _, words := range shellCommands(text) {
+		script, inline, inlineShell, makeArgs, isMake := commandTarget(words)
+		switch {
+		case inline != "" && inlineShell:
+			w.commands(inline, dirs, file, depth+1)
+		case isMake:
+			w.makeCall(makeArgs, dirs, file, depth)
+		case script != "":
+			w.script(script, dirs, file, depth)
+		}
+	}
+}
+
+// script follows a script a command runs, or records it as a problem.
+func (w *refWalk) script(word string, dirs []string, file string, depth int) {
+	for _, d := range systemDirs {
+		if strings.HasPrefix(word, d) {
+			return
+		}
+	}
+	cands, ok := w.candidates(word, dirs, file)
+	if ok {
+		for _, c := range cands {
+			if !w.inRoot(c) {
+				continue
+			}
+			if t, ok := targets(c); ok && len(t) > 0 {
+				for _, p := range t {
+					w.follow(p, true, dirs, depth+1)
+				}
+				return
+			}
+		}
+	}
+	w.problem("it runs %s, which the check cannot resolve to a file in the repository", word)
+}
+
+// makeCall follows `make [options] [targets]`: the recipes of the named
+// targets (or the default goal) and their prerequisites.
+func (w *refWalk) makeCall(args []string, dirs []string, file string, depth int) {
+	var dir, mf string
+	var goals []string
+	for j := 0; j < len(args); j++ {
+		a := args[j]
+		next := func() string {
+			if j+1 < len(args) {
+				j++
+				return args[j]
+			}
+			return ""
+		}
+		switch {
+		case a == "-C" || a == "--directory":
+			dir = next()
+		case strings.HasPrefix(a, "--directory="):
+			dir = strings.TrimPrefix(a, "--directory=")
+		case strings.HasPrefix(a, "-C"):
+			dir = a[2:]
+		case a == "-f" || a == "--file" || a == "--makefile":
+			mf = next()
+		case strings.HasPrefix(a, "--file=") || strings.HasPrefix(a, "--makefile="):
+			_, mf, _ = strings.Cut(a, "=")
+		case strings.HasPrefix(a, "-f") && !strings.HasPrefix(a, "--"):
+			mf = a[2:]
+		case a == "-I" || a == "-o" || a == "-W" || a == "--include-dir" || a == "--old-file" || a == "--what-if":
+			next()
+		case (a == "-j" || a == "-l") && j+1 < len(args) && strings.Trim(args[j+1], "0123456789.") == "":
+			next()
+		case strings.HasPrefix(a, "-") || strings.Contains(a, "="):
+		default:
+			goals = append(goals, a)
+		}
+	}
+	makeDirs := dirs
+	if dir != "" {
+		d, ok := w.dir(dir, dirs, file)
+		if !ok {
+			w.problem("it runs make -C %s, a directory the check cannot resolve", dir)
+			return
+		}
+		makeDirs = []string{d}
+	}
+	var mfPath string
+	if mf != "" {
+		cands, _ := w.candidates(mf, makeDirs, file)
+		for _, c := range cands {
+			if st, err := os.Stat(c); err == nil && st.Mode().IsRegular() && w.inRoot(c) { //nolint:gosec // under the root
+				mfPath = c
+				break
+			}
+		}
+	} else {
+	find:
+		for _, d := range makeDirs {
+			for _, n := range []string{"GNUmakefile", "makefile", "Makefile"} {
+				if st, err := os.Stat(filepath.Join(d, n)); err == nil && st.Mode().IsRegular() { //nolint:gosec // under the root
+					mfPath = filepath.Join(d, n)
+					break find
+				}
+			}
+		}
+	}
+	if mfPath == "" {
+		w.problem("it runs make, but the check finds no Makefile for it")
+		return
+	}
+	for _, g := range goals {
+		if strings.ContainsAny(g, "$`") {
+			w.problem("it runs make with the target %s, which the check cannot resolve", g)
+			return
+		}
+	}
+	src, err := os.ReadFile(mfPath) //nolint:gosec // under the root
+	if err != nil {
+		w.problem("it runs make, but %s does not read: %v", mustRel(w.root, mfPath), err)
+		return
+	}
+	rules, order, vars := parseMakefile(src)
+	if len(goals) == 0 {
+		for _, t := range order {
+			if !strings.HasPrefix(t, ".") && !strings.ContainsAny(t, "%$") {
+				goals = append(goals, t)
+				break
+			}
+		}
+	}
+	rel := filepath.ToSlash(mustRel(w.root, mfPath))
+	var recipe []string
+	seen := map[string]bool{}
+	for _, g := range goals {
+		if rules[g] == nil {
+			w.problem("it runs make %s, which has no explicit rule in %s", g, rel)
+			w.follow(mfPath, false, makeDirs, depth)
+			continue
+		}
+		recipe = append(recipe, makeRecipe(rules, g, seen)...)
+	}
+	if len(recipe) == 0 {
+		return
+	}
+	text := expandMake(strings.Join(recipe, "\n"), vars)
+	w.out = append(w.out, refText{rel + " (make " + strings.Join(goals, " ") + ")", text, true})
+	w.queue = append(w.queue, refItem{text: text, dirs: makeDirs, file: mfPath, shell: true, depth: depth + 1})
+}
+
+type makeRule struct {
+	prereqs, recipe []string
+}
+
+var (
+	makeAssign   = regexp.MustCompile(`^(?:(?:export|override|private)\s+)*([A-Za-z_.][A-Za-z0-9_.-]*)\s*(:{1,3}=|[?+!]?=)\s*(.*)$`)
+	makeRuleLine = regexp.MustCompile(`^([^\s:=#][^:=#]*?)\s*::?(?:[^=]|$)(.*)$`)
+	makeVarRef   = regexp.MustCompile(`\$[({]([A-Za-z_][A-Za-z0-9_]*)[)}]`)
+)
+
+// parseMakefile returns a Makefile's explicit rules, their order and the
+// variables it assigns (the last assignment wins; += appends).
+func parseMakefile(src []byte) (map[string]*makeRule, []string, map[string]string) {
+	rules := map[string]*makeRule{}
+	var order []string
+	vars := map[string]string{}
+	var current []*makeRule
+	for _, l := range makeLogicalLines(src) {
+		t := l.text
+		if strings.HasPrefix(t, "\t") {
+			for _, r := range current {
+				r.recipe = append(r.recipe, strings.TrimPrefix(t, "\t"))
+			}
+			continue
+		}
+		trimmed := strings.TrimSpace(t)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		current = nil
+		if m := makeAssign.FindStringSubmatch(trimmed); m != nil {
+			v := strings.TrimSpace(m[3])
+			if m[2] == "+=" && vars[m[1]] != "" {
+				v = vars[m[1]] + " " + v
+			}
+			if m[2] != "?=" || vars[m[1]] == "" {
+				vars[m[1]] = v
+			}
+			continue
+		}
+		m := makeRuleLine.FindStringSubmatch(trimmed)
+		if m == nil {
+			continue
+		}
+		_, rest, _ := strings.Cut(trimmed, ":")
+		rest = strings.TrimPrefix(rest, ":")
+		if strings.Contains(rest, "=") {
+			continue // a target-specific variable
+		}
+		prereqs, inline, hasInline := strings.Cut(rest, ";")
+		for _, tg := range strings.Fields(expandMake(m[1], vars)) {
+			r := rules[tg]
+			if r == nil {
+				r = &makeRule{}
+				rules[tg] = r
+				order = append(order, tg)
+			}
+			r.prereqs = append(r.prereqs, strings.Fields(expandMake(prereqs, vars))...)
+			if hasInline {
+				r.recipe = append(r.recipe, inline)
+			}
+			current = append(current, r)
+		}
+	}
+	return rules, order, vars
+}
+
+// makeRecipe returns the recipe lines of a target and of its
+// prerequisites, prerequisites first.
+func makeRecipe(rules map[string]*makeRule, t string, seen map[string]bool) []string {
+	r := rules[t]
+	if r == nil || seen[t] {
+		return nil
+	}
+	seen[t] = true
+	var out []string
+	for _, p := range r.prereqs {
+		out = append(out, makeRecipe(rules, p, seen)...)
+	}
+	for _, l := range r.recipe {
+		out = append(out, strings.TrimLeft(strings.TrimSpace(l), "@-+"))
+	}
+	return out
+}
+
+// expandMake replaces make variable references in recipe text: a
+// variable the Makefile assigns by its value, $(MAKE) by make, $(CURDIR)
+// by ".", and any other variable by the shell variable of that name
+// (make reads it from the environment); $$ becomes $.
+func expandMake(s string, vars map[string]string) string {
+	const dollar = "\x00"
+	s = strings.ReplaceAll(s, "$$", dollar)
+	for range 8 {
+		next := makeVarRef.ReplaceAllStringFunc(s, func(ref string) string {
+			name := makeVarRef.FindStringSubmatch(ref)[1]
+			switch name {
+			case "MAKE":
+				return "make"
+			case "CURDIR":
+				return "."
+			}
+			if v, ok := vars[name]; ok {
+				return strings.ReplaceAll(v, "$$", dollar)
+			}
+			return dollar + name
+		})
+		if next == s {
+			break
+		}
+		s = next
+	}
+	return strings.ReplaceAll(s, dollar, "$")
+}
+
+// shellCommands splits shell text into simple commands of words. Quotes
+// are removed but their content stays in one word; $(…), ${…} and `…`
+// stay in the word as written, and the commands inside $(…) and `…` are
+// returned as commands of their own. Comments are dropped. It is an
+// approximation; the rules that use it report what they cannot resolve.
+func shellCommands(s string) [][]string {
+	var out [][]string
+	var cur []string
+	var w strings.Builder
+	inWord := false
+	endWord := func() {
+		if inWord {
+			cur = append(cur, w.String())
+			w.Reset()
+			inWord = false
+		}
+	}
+	endCmd := func() {
+		endWord()
+		if len(cur) > 0 {
+			out = append(out, cur)
+			cur = nil
+		}
+	}
+	// subst copies $(…), ${…} or `…` starting at i into the word, and
+	// returns the index of its last character.
+	subst := func(i int) int {
+		var end int
+		if s[i] == '`' {
+			j := strings.IndexByte(s[i+1:], '`')
+			end = len(s) - 1
+			if j >= 0 {
+				end = i + 1 + j
+			}
+			if end > i+1 {
+				out = append(out, shellCommands(s[i+1:end])...)
+			}
+		} else {
+			end = matchClose(s, i+1)
+			if s[i+1] == '(' && end > i+2 {
+				out = append(out, shellCommands(s[i+2:end])...)
+			}
+		}
+		w.WriteString(s[i : end+1])
+		inWord = true
+		return end
+	}
+	isSubst := func(i int) bool {
+		return s[i] == '`' || (s[i] == '$' && i+1 < len(s) && (s[i+1] == '(' || s[i+1] == '{'))
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\':
+			if i+1 < len(s) {
+				if s[i+1] != '\n' {
+					w.WriteByte(s[i+1])
+					inWord = true
+				}
+				i++
+			}
+		case c == '\'':
+			j := strings.IndexByte(s[i+1:], '\'')
+			if j < 0 {
+				j = len(s) - i - 1
+			}
+			w.WriteString(s[i+1 : i+1+j])
+			inWord = true
+			i += j + 1
+		case c == '"':
+			inWord = true
+			for i++; i < len(s) && s[i] != '"'; i++ {
+				switch {
+				case s[i] == '\\' && i+1 < len(s):
+					i++
+					w.WriteByte(s[i])
+				case isSubst(i):
+					i = subst(i)
+				default:
+					w.WriteByte(s[i])
+				}
+			}
+		case isSubst(i):
+			i = subst(i)
+		case c == '#' && !inWord:
+			for i+1 < len(s) && s[i+1] != '\n' {
+				i++
+			}
+		case c == ' ' || c == '\t' || c == '\r':
+			endWord()
+		case strings.IndexByte("\n;&|(){}", c) >= 0:
+			endCmd()
+		default:
+			w.WriteByte(c)
+			inWord = true
+		}
+	}
+	endCmd()
+	return out
+}
+
+// matchClose returns the index of the bracket that closes the one at
+// open, or the last index.
+func matchClose(s string, open int) int {
+	o := s[open]
+	c := byte(')')
+	if o == '{' {
+		c = '}'
+	}
+	depth := 0
+	for k := open; k < len(s); k++ {
+		switch s[k] {
+		case o:
+			depth++
+		case c:
+			depth--
+			if depth == 0 {
+				return k
+			}
+		}
+	}
+	return len(s) - 1
+}

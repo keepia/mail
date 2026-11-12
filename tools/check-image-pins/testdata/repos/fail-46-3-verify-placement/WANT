@@ -4,3 +4,7 @@ job build: step 4 tests, saves, pushes or tags the image; the step right before 
 job build: step 5 tests, saves, pushes or tags the image; the step right before must be
 job build: step 6 tests, saves, pushes or tags the image; the step right before must be
 job build: step 8 tests the image; it must test the verified image ID
+job build: step 4 pushes ghcr.io/keepia/mail-postfix:dev by a name it did not tag from "$VERIFIED_IMAGE"
+job build: step 5 tags ghcr.io/keepia/mail-postfix:dev: after the build, tag only the verified image ID
+job build: step 6 pushes ghcr.io/keepia/mail-postfix:dev by a name it did not tag from "$VERIFIED_IMAGE"
+job build: step 8: it runs make, but the check finds no Makefile for it

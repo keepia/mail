@@ -12,7 +12,7 @@ jobs:
       BAKE_TARGET: postfix
       PLATFORM: linux/amd64
     steps:
-      - run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
       - id: build
         uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
         with:
@@ -32,6 +32,6 @@ jobs:
           subprocess.run(["docker", "build", "."], check=True)
       - run: python3 tools/build.py
       - run: |
-          docker compose up -d
+          docker compose up --no-build -d
           docker --context x run --rm busybox build
-          docker compose run --rm postfix true
+          docker compose run --no-build --rm postfix true

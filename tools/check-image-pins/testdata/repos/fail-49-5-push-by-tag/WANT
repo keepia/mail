@@ -1,0 +1,5 @@
+job build: step 4 tags other:x: after the build, tag only the verified image ID
+job build: step 4 pushes ghcr.io/keepia/mail-postfix:dev by a name it did not tag from "$VERIFIED_IMAGE"
+job build: step 6 runs compose push: after the build, the image leaves the runner only by
+job build: step 8 runs buildx imagetools create: after the build, the image leaves the runner only by
+job build: step 10 runs crane: after the build, the image leaves the runner only by

@@ -180,10 +180,11 @@ jobs:
       # (BAKE_TARGET, BAKE_SET and this job's environment, including what
       # earlier steps wrote to GITHUB_ENV) and checks it, the cache
       # included (only type=gha with this row's scope). The check requires
-      # this exact command right before Build. GOENV=off GOFLAGS=
-      # GOWORK=off: the tool is built from the module alone, whatever the
-      # job's environment holds.
-      - run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      # this exact command right before Build. GOENV=off
+      # GOFLAGS=-mod=readonly GOWORK=off: the tool is built from the module
+      # and the checked module cache alone (no vendor/ directory), whatever
+      # the job's environment or working tree holds.
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
       # bake-action exposes the GitHub Actions cache runtime to BuildKit; a
       # plain `docker buildx bake` in a run step could not use type=gha.
       - name: Build
@@ -203,7 +204,7 @@ jobs:
       - id: verify
         env:
           BAKE_METADATA: ${{ steps.build.outputs.metadata }}
-        run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
       - name: Smoke, health and reload tests
         env:
           IMAGE: ${{ matrix.image }}
@@ -217,7 +218,7 @@ jobs:
         if: matrix.arch == 'amd64'
         env:
           BAKE_METADATA: ${{ steps.build.outputs.metadata }}
-        run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built -save "$RUNNER_TEMP/image.tar"
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built -save "$RUNNER_TEMP/image.tar"
       - if: matrix.arch == 'amd64'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

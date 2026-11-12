@@ -13,7 +13,7 @@ jobs:
       BAKE_SET: |
         postfix.cache-from=type=registry,ref=registry.invalid/attacker/cache:latest
     steps:
-      - run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
       - id: build
         uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
         with:
@@ -31,7 +31,7 @@ jobs:
       - id: verify
         env:
           BAKE_METADATA: ${{ steps.build.outputs.metadata }}
-        run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
       - env:
           VERIFIED_IMAGE: ${{ steps.verify.outputs.image }}
         run: bash scripts/image-test.sh postfix "$VERIFIED_IMAGE"

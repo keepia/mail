@@ -1,0 +1,3 @@
+job build: step 4 tests the image; it must test the verified image ID
+job build: step 6 tests the image; it must test the verified image ID
+job build: step 8 tests the image; it must test the verified image ID

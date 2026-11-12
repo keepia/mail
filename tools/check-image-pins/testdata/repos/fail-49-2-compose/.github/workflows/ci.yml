@@ -1,0 +1,18 @@
+# #49 point 2 (review B finding 2), for the compose job of #26: up, create
+# and run build every service that has `build:` and no image yet, so
+# they need --no-build; and --build=true is a build. The last two steps
+# build nothing and are not reported.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  compose:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: docker compose up -d
+      - run: docker compose create
+      - run: docker compose run --rm postfix true
+      - run: docker compose up --build=true -d
+      - run: docker-compose up -d
+      - run: docker compose up --no-build -d
+      - run: docker compose down

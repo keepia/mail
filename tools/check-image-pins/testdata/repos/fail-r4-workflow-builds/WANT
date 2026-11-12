@@ -3,4 +3,5 @@ job build: step 3 uses docker/build-push-action@c3c9e263c25d99ce0380d002d59b6773
 job build: step 4 runs "buildx build"
 job build: step 5 runs "buildx build"
 job build: step 6 runs "buildx bake"
+job build: step 8: it runs scripts/image-test.sh, which the check cannot resolve to a file in the repository
 job remote calls the remote reusable workflow docker/github-builder/.github/workflows/bake.yml

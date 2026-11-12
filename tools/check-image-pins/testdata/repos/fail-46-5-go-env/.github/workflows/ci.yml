@@ -1,7 +1,7 @@
 # #46 point 5 (review B delta 3, N2): steps that reroute the tool's own
 # go run through GITHUB_ENV (GOFLAGS -overlay, GOWORK) or GITHUB_PATH, in
 # the run text and in a script it names; and the check and verify steps
-# in their old form, without GOENV=off GOFLAGS= GOWORK=off. The commit
+# in their old form, without GOENV=off GOFLAGS=-mod=readonly GOWORK=off. The commit
 # time line is the one write that stays allowed.
 on: pull_request
 permissions:

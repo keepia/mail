@@ -1,1 +1,2 @@
-job build: the step right before docker/bake-action must be exactly `run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"`
+job build: the step right before docker/bake-action must be exactly `run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"`
+job build: step 1, Makefile (make image-pins-build): printf 'BAKE_SET=%s\n' '*.contexts.base=docker-image://busybox:latest' >>"$GITHUB_ENV": a job that builds with bake may not write GITHUB_ENV

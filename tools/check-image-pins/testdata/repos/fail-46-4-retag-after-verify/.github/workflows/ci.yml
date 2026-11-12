@@ -13,7 +13,7 @@ jobs:
       BAKE_TARGET: postfix
       PLATFORM: linux/amd64
     steps:
-      - run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
       - id: build
         uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
         with:
@@ -23,7 +23,7 @@ jobs:
       - id: verify
         env:
           BAKE_METADATA: ${{ steps.build.outputs.metadata }}
-        run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
       - name: Smoke, health and reload tests
         run: |
           docker pull mirror.gcr.io/library/busybox:latest
@@ -31,7 +31,7 @@ jobs:
           make image-test IMAGE=postfix VERSION=dev
       - env:
           BAKE_METADATA: ${{ steps.build.outputs.metadata }}
-        run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
       - name: Save the image
         run: |
           docker tag mirror.gcr.io/library/busybox:latest ghcr.io/keepia/mail-postfix:dev

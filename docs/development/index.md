@@ -153,9 +153,9 @@ make image-pins-test image-pins   # the pin check: tests, then the repository
   QEMU). It points dockerd and BuildKit at `mirror.gcr.io` with Docker Hub
   as the fallback (`scripts/ci-docker-mirror.sh`). The build's bake inputs
   are defined once, in the job's env (`BAKE_TARGET`, `PLATFORM`,
-  `BAKE_SET`). The step right before the build, `GOENV=off GOFLAGS=
-  GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET"
-  -build-set "$BAKE_SET"`, resolves exactly those inputs in the build's
+  `BAKE_SET`). The step right before the build, `GOENV=off
+  GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build
+  "$BAKE_TARGET" -build-set "$BAKE_SET"`, resolves exactly those inputs in the build's
   environment and checks them (rule 5, build mode). The job then builds
   with `docker/bake-action` (`id: build`; it gives BuildKit the GitHub
   Actions cache: one scope per image and platform, written only by pushes
@@ -164,7 +164,9 @@ make image-pins-test image-pins   # the pin check: tests, then the repository
   the build's metadata and puts out the verified ID. The job runs
   `scripts/image-test.sh` on that ID, never on the tag. On amd64, `go run
   ./tools/check-image-pins -verify-built -save "$RUNNER_TEMP/image.tar"`
-  verifies again, saves the image and checks the saved tar, and the job
+  verifies again, saves the image and checks the saved tar (one
+  `manifest.json` and one `index.json` entry per name, naming the same
+  config, with that config's layers), and the job
   uploads that tar for the `compose` job of #5 part 3 (artifact
   `image-<name>`, file `image.tar`, kept 1 day). CI never logs in to a
   registry and never pushes.
@@ -292,42 +294,65 @@ lives, also under a skipped path.
          `matrix.*` and `github.event_name`;
        - `BAKE_SET` lines may set only `cache-from` and `cache-to`, and a
          literal cache value must be `type=gha`;
-       - the step right before is exactly `run: GOENV=off GOFLAGS=
-         GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET"
-         -build-set "$BAKE_SET"`, with no env, `if` or
-         `continue-on-error`. The verify step is `run: GOENV=off GOFLAGS=
-         GOWORK=off go run ./tools/check-image-pins -verify-built`,
-         optionally with `-save "$RUNNER_TEMP/<name>.tar"`. The prefix
-         builds the tool from the module alone: an empty `GOFLAGS` alone
-         would fall back to the go env file;
-       - no step of the job writes `GITHUB_ENV` or `GITHUB_PATH` (in its run
-         text, a file it names or a local action it uses), except the
-         commit time (`SOURCE_DATE_EPOCH`) and the anonymous
-         `DOCKER_CONFIG` of `scripts/ci-docker-mirror.sh`;
+       - the step right before is exactly `run: GOENV=off
+         GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins
+         -build "$BAKE_TARGET" -build-set "$BAKE_SET"`, with no env, `if`
+         or `continue-on-error`. The verify step is `run: GOENV=off
+         GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins
+         -verify-built`, optionally with `-save "$RUNNER_TEMP/<name>.tar"`.
+         The prefix builds the tool from the module and the checked module
+         cache alone: an empty `GOFLAGS` alone would fall back to the go
+         env file, and without `-mod=readonly` a `vendor/` directory an
+         earlier step creates would replace its dependencies;
+       - every step of the job runs only what the check can read. It
+         follows a step's scripts by their repository path, also written
+         as `$GITHUB_WORKSPACE/…` or `${{ github.workspace }}/…`, under
+         `working-directory:` or after `cd`, and as `$(dirname "$0")/…`
+         inside a script; `make <target>` (the target's recipe and
+         prerequisites, with the Makefile's variables); local actions,
+         nested ones included; and the `script` of `actions/github-script`.
+         A step that runs a script path it cannot resolve this way (a
+         variable, an absolute path outside `/usr`, `/bin` and `/sbin`, a
+         missing file, a make target without an explicit rule), or that
+         names more than 200 files, is reported;
+       - no step of the job writes `GITHUB_ENV` or `GITHUB_PATH` (in what it
+         runs, as above, or with `core.exportVariable`/`core.addPath` in a
+         github-script), except the commit time (`SOURCE_DATE_EPOCH`) and
+         the anonymous `DOCKER_CONFIG` of `scripts/ci-docker-mirror.sh`;
        - the step right before every step after the build that runs
-         `image-test` or `docker save`, `push` or `tag` (also in a file it
-         names or a local action it uses) is a verify step with the same
-         `if`;
+         `image-test`, `docker save`, `push` or `tag`, Compose push,
+         `buildx imagetools create`, crane or skopeo (also in what it runs)
+         is a verify step with the same `if`;
        - a step that runs `image-test` tests the verified ID: env
          `VERIFIED_IMAGE: ${{ steps.<id of that verify step>.outputs.image
-         }}` and `$VERIFIED_IMAGE` in what it runs;
+         }}`, and every call is `scripts/image-test.sh <name>
+         "$VERIFIED_IMAGE"`, the argument the script tests (`make
+         image-test` tests the Makefile's tag);
        - no `docker save` after the build: the save is verify's own
-         `-save`.
+         `-save`;
+       - after the build, an image leaves the runner only as `docker tag
+         "$VERIFIED_IMAGE" <name>` and `docker push <name>` in the same
+         step (with the same env); Compose push, `buildx imagetools
+         create`, crane and skopeo are reported.
      - **Other build paths are reported** (defence in depth; verify mode is
        the real guarantee):
        - `docker`, `podman` and `nerdctl` `build`, `image build` and
          `builder build`; `buildx build`/`bake`/`b`; Compose builds
          (`compose build`, `compose watch`, any `compose` subcommand with
-         `--build`, `docker-compose`, `podman-compose`); `buildctl`; and
-         `buildah build`. They are matched word by word after quotes and
-         backslashes are removed (`ba""ke` matches), with global options
-         before a subcommand skipped (`docker --context x build`,
+         `--build` or `--build=…`, and `up`, `create` and `run` without
+         `--no-build`, which build every service that has `build:` and no
+         image yet; also `docker-compose`, `podman-compose`); `buildctl`;
+         and `buildah build`. They are matched word by word after quotes
+         and backslashes are removed (`ba""ke` matches), with global
+         options before a subcommand skipped (`docker --context x build`,
          `docker buildx --builder b build`), and words also end at `,`,
          `[` and `]`, so a list in Python or another language
-         (`["docker", "build", "."]`) matches too;
-       - in workflow `run:` steps, composite actions under
-         `.github/actions/`, `*.sh` files, and any file a workflow, action or
-         Makefile names in a command (`sh scripts/build`);
+         (`["docker", "build", "."]`) matches too, also when it is split
+         over lines inside `(` or `[`, as black and gofmt write it;
+       - in workflow `run:` steps, `actions/github-script` scripts,
+         composite actions under `.github/actions/`, `*.sh` files, and any
+         file a workflow, action or Makefile names in a command (`sh
+         scripts/build`);
        - any build action in `uses:` (`docker/build-push-action`, other
          `docker/*` actions except the setup, login and metadata ones,
          `bake-action` outside the allowed step);
@@ -337,7 +362,12 @@ lives, also under a skipped path.
        set or export `PATH` or `HOME`, and names no `DOCKER_CONFIG`,
        `DOCKER_HOST` or `DOCKER_CONTEXT`: local mode passes these to docker,
        and make passes its own value of an environment variable to a
-       recipe even without `export`.
+       recipe even without `export`. It also sets no `SHELL` or
+       `.SHELLFLAGS`, sets or exports no `GOFLAGS`, `GOENV` or `GOWORK`,
+       and sets `GO` only to `go` (`make images` runs `$(GO) run
+       ./tools/check-image-pins`); it includes only literal `*.mk` files
+       the check reads; and it computes no variable name (`export
+       PA$(E)TH`).
    - Any `*.hcl` other than the root's `docker-bake.hcl` and
      `docker-bake.override.hcl` is reported, unless it is on the tool's
      `hclAllowlist`, which is empty. A JSON bake file is reported;
@@ -350,23 +380,31 @@ lives, also under a skipped path.
 
 **Threat model.**
 - The check catches accidental unpinned references and fails closed on
-  forms it cannot resolve.
+  forms it cannot resolve. In a job that builds, that includes the
+  scripts a step runs: the check does not model every shell form, but a
+  script path it cannot resolve to a file in the repository is reported,
+  not skipped.
 - The local and build modes are authoritative, together with verify mode in
   CI: they check what is actually built, with the real environment.
 - Repository mode is best effort for value-conditional HCL expressions.
   Its known limits are the single-value sentinel and `timestamp()`
   conditions.
 - Verify mode proves the store's state only while it runs, so nothing
-  after it goes by tag: the test runs the verified image ID, and the save
-  checks the tar it wrote. The check and verify steps build the tool with
-  `GOENV=off GOFLAGS= GOWORK=off`, and the build job may not write
-  `GITHUB_ENV` or `GITHUB_PATH` otherwise, so an earlier step cannot
-  reroute the tool's own build.
+  after it goes by tag: the test runs the verified image ID, the save
+  checks the tar it wrote, and a push pushes a name the same step tagged
+  from the verified ID (a re-tag between those two commands is deliberate
+  and for review). The saved tar is checked as both image stores load it:
+  one `manifest.json` and one `index.json` entry per name, naming the same
+  config, with that config's layers. The check and verify steps build the
+  tool with `GOENV=off GOFLAGS=-mod=readonly GOWORK=off`, and the build
+  job may not write `GITHUB_ENV` or `GITHUB_PATH` otherwise, so an earlier
+  step cannot reroute the tool's own build; locally the Makefile may not
+  set `SHELL`, `GO` or the Go variables the tool is built with.
 - A pull request that edits the check itself, or deliberately disables or
-  routes around it (for example a build command assembled at run time, a
-  computed variable name, or a process started earlier that changes the
-  image store or a file later), is the reviewers' responsibility, not the
-  tool's. The rule file `.claude/rules/docker.md` says so as well.
+  routes around it (for example a build command assembled at run time, or
+  a process started earlier that changes the image store or a file
+  later), is the reviewers' responsibility, not the tool's. The rule file
+  `.claude/rules/docker.md` says so as well.
 
 **Rule 5 needs Docker.** It runs the `docker` CLI with the buildx plugin
 (no daemon needed; buildx resolves the file itself). Without it, `make

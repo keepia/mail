@@ -1,0 +1,4 @@
+job build: step 1, scripts/env.sh: echo "GOFLAGS=-mod=vendor" >>"$GITHUB_ENV": a job that builds with bake may not write GITHUB_ENV or GITHUB_PATH
+job build: step 2, .github/actions/inner/action.yml: echo "$PWD/bin" >>"$GITHUB_PATH": a job that builds with bake may not write GITHUB_ENV or GITHUB_PATH
+job build: step 3, run: core.exportVariable('GOFLAGS', '-mod=vendor'): a job that builds with bake may not write GITHUB_ENV or GITHUB_PATH
+job build: the step right before docker/bake-action must be exactly `run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build

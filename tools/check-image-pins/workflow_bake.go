@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path"
 	"regexp"
 	"slices"
 	"sort"
@@ -17,29 +18,33 @@ import (
 //	  PLATFORM:    <literal or ${{ matrix.* }}>
 //	  BAKE_SET:    <cache-from/cache-to lines; matrix.*, github.event_name>
 //	steps:
-//	  - run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+//	  - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
 //	  - id: build
 //	    uses: docker/bake-action@<sha> # vX.Y.Z
 //	    with: {source: ., targets: ${{ env.BAKE_TARGET }}, set: ${{ env.BAKE_SET }}, …}
 //	  - id: verify
 //	    env: {BAKE_METADATA: ${{ steps.build.outputs.metadata }}}
-//	    run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built
+//	    run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
 //	  - env: {VERIFIED_IMAGE: ${{ steps.verify.outputs.image }}}
-//	    run: … image-test … "$VERIFIED_IMAGE"   # tests the verified image ID
+//	    run: bash scripts/image-test.sh <name> "$VERIFIED_IMAGE"   # tests the verified image ID
 //	  - env: {BAKE_METADATA: ${{ steps.build.outputs.metadata }}}
-//	    run: GOENV=off GOFLAGS= GOWORK=off go run ./tools/check-image-pins -verify-built -save "$RUNNER_TEMP/image.tar"
+//	    run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built -save "$RUNNER_TEMP/image.tar"
 //
 // Build mode checks what the build step resolves; verify mode checks
 // that the images the job tests and saves are that build's output. A
 // step that tests, saves, pushes or tags the image (in its run text, a
-// script it names or a local action it uses) comes right after a verify
-// step. Tests take the verified image ID from that step's output, and a
-// save goes through -verify-built -save, which checks the saved tar
-// itself, so a re-tag after verify cannot change what is tested or saved
-// (#46, B N1). Any other image build (a run step or script with docker
-// build, buildx build/bake, a Compose build, a build action, a remote
-// reusable workflow, a composite action that builds) is reported, and so
-// is any other write to GITHUB_ENV or GITHUB_PATH in the job (#46, B N2).
+// script it runs or names, a make target or a local action, resolved as
+// resolve.go describes) comes right after a verify step. Tests run
+// image-test.sh on the verified image ID from that step's output, a save
+// goes through -verify-built -save, which checks the saved tar itself,
+// and a push pushes only a name the same step tagged from the verified
+// ID, so a re-tag after verify cannot change what is tested, saved or
+// pushed (#46, B N1; #49 points 4 and 5). Any other image build (a run
+// step, github-script or script with docker build, buildx build/bake, a
+// Compose build, a build action, a remote reusable workflow, a composite
+// action that builds) is reported, and so is any other write to
+// GITHUB_ENV or GITHUB_PATH in the job (#46, B N2) and any step of the
+// job that runs a script the check cannot resolve (#49 point 1).
 
 const (
 	bakeTargetExpr = "${{ env.BAKE_TARGET }}"
@@ -49,8 +54,11 @@ const (
 	// GOFLAGS (-overlay, -toolexec, -modfile), no go.work and no go env
 	// file, whatever an earlier step wrote to GITHUB_ENV (#46, B N2). An
 	// empty GOFLAGS alone would fall back to the go env file, so GOENV=off
-	// is needed as well.
-	goRunPrefix    = "GOENV=off GOFLAGS= GOWORK=off "
+	// is needed as well. -mod=readonly: a vendor/ directory, which an
+	// earlier step can create, would otherwise replace the module cache's
+	// checked sources (go uses -mod=vendor when vendor/modules.txt exists,
+	// and does not check vendored files against go.sum; #49 point 7).
+	goRunPrefix    = "GOENV=off GOFLAGS=-mod=readonly GOWORK=off "
 	bakeCheckRun   = goRunPrefix + `go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"`
 	verifyRun      = goRunPrefix + "go run ./tools/check-image-pins -verify-built"
 	verifyEnvValue = "${{ steps.build.outputs.metadata }}"
@@ -86,14 +94,11 @@ var envFileLines = map[string]map[string]bool{
 	},
 }
 
-// refText is a file a command names, relative to the root, and its text.
-type refText struct {
-	path, text string
-}
-
-// resolver returns the files a command text runs (see referencedTexts).
-// nil resolves nothing (single-file fixtures).
-type resolver func(text string) []refText
+// resolver returns what a command text runs or names, and what it cannot
+// resolve (see referencedTexts). workdir is the step's working-directory;
+// shell is false for a github-script. nil resolves nothing (single-file
+// fixtures).
+type resolver func(text, workdir string, shell bool) ([]refText, []string)
 
 // bakeEnvKeys are the env keys a job that builds with bake may set at
 // job or workflow level: the shared target and --set lines, and PLATFORM
@@ -181,21 +186,155 @@ func isVerifyStep(step map[string]any) bool {
 	return (run == verifyRun || verifySaveRun.MatchString(run)) && len(env) == 1 && env["BAKE_METADATA"] == verifyEnvValue && !cont
 }
 
-// stepTexts are what a step runs: its own run text (path ""), then every
-// file that text names and the action.yml of a local action it uses,
-// followed recursively by resolve.
-func stepTexts(step map[string]any, resolve resolver) []refText {
+// stepTexts are what a step runs: its own run text and an
+// actions/github-script script (path ""), then what resolve finds in
+// them and in a local action the step uses (#49 points 1 and 7).
+// problems are what resolve cannot resolve. workdir is the job's or
+// workflow's default working-directory.
+func stepTexts(step map[string]any, workdir string, resolve resolver) ([]refText, []string) {
 	run, _ := step["run"].(string)
-	texts := []refText{{"", run}}
-	ref := run
+	texts := []refText{{"", run, true}}
+	script := githubScript(step)
+	if script != "" {
+		texts = append(texts, refText{"", script, true})
+	}
+	if resolve == nil {
+		return texts, nil
+	}
+	if wd, ok := step["working-directory"].(string); ok {
+		workdir = wd
+	}
+	var problems []string
+	add := func(t []refText, p []string) {
+		texts = append(texts, t...)
+		for _, msg := range p {
+			if !slices.Contains(problems, msg) {
+				problems = append(problems, msg)
+			}
+		}
+	}
+	if run != "" {
+		add(resolve(run, workdir, true))
+	}
+	if script != "" {
+		add(resolve(script, workdir, false))
+	}
 	if uses, _ := step["uses"].(string); strings.HasPrefix(uses, "./") {
-		u := strings.TrimSuffix(uses, "/")
-		ref += "\n" + u + "/action.yml " + u + "/action.yaml"
+		add(resolve(uses, "", true))
 	}
-	if resolve != nil {
-		texts = append(texts, resolve(ref)...)
+	return texts, problems
+}
+
+// defaultWorkdir is the working-directory of a job's run steps without
+// their own: defaults.run.working-directory of the job, else of the
+// workflow.
+func defaultWorkdir(wfDefaults, jobDefaults any) string {
+	for _, d := range []any{jobDefaults, wfDefaults} {
+		m, _ := asMap(d)
+		r, _ := asMap(m["run"])
+		if wd, ok := r["working-directory"].(string); ok {
+			return wd
+		}
 	}
-	return texts
+	return ""
+}
+
+// verifiedRef reports whether a word is the verified image ID's variable.
+func verifiedRef(w string) bool {
+	return w == "$"+verifiedImageEnv || w == "${"+verifiedImageEnv+"}"
+}
+
+// testsVerified reports whether every image-test call in the texts that
+// run tests the verified image ID: `scripts/image-test.sh <name>
+// "$VERIFIED_IMAGE"`, the argument the script tests (#49 point 4). `make
+// image-test` tests the Makefile's tag, and a step with no call the check
+// can read fails too.
+func testsVerified(texts []refText) bool {
+	calls := 0
+	for _, t := range texts {
+		if !t.exec {
+			continue
+		}
+		for _, words := range shellCommands(t.text) {
+			words = dropRedirects(words)
+			for i, w := range words {
+				switch {
+				case w == "image-test":
+					return false
+				case path.Base(w) == "image-test.sh":
+					args := words[i+1:]
+					if len(args) < 2 || !verifiedRef(args[1]) {
+						return false
+					}
+					calls++
+				}
+			}
+		}
+	}
+	return calls > 0
+}
+
+// tagPush returns the docker tag (source, target) pairs and docker push
+// names in the texts that run. A push or tag the check cannot read (in
+// another language, or with --all-tags) is returned as "(unreadable)".
+func tagPush(texts []refText) (tags [][2]string, pushes []string) {
+	const unreadable = "(unreadable)"
+	for _, t := range texts {
+		if !t.exec {
+			continue
+		}
+		read := 0
+		for _, words := range shellCommands(t.text) {
+			for i, w := range words {
+				if !engines[strings.ToLower(path.Base(w))] {
+					continue
+				}
+				sub, after := subcommand(words[i+1:])
+				if sub == "image" {
+					sub, after = subcommand(after)
+				}
+				var args []string
+				all := false
+				for j := 0; j < len(after); j++ {
+					switch a := after[j]; {
+					case a == "-a" || a == "--all-tags":
+						all = true
+					case a == "--platform":
+						j++
+					case strings.HasPrefix(a, "-"):
+					default:
+						args = append(args, a)
+					}
+				}
+				switch sub {
+				case "tag":
+					read++
+					if len(args) == 2 {
+						tags = append(tags, [2]string{args[0], args[1]})
+					} else {
+						tags = append(tags, [2]string{unreadable, unreadable})
+					}
+				case "push":
+					read++
+					if all || len(args) != 1 {
+						pushes = append(pushes, unreadable)
+					} else {
+						pushes = append(pushes, args[0])
+					}
+				}
+			}
+		}
+		n := 0
+		for _, u := range imageUses(t.text) {
+			if u == "docker push" || u == "docker tag" {
+				n++
+			}
+		}
+		for ; n > read; n-- {
+			pushes = append(pushes, unreadable)
+		}
+	}
+	return tags, pushes
 }
 
 // imageUse describes what step texts do with the built image: run
@@ -221,7 +360,8 @@ func usesImage(texts []refText) imageUse {
 // envFileWrites returns the lines of texts that name GITHUB_ENV or
 // GITHUB_PATH, other than envFileLines (#46, B N2): such a write
 // reaches every later step of the job, the check and verify steps
-// included.
+// included. In a github-script (or a JavaScript file it loads),
+// core.exportVariable and core.addPath write the same files (#49 point 7).
 func envFileWrites(texts []refText) []string {
 	var out []string
 	for _, t := range texts {
@@ -231,7 +371,7 @@ func envFileWrites(texts []refText) []string {
 			if strings.HasPrefix(l, "#") {
 				continue // a comment line (shell, Python, YAML)
 			}
-			if (strings.Contains(n, "github_env") || strings.Contains(n, "github_path")) && !envFileLines[t.path][l] {
+			if (strings.Contains(n, "github_env") || strings.Contains(n, "github_path") || actionsEnvCall.MatchString(n)) && !envFileLines[t.path][l] {
 				where := "run"
 				if t.path != "" {
 					where = t.path
@@ -243,28 +383,42 @@ func envFileWrites(texts []refText) []string {
 	return out
 }
 
+// actionsEnvCall finds @actions/core's writes of GITHUB_ENV and
+// GITHUB_PATH in normalised text.
+var actionsEnvCall = regexp.MustCompile(`\b(?:exportvariable|addpath)\s*\(`)
+
 // checkJobBuilds applies the workflow side of rule 5 to one job and
 // returns the job's run texts (for the scripts they reference).
-func checkJobBuilds(line int, job string, wfEnv any, j map[string]any, resolve resolver, add func(int, string, ...any)) []string {
+func checkJobBuilds(line int, job string, wfEnv, wfDefaults any, j map[string]any, resolve resolver, add func(int, string, ...any)) []string {
 	var runs []string
 	if u, ok := j["uses"].(string); ok && !strings.HasPrefix(u, "./") {
 		add(line, "job %s calls the remote reusable workflow %s: the check cannot read what it builds", job, u)
 	}
 	steps, _ := j["steps"].([]any)
+	workdir := defaultWorkdir(wfDefaults, j["defaults"])
 	bakeAt := -1
 	var envWrites []string
+	texts := make([][]refText, len(steps))
+	problems := make([][]string, len(steps))
 	for i, s := range steps {
 		step, ok := asMap(s)
 		if !ok {
 			continue
 		}
-		for _, w := range envFileWrites(stepTexts(step, resolve)) {
+		texts[i], problems[i] = stepTexts(step, workdir, resolve)
+		for _, w := range envFileWrites(texts[i]) {
 			envWrites = append(envWrites, fmt.Sprintf("step %d, %s", i+1, w))
 		}
 		if run, ok := step["run"].(string); ok {
 			runs = append(runs, run)
 			for _, c := range buildCommands(run) {
 				add(line, "job %s: step %d runs %q: images are built only by the checked docker/bake-action step", job, i+1, c)
+			}
+		}
+		if script := githubScript(step); script != "" {
+			runs = append(runs, script)
+			for _, c := range buildCommands(script) {
+				add(line, "job %s: step %d runs %q in its github-script: images are built only by the checked docker/bake-action step", job, i+1, c)
 			}
 		}
 		uses, _ := step["uses"].(string)
@@ -287,36 +441,20 @@ func checkJobBuilds(line int, job string, wfEnv any, j map[string]any, resolve r
 	for _, w := range envWrites {
 		add(line, "job %s: %s: a job that builds with bake may not write GITHUB_ENV or GITHUB_PATH (only SOURCE_DATE_EPOCH): it would reach the check and verify steps", job, w)
 	}
+	// Every step of the job runs only what the check can read: a script
+	// path it cannot resolve could write GITHUB_ENV before the build, or
+	// test, save or push the image after it (#49 point 1).
+	for i, ps := range problems {
+		for _, p := range ps {
+			add(line, "job %s: step %d: %s; in a job that builds with bake, run scripts by their repository path", job, i+1, p)
+		}
+	}
 	// After the build, every step that tests, saves, pushes or tags the
 	// image must come right after a verify step. A test reads the image
 	// ID that verify step put out, and a save is the verify step's own
 	// -save.
 	for i := bakeAt + 1; i < len(steps); i++ {
-		step, _ := asMap(steps[i])
-		texts := stepTexts(step, resolve)
-		u := usesImage(texts)
-		if !u.any() {
-			continue
-		}
-		prev, _ := asMap(steps[i-1])
-		if !isVerifyStep(prev) || prev["if"] != step["if"] {
-			add(line, "job %s: step %d tests, saves, pushes or tags the image; the step right before must be `run: %s` with env BAKE_METADATA: %s and the same if", job, i+1, verifyRun, verifyEnvValue)
-		}
-		if slices.Contains(u.uses, "docker save") {
-			add(line, "job %s: step %d runs docker save: save the image with `run: %s -save \"$RUNNER_TEMP/<name>.tar\"`, which checks the saved tar", job, i+1, verifyRun)
-		}
-		if u.test {
-			id, _ := prev["id"].(string)
-			env, _ := asMap(step["env"])
-			want := "${{ steps." + id + ".outputs.image }}"
-			reads := false
-			for _, t := range texts {
-				reads = reads || strings.Contains(normalizeShell(t.text), strings.ToLower(verifiedImageEnv))
-			}
-			if id == "" || env[verifiedImageEnv] != want || !reads {
-				add(line, "job %s: step %d tests the image; it must test the verified image ID: an id on the verify step before it, env %s: ${{ steps.<that id>.outputs.image }}, and $%s in the command", job, i+1, verifiedImageEnv, verifiedImageEnv)
-			}
-		}
+		checkAfterBuild(line, job, i, steps, texts[i], add)
 	}
 	for _, scope := range []struct {
 		name string
@@ -349,6 +487,56 @@ func checkJobBuilds(line int, job string, wfEnv any, j map[string]any, resolve r
 		}
 	}
 	return runs
+}
+
+// checkAfterBuild applies the rules after the build to step i: verify
+// right before a step that uses the image; no docker save; a test of the
+// verified ID as image-test's image argument (#49 point 4); and the image
+// leaves the runner only by `docker tag "$VERIFIED_IMAGE" <name>` and
+// `docker push <name>` in the same step (#49 point 5).
+func checkAfterBuild(line int, job string, i int, steps []any, texts []refText, add func(int, string, ...any)) {
+	step, _ := asMap(steps[i])
+	u := usesImage(texts)
+	if !u.any() {
+		return
+	}
+	prev, _ := asMap(steps[i-1])
+	if !isVerifyStep(prev) || prev["if"] != step["if"] {
+		add(line, "job %s: step %d tests, saves, pushes or tags the image; the step right before must be `run: %s` with env BAKE_METADATA: %s and the same if", job, i+1, verifyRun, verifyEnvValue)
+	}
+	if slices.Contains(u.uses, "docker save") {
+		add(line, "job %s: step %d runs docker save: save the image with `run: %s -save \"$RUNNER_TEMP/<name>.tar\"`, which checks the saved tar", job, i+1, verifyRun)
+	}
+	var other []string
+	for _, o := range u.uses {
+		if otherPushes[o] && !slices.Contains(other, o) {
+			other = append(other, o)
+			add(line, "job %s: step %d runs %s: after the build, the image leaves the runner only by `docker push <name>` of a name the same step tagged with `docker tag \"$%s\" <name>`", job, i+1, o, verifiedImageEnv)
+		}
+	}
+	tags, pushes := tagPush(texts)
+	id, _ := prev["id"].(string)
+	env, _ := asMap(step["env"])
+	bound := id != "" && env[verifiedImageEnv] == "${{ steps."+id+".outputs.image }}"
+	if u.test && (!bound || !testsVerified(texts)) {
+		add(line, "job %s: step %d tests the image; it must test the verified image ID: an id on the verify step before it, env %s: ${{ steps.<that id>.outputs.image }}, and \"$%s\" as the image argument of scripts/image-test.sh (make image-test tests a tag)", job, i+1, verifiedImageEnv, verifiedImageEnv)
+	}
+	tagged := map[string]bool{}
+	for _, t := range tags {
+		if verifiedRef(t[0]) {
+			tagged[t[1]] = true
+			continue
+		}
+		add(line, "job %s: step %d tags %s: after the build, tag only the verified image ID, `docker tag \"$%s\" <name>`", job, i+1, t[0], verifiedImageEnv)
+	}
+	if len(tagged) > 0 && !bound && !u.test {
+		add(line, "job %s: step %d tags the verified image ID; it needs an id on the verify step before it and env %s: ${{ steps.<that id>.outputs.image }}", job, i+1, verifiedImageEnv)
+	}
+	for _, p := range pushes {
+		if !tagged[p] {
+			add(line, "job %s: step %d pushes %s by a name it did not tag from \"$%s\": push only names the same step tagged from the verified image ID", job, i+1, p, verifiedImageEnv)
+		}
+	}
 }
 
 // checkBakeStep checks the bake-action step, the check step before it,
@@ -452,6 +640,12 @@ func CheckAction(src []byte) ([]Finding, []string, error) {
 			runs = append(runs, run)
 			for _, c := range buildCommands(run) {
 				out = append(out, Finding{k.Line, "step " + strconv.Itoa(i+1) + " runs \"" + c + "\": images are built only by the checked docker/bake-action step"})
+			}
+		}
+		if script := githubScript(step); script != "" {
+			runs = append(runs, script)
+			for _, c := range buildCommands(script) {
+				out = append(out, Finding{k.Line, "step " + strconv.Itoa(i+1) + " runs \"" + c + "\" in its github-script: images are built only by the checked docker/bake-action step"})
 			}
 		}
 		if uses, _ := step["uses"].(string); isBuildAction(uses) {

@@ -1,0 +1,3 @@
+job build: step 3 tests, saves, pushes or tags the image; the step right before must be
+job build: step 3 runs skopeo: after the build, the image leaves the runner only by
+job build: step 5 runs skopeo: after the build, the image leaves the runner only by
