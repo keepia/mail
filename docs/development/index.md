@@ -192,10 +192,9 @@ so any path name comes out unquoted. On a mismatch the build prints the
 archive's listing (or, for olefy, a diff), so a `diff` against
 `sogo-listing.txt` names the entry.
 
-The Compose template "all roles on one server" follows in
-the next part of #5; the upstream images (Dovecot, rspamd, ClamAV,
-Postgres, Valkey, memcached) are used unchanged, pinned by digest in the
-template.
+The upstream images (Dovecot, rspamd, ClamAV, Postgres, Valkey,
+memcached) are used unchanged, pinned by digest in the Compose template
+below.
 
 ```sh
 make images                       # every image into the local Docker store, tag $(VERSION)
@@ -235,10 +234,77 @@ make image-pins-test image-pins   # the pin check: tests, then the repository
   status 1); and a clean `docker stop`. Every wait reads a Docker event or a
   log line, bounded by a timeout.
 
+### The Compose template
+
+[`docker-compose.yml`](../../docker-compose.yml) holds every role, one
+profile each (architecture section 7); with
+`COMPOSE_PROFILES=control,edge,store,filter,groupware` it is the template
+"all roles on one server": 14 containers.
+
+```sh
+cp .env.example .env              # then set KEEPIA_POSTGRES_PASSWORD and the edge addresses
+make images VERSION=dev           # the own images, tagged as .env's KEEPIA_VERSION
+docker compose up -d --wait --no-build --pull never
+./km migrate status
+```
+
+| Role | Containers | Network (internal) |
+|---|---|---|
+| control | `keepia`, `postgres`, `valkey`, `control-unbound` | `control-private` |
+| edge | `edge-postfix`, `edge-dovecot`, `edge-unbound` | `edge-private`; `edge-postfix` also on `edge-public`, the only network with a way out |
+| store | `store-dovecot` | `store-private` |
+| filter | `filter-rspamd`, `filter-clamd`, `filter-olefy`, `filter-unbound` | `filter-private`; `filter-olefy` (olefy has no authentication) holds only rspamd and olefy |
+| groupware | `groupware-sogo`, `groupware-memcached` | `groupware-private` |
+
+- **Only port 25 is published**, to `EDGE_IPV4` and `EDGE_IPV6`; outbound
+  mail is SNATed to them. In 0.1.0 no traffic crosses roles (the gates
+  come with 0.2.0), Postfix has no domains (`454 4.7.1`, deferred), the
+  edge Dovecot answers every lookup with a temporary failure, and every
+  Unbound refuses everything but its health zone.
+- **Every container** drops all capabilities, runs with
+  `no-new-privileges` and a fixed non-root uid (Postfix's master aside),
+  has its memory limit (architecture section 9), a protocol healthcheck,
+  and fixed addresses; it listens only on them or on loopback
+  (R-BIND-PRIVATE). Programs that read their address from the
+  environment or the command line (Keepia, Postgres, Valkey, memcached,
+  rspamd, olefy, SOGo) keep a read-only root file system. Postfix,
+  Dovecot, ClamAV and Unbound read it only from their configuration, so a
+  `configs:` entry with the address is mounted there, which Compose does
+  not allow on a read-only root.
+- **Static configuration** lives in [`deploy/`](../../deploy)
+  (`deploy/<role>/<service>/`); the agent replaces it in 0.2.0.
+- **Volumes** are named; every image `VOLUME` is covered, so Compose
+  creates no anonymous volume. Mail is in `store-mail` at exactly
+  `/srv/vmail`, the indexes in `store-index`.
+- **Logs** go to journald (`KEEPIA_LOG_DRIVER`, `local` on a host without
+  it); the host keeps them 30 days.
+- **Own image names:** `${KEEPIA_<NAME>_IMAGE:-${KEEPIA_REGISTRY}/mail-<name>:${KEEPIA_VERSION}}`
+  (`KEEPIA_IMAGE` for Keepia). The registry name is the tag `make images`
+  gives; the variable in front replaces it with an image ID, which the
+  `compose` job uses. An own image is never pinned by digest here, or
+  `km` would pull it. Each also names its `build:` definition (the same as
+  `docker-bake.hcl`'s), but the template is only used with `--no-build`.
+- **No IPv6 on the host** (such as the agents' sandbox): the networks and
+  `edge-postfix`'s `main.cf` need IPv6. A local run there needs an
+  untracked override file (`COMPOSE_FILE=docker-compose.yml:<override>`)
+  that drops the IPv6 subnets and addresses with `!reset`/`!override`.
+
+[`scripts/compose-test.sh`](../../scripts/compose-test.sh) starts the
+template (`up -d --wait --no-build --pull never`) and checks it: exactly
+the 14 containers, each with a healthcheck and healthy, and an olefy scan
+(test 6); every listening socket on the container's own address or
+loopback, none on 8080/9090 in Dovecot (test 8); the networks, fixed
+addresses and the only published port (test 9); capabilities,
+`no-new-privileges` and uids (test 10); a message over LMTP into the named
+volume `store-mail`, an empty `edge-vmail` and no anonymous volume (test
+11); the edge's `451 4.3.0` and `NO [UNAVAILABLE]` (test 12); and the edge
+SNAT and DNAT rules (test 13). It runs every test and names each failure.
+
 ### The docker check
 
-`ci.yml` has two jobs for the images. Both run on every pull request; the
-`docker` job counts as required until the ruleset lists it (HANDOVER).
+`ci.yml` has three jobs for the images. All run on every pull request; the
+`docker` and `compose` jobs count as required until the ruleset lists them
+(HANDOVER).
 
 - **`docker-build (<image>, <arch>)`**: one row per image and platform,
   amd64 on `ubuntu-24.04` and arm64 on `ubuntu-24.04-arm`, natively (no
@@ -259,12 +325,24 @@ make image-pins-test image-pins   # the pin check: tests, then the repository
   verifies again, saves the image and checks the saved tar (one
   `manifest.json` and one `index.json` entry per name, naming the same
   config, with that config's layers), and the job
-  uploads that tar for the `compose` job of #5 part 3 (artifact
-  `image-<name>`, file `image.tar`, kept 1 day). CI never logs in to a
-  registry and never pushes.
+  uploads that tar with the build's metadata for the `compose` job
+  (artifact `image-<name>`, files `image.tar` and `metadata.json`, kept 1
+  day). CI never logs in to a registry and never pushes.
 - **`docker`**: fails unless every `docker-build` row succeeded (a failed or
   cancelled row turns it red rather than skipped), then runs `make
   image-pins-test image-pins`.
+- **`compose`**: fails the same way unless every `docker-build` row
+  succeeded. It pulls the upstream images by digest
+  (`scripts/ci-pull-images.sh`), downloads the five amd64 artifacts and
+  `docker load`s them: no second build. For each image, `-verify-built`
+  with that build's `metadata.json` checks the loaded image and puts out
+  its ID; the later steps give Compose these IDs (`KEEPIA_IMAGE`,
+  `KEEPIA_POSTFIX_IMAGE`, `KEEPIA_UNBOUND_IMAGE`, `KEEPIA_OLEFY_IMAGE`,
+  `KEEPIA_SOGO_IMAGE`), so nothing after the verification goes by tag. Then
+  `scripts/compose-test.sh` (tests 6 and 8–13), `./km migrate` and `./km
+  migrate status` (test 7: version 1 applied), `./km` with a wrong database
+  password (it must fail), and `docker compose down --volumes`. The step
+  summary lists each container's health, memory and CPU.
 
 The `lint` job also runs `scripts/check-go-toolchain-test.sh`; the
 Dockerfile runs `scripts/check-go-toolchain.sh`, so the golang tag cannot
@@ -273,7 +351,7 @@ drift from `go.mod`'s `toolchain`.
 `scripts/ci-docker-mirror.sh`, `scripts/ci-pull-images.sh` and
 `scripts/check-go-toolchain.sh` (with its test) are byte-identical copies of
 mail-archive's; change them there first. `ci-pull-images.sh` is used by the
-`compose` job (#5 part 3).
+`compose` job.
 
 ### The image pin check
 
@@ -297,7 +375,9 @@ lives, also under a skipped path.
    reported, because BuildKit expands variables in `ADD` sources;
 4. a Compose file: a service without `build:` has `image:
    name:tag@sha256:<64 hex>`; a service with `build:` names its image
-   under `${KEEPIA_REGISTRY…}` and builds from a relative local context.
+   under `${KEEPIA_REGISTRY…}`, or as `${KEEPIA_<NAME>_IMAGE:-<that
+   name>}` (a variable that replaces the whole name, in CI with the
+   verified image ID), and builds from a relative local context.
    `build` may use only `context`, `dockerfile`, `args`, `target` and
    `labels` (so `x-bake`, `additional_contexts`, `dockerfile_inline`,
    `cache_from` and any new key are reported), and `args` may not set

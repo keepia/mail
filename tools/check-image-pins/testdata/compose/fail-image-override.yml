@@ -1,0 +1,16 @@
+# The override form needs a default under the registry variable, ends at
+# its own closing brace, is named KEEPIA_<NAME>_IMAGE, and is no pin: a
+# service without build: still needs a digest.
+services:
+  a:
+    image: ${KEEPIA_IMAGE:-busybox:latest}
+    build: .
+  b:
+    image: ${KEEPIA_B_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-b:dev}-x
+    build: .
+  c:
+    image: ${OTHER_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-c:dev}
+    build: .
+  d:
+    image: ${KEEPIA_D_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-d:dev}
+# want-lines: 5 8 11 14

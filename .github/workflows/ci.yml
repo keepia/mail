@@ -215,8 +215,8 @@ jobs:
           IMAGE: ${{ matrix.image }}
           VERIFIED_IMAGE: ${{ steps.verify.outputs.image }}
         run: bash scripts/image-test.sh "$IMAGE" "$VERIFIED_IMAGE"
-      # The compose job (#5 part 3) loads the amd64 images from here instead
-      # of building them again. Verify saves the image itself and checks the
+      # The compose job loads the amd64 images from here instead of
+      # building them again. Verify saves the image itself and checks the
       # tar it wrote (every blob, and the build's config under every name)
       # before it moves it to image.tar.
       - name: Save the image
@@ -224,11 +224,20 @@ jobs:
         env:
           BAKE_METADATA: ${{ steps.build.outputs.metadata }}
         run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built -save "$RUNNER_TEMP/image.tar"
+      # The build's metadata goes with the tar: the compose job verifies
+      # the loaded image against it (-verify-built) and runs that image ID.
+      - name: Build metadata for the compose job
+        if: matrix.arch == 'amd64'
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: printf '%s\n' "$BAKE_METADATA" >"$RUNNER_TEMP/metadata.json"
       - if: matrix.arch == 'amd64'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-${{ matrix.image }}
-          path: ${{ runner.temp }}/image.tar
+          path: |
+            ${{ runner.temp }}/image.tar
+            ${{ runner.temp }}/metadata.json
           retention-days: 1
           if-no-files-found: error
 
@@ -256,3 +265,111 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make image-pins-test image-pins
+
+  # The compose check (#5 part 3, #26): the template "all roles on one
+  # server" with the images docker-build built and checked, never a second
+  # build. It loads each amd64 image tar, verifies the loaded image against
+  # its build's metadata (-verify-built) and gives Compose that image ID,
+  # so nothing between the load and its use goes by tag. Then
+  # scripts/compose-test.sh starts every role (tests 6, 8-13) and ./km
+  # migrate runs in the template (test 7).
+  compose:
+    name: compose
+    needs: docker-build
+    # Runs also when a docker-build row failed, and then fails itself, so
+    # it never shows as skipped (N16).
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The template's variables for the run (.env.example). Placeholders:
+    # the edge addresses are RFC 5737 and RFC 3849 documentation
+    # addresses, put on the runner's loopback by compose-test.sh; the
+    # database password exists only for this run.
+    env:
+      COMPOSE_PROFILES: control,edge,store,filter,groupware
+      KEEPIA_POSTGRES_PASSWORD: compose-ci-only
+      EDGE_IPV4: 192.0.2.10
+      EDGE_IPV6: 2001:db8::10
+    steps:
+      - name: Every docker-build row passed
+        env:
+          RESULT: ${{ needs.docker-build.result }}
+        run: |
+          echo "docker-build: $RESULT"
+          test "$RESULT" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: sh scripts/ci-docker-mirror.sh
+      # The upstream images by digest (scripts/ci-pull-images.sh reads the
+      # image: lines of docker-compose.yml), with retries.
+      - run: sh scripts/ci-pull-images.sh
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-*
+          path: ${{ runner.temp }}/images
+      - name: Load the images
+        run: |
+          for name in keepia postfix unbound olefy sogo; do
+            docker load -i "$RUNNER_TEMP/images/image-$name/image.tar"
+          done
+      # Each loaded image must be its build's output: verify compares the
+      # local ID of every name with the build's digest and puts out the ID
+      # (steps.<id>.outputs.image), which Compose then runs.
+      - id: keepia
+        run: BAKE_METADATA=$(cat "$RUNNER_TEMP/images/image-keepia/metadata.json") GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - id: postfix
+        run: BAKE_METADATA=$(cat "$RUNNER_TEMP/images/image-postfix/metadata.json") GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - id: unbound
+        run: BAKE_METADATA=$(cat "$RUNNER_TEMP/images/image-unbound/metadata.json") GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - id: olefy
+        run: BAKE_METADATA=$(cat "$RUNNER_TEMP/images/image-olefy/metadata.json") GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - id: sogo
+        run: BAKE_METADATA=$(cat "$RUNNER_TEMP/images/image-sogo/metadata.json") GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - name: Compose template (tests 6 and 8-13)
+        env:
+          KEEPIA_IMAGE: ${{ steps.keepia.outputs.image }}
+          KEEPIA_POSTFIX_IMAGE: ${{ steps.postfix.outputs.image }}
+          KEEPIA_UNBOUND_IMAGE: ${{ steps.unbound.outputs.image }}
+          KEEPIA_OLEFY_IMAGE: ${{ steps.olefy.outputs.image }}
+          KEEPIA_SOGO_IMAGE: ${{ steps.sogo.outputs.image }}
+        run: bash scripts/compose-test.sh
+      # Test 7: km runs keepia-mail in the running template. serve has
+      # applied the migrations at its start, so migrate finds none to
+      # apply, and status lists version 1 as applied.
+      - name: ./km migrate (test 7)
+        env:
+          KEEPIA_IMAGE: ${{ steps.keepia.outputs.image }}
+          KEEPIA_POSTFIX_IMAGE: ${{ steps.postfix.outputs.image }}
+          KEEPIA_UNBOUND_IMAGE: ${{ steps.unbound.outputs.image }}
+          KEEPIA_OLEFY_IMAGE: ${{ steps.olefy.outputs.image }}
+          KEEPIA_SOGO_IMAGE: ${{ steps.sogo.outputs.image }}
+        run: |
+          ./km migrate
+          status=$(./km migrate status)
+          echo "$status"
+          grep -E '^00001_baseline\.sql +applied ' <<<"$status"
+      # Test 7's counter-case: with a wrong database password km must fail.
+      # Compose recreates postgres (same volume, so the old password
+      # stays) and keepia, whose serve then cannot log in.
+      - name: ./km with a wrong database password fails (test 7)
+        env:
+          KEEPIA_IMAGE: ${{ steps.keepia.outputs.image }}
+          KEEPIA_POSTFIX_IMAGE: ${{ steps.postfix.outputs.image }}
+          KEEPIA_UNBOUND_IMAGE: ${{ steps.unbound.outputs.image }}
+          KEEPIA_OLEFY_IMAGE: ${{ steps.olefy.outputs.image }}
+          KEEPIA_SOGO_IMAGE: ${{ steps.sogo.outputs.image }}
+          KEEPIA_POSTGRES_PASSWORD: wrong-password
+        run: |
+          rc=0
+          ./km migrate status || rc=$?
+          echo "km exited $rc"
+          test "$rc" != 0
+          logs=$(docker compose logs --no-log-prefix keepia)
+          grep -m1 'password authentication failed' <<<"$logs"
+      - name: Stop and remove the template
+        if: always()
+        run: docker compose down --volumes --timeout 30

@@ -7,6 +7,7 @@ paths:
   - "docker-compose.yml"
   - "deploy/**"
   - "scripts/image-test.sh"
+  - "scripts/compose-test.sh"
   - "tools/check-image-pins/**"
 ---
 # Docker
@@ -32,6 +33,7 @@ paths:
   - Known limits of following what a step runs (#51): a word on PATH or a shell function that runs its arguments as a command (`xargs make publish`, `retry make publish` with `retry() { "$@"; }`) hides those arguments; reading `make` takes in the whole Makefile, which over-reports.
   - A change that edits the check, or disables or routes around it, is caught by review, not by the tool. Examples: a build command assembled at run time, a background process that changes the image store after verify, or a tar changed between save and upload. Reviewers of `second-review` PRs check that every build still goes through the paths above.
 - Compose `build` keys only `context`, `dockerfile`, `args` (no `BUILDKIT_SYNTAX`), `target` and `labels`.
+- **Compose template** (`docker-compose.yml`): an own image is `${KEEPIA_<NAME>_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-<name>:${KEEPIA_VERSION:-dev}}` (`KEEPIA_IMAGE` for Keepia), never pinned by digest (km would pull it). The CI `compose` job loads the `docker-build` tars, runs `-verify-built` on each with its build's `metadata.json`, and sets these variables to the verified IDs, so no tag is used between the load and Compose. Start it only with `up -d --no-build --pull never`; no `:?` required variables (`docker buildx bake` reads this file too and would fail). Every listener on the container's fixed address or loopback; `scripts/compose-test.sh` checks it (tests 6, 8–13).
 - **Downloads only by `ADD --checksum=sha256:`**, one URL per `ADD`, from a source the plan lists. No `curl`, `wget`, `pip install` from an index, `git clone` or any other download in `RUN`: the check cannot see them, so review must. Debian packages come from the Debian archive through `images/common/keepia-apt-install`, which records them in `/usr/share/keepia/packages.txt` (recorded, not pinned).
 - A new registry, base image, package source or action is a new external service: the maintainer's OK first.
 - **Privileges:** `cap_drop: [ALL]`, `no-new-privileges`, and exactly the capabilities the plan lists per container (Postfix: `CHOWN DAC_OVERRIDE FOWNER SETUID SETGID`, with `chroot = n` for every `master.cf` service; Dovecot: `SYS_CHROOT`; all others none). Fixed non-zero uids; only Postfix's master runs as root. No `privileged`, host network or Docker socket.

@@ -26,8 +26,12 @@ RUN --mount=type=bind,source=common/keepia-apt-install,target=/tmp/keepia-apt-in
 # chroot = n for every service (C14; Debian ships chroot = y, which fails
 # without SYS_CHROOT while `postfix status` still says running). Logs go
 # to stdout through postlogd. The hostname is a placeholder that the
-# Compose configuration replaces.
+# Compose configuration replaces. Postfix listens on loopback only unless
+# the configuration names addresses: a fail-safe default, because Debian's
+# is every interface (R-BIND-PRIVATE; the Compose template's main.cf sets
+# the container's own addresses, #26).
 RUN postconf -F '*/*/chroot = n' \
+ && postconf -e 'inet_interfaces = loopback-only' \
  && postconf -e 'maillog_file = /dev/stdout' \
  && postconf -e 'myhostname = localhost.invalid' \
  && postconf -e 'mydestination = localhost' \

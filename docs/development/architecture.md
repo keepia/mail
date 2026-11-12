@@ -994,38 +994,51 @@ both were read from one mailbox; a flipped bit gave `MAC error`.
 Memory limits per container (`mem_limit`). This is the budget later plans
 state their cost against (`CLAUDE.md`, "Rules"). #5's all-roles Compose run
 records `docker stats` per container, and its pull request replaces the
-predicted values in this table ([coordinator decision T9][cd]).
+predicted values in this table ([coordinator decision T9][cd]): "idle" is
+`docker stats` of the template "all roles on one server" right after its
+checks, in the CI `compose` job on GitHub's `ubuntu-24.04` runner
+([#26][c26]; 0.1.0's configuration, so no mail flows and nothing is
+cached yet).
 
 | Role | Container | Basis | Limit |
 |---|---|---|---:|
-| control | keepia | predicted | 128 MiB |
-| control | postgres | predicted (upstream default `shared_buffers` 128 MB) | 384 MiB |
-| control | valkey | predicted (Bayes tokens dominate) | 256 MiB |
-| edge | postfix | measured idle 9.7–9.8 MiB ([#3 F7][p3]) | 128 MiB |
-| edge | dovecot proxy | measured idle 9.7–11.0 MiB ([#3 F7][p3]), plus login processes per connection | 256 MiB |
+| control | keepia | measured idle 3.9 MiB ([#26][c26]) | 128 MiB |
+| control | postgres | measured idle 31 MiB ([#26][c26]); upstream default `shared_buffers` 128 MB | 384 MiB |
+| control | valkey | measured idle 4.0 MiB ([#26][c26]); predicted: Bayes tokens dominate | 256 MiB |
+| edge | postfix | measured idle 7.0 MiB ([#26][c26]), 9.7–9.8 MiB ([#3 F7][p3]) | 128 MiB |
+| edge | dovecot proxy | measured idle 9.3 MiB ([#26][c26]), 9.7–11.0 MiB ([#3 F7][p3]), plus login processes per connection | 256 MiB |
 | edge | keepia-edge | predicted (replica of all mailboxes in memory) | 128 MiB |
 | edge | rspamd-proxy | predicted | 128 MiB |
-| store | dovecot | measured idle 9.8–10.3 MiB ([#3 F7][p3]), peak 13–19 MiB for one session in another configuration ([#4 F6][p4]); per session about 9.2 MiB (19 − 9.8, predicted until 0.2.0 measures it; an upper bound: the peak includes the fetch of a 2 MB message) | 128 MiB + about 9.2 MiB × concurrent sessions; 512 MiB covers about 41 (predicted) |
-| filter | rspamd | predicted | 512 MiB |
-| filter | clamd + freshclam | upstream: 1.2 GiB for the engine, about 2.4 GiB during the daily concurrent reload; 3 GiB minimum, 4 GiB preferred | 3 GiB |
-| filter | olefy | predicted | 128 MiB |
-| groupware | sogo | predicted | 512 MiB |
-| groupware | memcached | predicted | 64 MiB |
+| store | dovecot | measured idle 7.4 MiB ([#26][c26]), 9.8–10.3 MiB ([#3 F7][p3]), peak 13–19 MiB for one session in another configuration ([#4 F6][p4]); per session about 9.2 MiB (19 − 9.8, predicted until 0.2.0 measures it; an upper bound: the peak includes the fetch of a 2 MB message) | 128 MiB + about 9.2 MiB × concurrent sessions; 512 MiB covers about 41 (predicted) |
+| filter | rspamd | measured idle 104 MiB ([#26][c26]) | 512 MiB |
+| filter | clamd + freshclam | measured 956 MiB for clamd with its signatures loaded ([#26][c26]); upstream: 1.2 GiB for the engine, about 2.4 GiB during the daily concurrent reload; 3 GiB minimum, 4 GiB preferred | 3 GiB (clamd 2944 MiB, freshclam 128 MiB) |
+| filter | olefy | measured: one 20 MB attachment is OOM-killed at 128 MiB and handled at 256 MiB ([#44][c44]); idle 13.5 MiB ([#26][c26]) | 256 MiB |
+| groupware | sogo | measured idle 24 MiB without a database ([#26][c26]) | 512 MiB |
+| groupware | memcached | measured idle 2.1 MiB ([#26][c26]) | 64 MiB |
 | groupware | groupware-web | predicted | 64 MiB |
 | every role | gate | predicted (Go TLS proxy) | 32 MiB each, 160 MiB for five roles |
 | every server | agent | predicted | 64 MiB |
-| edge, filter, control | unbound | predicted | 128 MiB each, 384 MiB for three |
+| edge, filter, control | unbound | measured idle 8.5 MiB each ([#26][c26]) | 128 MiB each, 384 MiB for three |
 
 Per role (sum of the limits above, without gate, agent and `unbound`):
-control 768 MiB, edge 640 MiB, store 512 MiB, filter 3712 MiB, groupware
+control 768 MiB, edge 640 MiB, store 512 MiB, filter 3840 MiB, groupware
 640 MiB.
 
-- **All roles on one server:** the sum of the limits is **6880 MiB, about
-  6.7 GiB**, with five gates, one agent and three `unbound`; ClamAV is 3 GiB
-  of it. **Minimum server: 8 GiB RAM, 2 vCPU; recommended 4 vCPU**
-  (predicted from the limits). Disk: images (Dovecot 267 MB and Postfix 198
-  MB measured, [#3 F7][p3]; the rest predicted, about 2 GB in total), 5 GiB
-  free for ClamAV (upstream), plus mail.
+- **All roles on one server:** the sum of the limits is **7008 MiB, about
+  6.8 GiB**, with five gates, one agent and three `unbound`; ClamAV is 3 GiB
+  of it. The 14 containers of 0.1.0's template have 6336 MiB of it; the
+  gates, the agent, keepia-edge, rspamd-proxy, groupware-web and freshclam
+  add 672 MiB in later milestones. Measured idle, the 14 use about 1.2
+  GiB (1189 MiB), 956 MiB of it clamd ([#26][c26]); CPU is 0.00–0.16 %
+  per container. **Minimum server: 8 GiB RAM, 2 vCPU; recommended 4
+  vCPU** (predicted from the limits). Disk: the images of the template,
+  measured ([#26][c26]; Docker's image size on the CI runner): Postgres
+  456 MB, ClamAV 338 MB (with its signatures), SOGo 302 MB, rspamd 204
+  MB, Dovecot 182 MB, olefy 170 MB, Postfix 125 MB, Valkey 116 MB,
+  Unbound 109 MB, memcached 85 MB and Keepia 14 MB: about 2.1 GB in
+  total. Docker's containerd image store keeps the compressed layers as
+  well and needed about 3.1 GB for the same images in a local run. Plus
+  5 GiB free for ClamAV (upstream) and the mail.
 - **The reference installation:** confirmed by the maintainer (M4): the
   reference server meets this minimum. The answer was given in chat; no values
   of the installation go into this repository or onto GitHub.
@@ -1038,7 +1051,7 @@ control 768 MiB, edge 640 MiB, store 512 MiB, filter 3712 MiB, groupware
   from #4's peak, which ran in another configuration, [second review of
   PR #36][rb36], N4).
 - **Without ClamAV** (clamd and freshclam left out) the same server needs
-  about 3.7 GiB (3808 MiB, predicted from the limits). Option kept here:
+  about 3.8 GiB (3936 MiB, predicted from the limits). Option kept here:
   `ConcurrentDatabaseReload no` saves about 1.2 GiB (upstream) but blocks
   scans during the reload, which would defer mail; not chosen.
 - **CPU:** idle 0.00–0.02 % per Dovecot and Postfix container (measured,
@@ -1218,6 +1231,8 @@ entry must close it.
 [rv7]: https://github.com/keepia/mail/issues/2#issuecomment-6810930603
 [p3]: https://github.com/keepia/mail/issues/3#issuecomment-6809265511
 [p4]: https://github.com/keepia/mail/issues/4#issuecomment-6808759590
+[c26]: https://github.com/keepia/mail/issues/26
+[c44]: https://github.com/keepia/mail/issues/44#issuecomment-6825672910
 [p4dec]: https://github.com/keepia/mail/issues/4#issuecomment-6807158047
 [p13hash]: https://github.com/keepia/mail/issues/13#issuecomment-6808912017
 [r18]: https://github.com/keepia/mail/pull/18#pullrequestreview-5866592327

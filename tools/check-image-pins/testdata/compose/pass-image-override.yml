@@ -1,0 +1,12 @@
+# An own image behind a variable that replaces it as a whole (the CI
+# compose job sets the verified image ID, #26); its default is the
+# registry name.
+services:
+  keepia:
+    image: ${KEEPIA_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail:${KEEPIA_VERSION:-dev}}
+    build: .
+  edge-postfix:
+    image: ${KEEPIA_POSTFIX_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-postfix:${KEEPIA_VERSION:-dev}}
+    build:
+      context: images
+      dockerfile: postfix/Dockerfile
