@@ -48,3 +48,70 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make workflows-test workflows
+
+  # Go tests against a throwaway PostgreSQL. In CI (CI is set) the database
+  # tests fail instead of skipping when TEST_DATABASE_URL is missing
+  # (internal/store/storetest), so this job cannot pass with them skipped.
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        # The runner pulls service images before any step: the image is
+        # named on mirror.gcr.io (Google's public Docker Hub cache) directly.
+        image: mirror.gcr.io/library/postgres:18
+        env:
+          POSTGRES_USER: keepia
+          POSTGRES_PASSWORD: keepia
+          POSTGRES_DB: keepia
+        # Random host port on loopback; the test step reads it below.
+        ports: ["127.0.0.1::5432"]
+        options: >-
+          --health-cmd "pg_isready -U keepia"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go mod verify
+      - run: go vet ./...
+      # Random test order (-shuffle=on): a failure prints its seed as
+      # -test.shuffle N; rerun it with go test -shuffle=N.
+      - run: go test -race -shuffle=on -count=1 ./...
+        env:
+          TEST_DATABASE_URL: postgres://keepia:keepia@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/keepia?sslmode=disable
+
+  # golangci-lint (.golangci.yml) at the version the Makefile pins.
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.14.0
+
+  # govulncheck (pinned in the Makefile, verified through the Go checksum
+  # database) on all packages.
+  vulncheck:
+    name: vulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make vuln
