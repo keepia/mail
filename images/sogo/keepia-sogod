@@ -22,28 +22,22 @@
 # could run a command, or kill the workers at once).
 set -u
 
-grace=${KEEPIA_SOGOD_GRACE:-5}
-if [[ ! $grace =~ ^[0-9]{1,3}$ ]] || ((10#$grace > 300)); then
-	echo "keepia-sogod: KEEPIA_SOGOD_GRACE must be a whole number of seconds from 0 to 300, not $(printf '%q' "$grace")" >&2
-	exit 2
-fi
-grace=$((10#$grace))
-if [ $# -eq 0 ]; then
-	echo "usage: keepia-sogod SOGOD-COMMAND..." >&2
-	exit 2
-fi
-
-# workers: the pids whose parent is the master (no procps in the image).
+# workers [PROC]: the pids whose parent is the master (no procps in the
+# image), from PROC (default /proc; another directory only in
+# scripts/keepia-sogod-test.sh). A process may exit between the glob and
+# the read: its entry is skipped without a message. The braces put the
+# input redirect itself under 2>/dev/null (#59); on the read alone, bash
+# reports the failed open before it applies 2>/dev/null.
 workers() {
-	local stat rest
-	for stat in /proc/[0-9]*/stat; do
-		read -r rest <"$stat" 2>/dev/null || continue
+	local proc=${1:-/proc} stat rest
+	for stat in "$proc"/[0-9]*/stat; do
+		{ read -r rest <"$stat"; } 2>/dev/null || continue
 		# Field 4 (ppid) follows the command in parentheses, which may
 		# contain spaces: cut at the last ") ".
 		rest=${rest##*) }
 		set -- $rest
 		if [ "${2:-}" = "$master" ]; then
-			stat=${stat#/proc/}
+			stat=${stat#"$proc"/}
 			echo "${stat%/stat}"
 		fi
 	done
@@ -73,6 +67,22 @@ stop() {
 		kill -KILL $pids 2>/dev/null || true
 	fi
 }
+
+# Sourced by scripts/keepia-sogod-test.sh: the functions only.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+	return 0
+fi
+
+grace=${KEEPIA_SOGOD_GRACE:-5}
+if [[ ! $grace =~ ^[0-9]{1,3}$ ]] || ((10#$grace > 300)); then
+	echo "keepia-sogod: KEEPIA_SOGOD_GRACE must be a whole number of seconds from 0 to 300, not $(printf '%q' "$grace")" >&2
+	exit 2
+fi
+grace=$((10#$grace))
+if [ $# -eq 0 ]; then
+	echo "usage: keepia-sogod SOGOD-COMMAND..." >&2
+	exit 2
+fi
 
 # The trap is set before the fork (#55), so a signal in between is not lost.
 master= pending=0

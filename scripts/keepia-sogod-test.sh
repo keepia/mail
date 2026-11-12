@@ -103,6 +103,25 @@ for value in 0 08 300 ''; do
 	fi
 done
 
+# workers, from a fake /proc: the master's children only (also with ") "
+# in the command), and no message for a process that exits between the
+# glob and the read (#59; a dangling stat link fails to open the same way).
+proc=$tmp/proc
+mkdir -p "$proc/100" "$proc/101" "$proc/102" "$proc/103"
+echo "100 (sogod) S 42 100 100 0 -1" >"$proc/100/stat"
+echo "101 (a) b) S 42 100 100 0 -1" >"$proc/101/stat"
+ln -s "$tmp/vanished" "$proc/102/stat"
+echo "103 (other) S 7 7 7 0 -1" >"$proc/103/stat"
+rc=0
+# shellcheck disable=SC2016 # expanded by the inner bash
+out=$(bash -c 'source "$1" && master=42 && workers "$2"' workers-test "$wrapper" "$proc" 2>"$tmp/err") || rc=$?
+err=$(cat "$tmp/err")
+if [ "$rc" != 0 ] || [ "$out" != $'100\n101' ] || [ -n "$err" ]; then
+	bad "workers: exit $rc, pids $(echo $out), want 100 101; stderr: $err"
+else
+	ok "workers: the master's children 100 101, a vanished entry skipped silently"
+fi
+
 # The master's own exit status is passed through; no arguments is status 2.
 rc=0
 bash "$wrapper" sh -c 'exit 3' || rc=$?

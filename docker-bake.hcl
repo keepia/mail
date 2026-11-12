@@ -73,10 +73,17 @@ target "unbound" {
 }
 
 # olefy and the two wheels (#44). Their licences, not Keepia's MIT, apply to
-# the image's content (#55): olefy at 9c01c571 is Apache-2.0 (its LICENSE
-# and olefy.py's header), oletools 0.60.2 BSD-2-Clause (LICENSE.md), and
-# pcodedmp 1.2.6 GPL-3.0 (its LICENSE and classifier; it grants no "or
-# later").
+# the image's content (#55), read from the pinned wheels' files (#59):
+# - olefy at 9c01c571: Apache-2.0 (its LICENSE and olefy.py's header).
+# - oletools 0.60.2: BSD-2-Clause (LICENSE.md), which excludes its
+#   thirdparty folder and names MIT for the officeparser code in olevba.
+#   Its other parts: ezhexviewer's hexdump3 (PSF-2.0, a Python Cookbook
+#   recipe), ppt_record_parser's IterStream (a Stack Overflow answer of
+#   2013, CC-BY-SA-3.0), and in thirdparty/ prettytable (BSD-3-Clause,
+#   COPYING), xglob and tablestream (BSD-2-Clause), xxxswf (GPL-3.0,
+#   LICENSE.txt) and oledump (public domain, the files' headers).
+# - pcodedmp 1.2.6: GPL-3.0 (its LICENSE and classifier; it grants no "or
+#   later", nor does xxxswf).
 target "olefy" {
   inherits   = ["_common"]
   context    = "images"
@@ -85,7 +92,7 @@ target "olefy" {
   labels = {
     "org.opencontainers.image.title"       = "Keepia Mail olefy"
     "org.opencontainers.image.description" = "olefy (oletools for rspamd) for the Keepia Mail filter role"
-    "org.opencontainers.image.licenses"    = "Apache-2.0 AND BSD-2-Clause AND GPL-3.0-only"
+    "org.opencontainers.image.licenses"    = "Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND MIT AND PSF-2.0 AND CC-BY-SA-3.0 AND GPL-3.0-only AND LicenseRef-Public-Domain"
   }
 }
 
