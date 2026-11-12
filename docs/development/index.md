@@ -73,14 +73,50 @@ is a no-op; the first tables come with the data model (#2).
 ## Wrapper
 
 `km` runs `keepia-mail` commands through Docker Compose, for example
-`./km migrate`. It starts the Compose service `postgres` (`docker compose up
--d --wait postgres`), then runs the command in a one-off container of the
-service `keepia`, whose entrypoint is `keepia-mail` (`docker compose run
---rm -T keepia …`), with `--build` when a `Dockerfile` lies next to it. Its
-exit status is the command's. That is the contract the Compose template of
-#5 meets; the image's health probe is `keepia-mail healthcheck` (exit 0 when
-`/healthz` answers 200), because the image has no curl. The tests use a fake
-`docker` (`cmd/keepia-mail/km_test.go`).
+`./km migrate`. The local flow is:
+
+```sh
+make images      # build the images, the only local build path
+./km migrate     # then run keepia-mail commands
+```
+
+`km` never builds (#56), so a CI job can run it without a second, unchecked
+build path. The only images it pulls are upstream images pinned by digest,
+and it pulls them by that digest. In order:
+
+1. If no Docker daemon is reachable, it stops with docker's own error.
+2. It lists the images of the Compose services `postgres` and `keepia` and
+   of every service they depend on (`docker compose config --images
+   postgres keepia`). It checks that each image is in the local Docker
+   store. Nothing has been started yet. For a missing image:
+   - an upstream image pinned by digest (`…@sha256:…`) is pulled by that
+     digest (`docker pull -q -- <image>`), which is content-addressed. If
+     the pull fails, km exits non-zero with docker's error and the image;
+   - for any other image, km exits non-zero and names the image and `make
+     images`.
+3. It starts `postgres` (`docker compose up -d --wait --no-build --pull
+   never postgres`) and `keepia` (`docker compose up -d --no-build --pull
+   never keepia`). Every image, including those of all dependencies, is in
+   the local store by now, so neither call builds or pulls.
+4. It runs the command in the running container (`docker compose exec -T
+   keepia keepia-mail …`). Its exit status is the command's.
+
+That is the contract the Compose template of #5 meets; the image's health
+probe is `keepia-mail healthcheck` (exit 0 when `/healthz` answers 200),
+because the image has no curl. The tests use a fake `docker`
+(`cmd/keepia-mail/km_test.go`).
+
+- **Image names:** `keepia`'s `image:` in the Compose file must equal the
+  tag `make images` gives it, `$(REGISTRY)/mail:$(VERSION)`. `VERSION`
+  defaults to `git describe --tags --always --dirty`, so the Compose file
+  needs a variable for the tag, or `make images VERSION=…` must match the
+  Compose file's default. A service with only `build:` resolves to
+  `<project>-keepia` and never matches: `km` then reports it missing.
+- **A crash-looping `keepia`:** `exec` needs a running container. If
+  `keepia` keeps restarting (for example, `serve` exits on a failed
+  migration), `km` fails with "Container … is restarting". Read `docker
+  compose logs keepia`, fix the cause, then start it again with `docker
+  compose up -d --no-build --pull never keepia`.
 
 Architecture and resource budget: [architecture.md](architecture.md).
 

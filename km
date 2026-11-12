@@ -4,20 +4,51 @@
 #   ./km migrate
 #   ./km migrate status
 #
-# Starts PostgreSQL (Compose service postgres) if needed, then runs the
-# command in a one-off container of the Compose service keepia, whose
-# entrypoint is keepia-mail, and removes it afterwards. Next to a
-# Dockerfile (a source checkout) it rebuilds the image first, fast when
-# cached; in a release bundle it uses the released image. Docker Compose's
-# progress output is hidden. The exit status is the command's.
+# Starts PostgreSQL (Compose service postgres) and the Compose service
+# keepia if needed, then runs `keepia-mail <arguments>` in the running
+# keepia container. km never builds an image (#56) and pulls only upstream
+# images pinned by digest: the own images are built only by `make images`
+# or CI's checked build. If one of them is not in the local Docker store,
+# km stops before starting anything and names `make images`. Docker
+# Compose's progress output is hidden. The exit status is the command's.
 set -eu
 
 cd "$(dirname "$0")"
 
-build=
-if [ -f Dockerfile ]; then
-	build=--build
+# A daemon that cannot be reached is not a missing image: stop with
+# docker's own error.
+if ! docker version --format '{{.Server.Version}}' >/dev/null; then
+	echo "km: the Docker daemon is not reachable (see docker's error above)." >&2
+	exit 1
 fi
 
-docker compose --progress quiet up -d --wait postgres
-exec docker compose --progress quiet run --rm $build -T keepia "$@"
+# The images of postgres, keepia and every service they depend on, one
+# per line. Assigned on its own, so that set -e stops km when config
+# fails.
+images=$(docker compose --progress quiet config --images postgres keepia)
+set -f
+for image in $images; do
+	if docker image inspect -- "$image" >/dev/null 2>&1; then
+		continue
+	fi
+	case $image in
+	*@sha256:*)
+		# Upstream, pinned by digest: a pull by digest is content-addressed.
+		if ! docker pull -q -- "$image" >/dev/null; then
+			echo "km: could not pull $image (see docker's error above)." >&2
+			exit 1
+		fi
+		;;
+	*)
+		echo "km: the image $image (Compose service keepia or a service it depends on) is missing." >&2
+		echo "km: build it with \`make images\`; km does not build or pull images." >&2
+		exit 1
+		;;
+	esac
+done
+set +f
+
+# Every image is now in the local store, so neither up builds or pulls.
+docker compose --progress quiet up -d --wait --no-build --pull never postgres
+docker compose --progress quiet up -d --no-build --pull never keepia
+exec docker compose --progress quiet exec -T keepia keepia-mail "$@"
