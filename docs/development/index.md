@@ -81,18 +81,23 @@ make images      # build the images, the only local build path
 ```
 
 `km` never builds (#56), so a CI job can run it without a second, unchecked
-build path, and it never pulls the images of `keepia` or the services it
-depends on. In order:
+build path. The only images it pulls are upstream images pinned by digest,
+and it pulls them by that digest. In order:
 
 1. If no Docker daemon is reachable, it stops with docker's own error.
-2. It lists the images of the Compose service `keepia` and of every service
-   it depends on (`docker compose config --images keepia`). It skips
-   upstream images pinned by digest and checks that each other image is in
-   the local Docker store. If one is missing, it starts nothing, exits
-   non-zero, and names the image and `make images`.
-3. It starts `postgres` (`docker compose up -d --wait --no-build postgres`;
-   that image is pinned by digest, so a pull of it is content-addressed)
-   and `keepia` (`docker compose up -d --no-build --pull never keepia`).
+2. It lists the images of the Compose services `postgres` and `keepia` and
+   of every service they depend on (`docker compose config --images
+   postgres keepia`). It checks that each image is in the local Docker
+   store. Nothing has been started yet. For a missing image:
+   - an upstream image pinned by digest (`…@sha256:…`) is pulled by that
+     digest (`docker pull -q -- <image>`), which is content-addressed. If
+     the pull fails, km exits non-zero with docker's error and the image;
+   - for any other image, km exits non-zero and names the image and `make
+     images`.
+3. It starts `postgres` (`docker compose up -d --wait --no-build --pull
+   never postgres`) and `keepia` (`docker compose up -d --no-build --pull
+   never keepia`). Every image, including those of all dependencies, is in
+   the local store by now, so neither call builds or pulls.
 4. It runs the command in the running container (`docker compose exec -T
    keepia keepia-mail …`). Its exit status is the command's.
 
