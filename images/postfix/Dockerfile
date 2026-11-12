@@ -7,14 +7,15 @@
 # exactly CHOWN, DAC_OVERRIDE, FOWNER, SETUID and SETGID with
 # no-new-privileges (coordinator decision C14). Without SYS_CHROOT no
 # service can chroot, so every master.cf service runs with chroot = n; the
-# container is the boundary instead.
+# container is the boundary instead. Every RUN that needs no download runs
+# with --network=none (#59, as #55 did for olefy and SOGo).
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
 # Fixed ids, created before the package would pick its own (Debian picked
 # uid 100; coordinator decision C7): postfix 10025, postdrop 10026, and
 # keepia-auth 2525, the group of the edge's auth sockets that Postfix and
 # the edge Dovecot share (R-AUTH-SOCKET).
-RUN groupadd --system --gid 2525 keepia-auth \
+RUN --network=none groupadd --system --gid 2525 keepia-auth \
  && groupadd --system --gid 10025 postfix \
  && groupadd --system --gid 10026 postdrop \
  && useradd --system --uid 10025 --gid postfix --groups keepia-auth \
@@ -30,7 +31,7 @@ RUN --mount=type=bind,source=common/keepia-apt-install,target=/tmp/keepia-apt-in
 # the configuration names addresses: a fail-safe default, because Debian's
 # is every interface (R-BIND-PRIVATE; the Compose template's main.cf sets
 # the container's own addresses, #26).
-RUN postconf -F '*/*/chroot = n' \
+RUN --network=none postconf -F '*/*/chroot = n' \
  && postconf -e 'inet_interfaces = loopback-only' \
  && postconf -e 'maillog_file = /dev/stdout' \
  && postconf -e 'myhostname = localhost.invalid' \
