@@ -1,0 +1,37 @@
+version: "2"
+
+linters:
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - nilerr
+    - revive
+    - unconvert
+    - unparam
+  settings:
+    revive:
+      rules:
+        - name: exported
+  exclusions:
+    generated: strict
+    presets:
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters: [bodyclose, gosec, unparam]
+      # The pin check reads the workflow and action files under the root it
+      # is given: a path from its input is its purpose, not a traversal.
+      - path: ^tools/check-action-pins/main\.go$
+        linters: [gosec]
+        text: "G304|G703"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/keepia/mail

@@ -1,4 +1,16 @@
 GO        ?= go
+BIN       := bin/keepia-mail
+VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# PostgreSQL with CREATEDB for `make test`: every database test creates and
+# drops a database of its own (internal/store/storetest).
+TEST_DATABASE_URL ?= postgres://keepia:keepia@localhost:5432/keepia?sslmode=disable
+# golangci-lint version for `make lint`; CI's lint job names the same version
+# (.github/workflows/ci.yml). Dependabot cannot update `go install
+# pkg@version`, so bump both here by hand.
+GOLANGCI_LINT_VERSION := v2.14.0
+GOLANGCI_LINT := bin/golangci-lint-$(GOLANGCI_LINT_VERSION)/golangci-lint
+# govulncheck version for `make vuln`; bump it here by hand as well.
+GOVULNCHECK_VERSION := v1.8.0
 # gitleaks version for secret scanning. Dependabot cannot update
 # `go install pkg@version`, so bump it here by hand and rescan the full
 # history (`make secrets`) after a bump.
@@ -12,7 +24,39 @@ SECRETS_SOURCE ?= .
 ACTIONLINT_VERSION := v1.7.12
 ACTIONLINT := bin/actionlint-$(ACTIONLINT_VERSION)/actionlint
 
-.PHONY: secrets secrets-test links links-test workflows workflows-test
+.PHONY: build test test-unit lint vuln tidy secrets secrets-test links links-test workflows workflows-test
+
+## build: the keepia-mail binary in bin/
+build:
+	$(GO) build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN) ./cmd/keepia-mail
+
+## test: all tests, including the PostgreSQL tests (TEST_DATABASE_URL)
+test:
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" $(GO) test -race -shuffle=on -count=1 ./...
+
+## test-unit: the tests that need no database (the database tests skip)
+test-unit:
+	TEST_DATABASE_URL= $(GO) test -race -shuffle=on ./...
+
+# golangci-lint is built with the project's toolchain and verified through
+# the Go checksum database, like gitleaks.
+$(GOLANGCI_LINT):
+	GOTOOLCHAIN=$$($(GO) env GOVERSION) GOBIN=$(CURDIR)/$(dir $(GOLANGCI_LINT)) $(GO) install \
+		github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+## lint: golangci-lint with .golangci.yml (linters and gofmt/goimports)
+lint: $(GOLANGCI_LINT)
+	$(GOLANGCI_LINT) run
+
+## vuln: govulncheck on all packages (queries vuln.go.dev)
+# govulncheck must be built with the project's toolchain (see go.mod) to load
+# packages that require it.
+vuln:
+	GOTOOLCHAIN=$$($(GO) env GOVERSION) $(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+## tidy: go mod tidy
+tidy:
+	$(GO) mod tidy
 
 # gitleaks is built with the project's toolchain and verified through the Go
 # checksum database.

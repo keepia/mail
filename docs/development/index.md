@@ -1,8 +1,86 @@
 # Development
 
-This page grows with the code. For now it describes the checks that run on
-every pull request; setup, tests and migrations follow with the first Go
-code (#6).
+This page grows with the code. It describes the setup, the tests, the
+database migrations, the `km` wrapper and the checks that run on every pull
+request.
+
+## Setup
+
+- Go: the version in [`go.mod`](../../go.mod) (`toolchain`); with
+  `GOTOOLCHAIN=auto` (the default) an older Go downloads it.
+- PostgreSQL 18 with a role that may create databases (`CREATEDB`), for the
+  database tests. For example:
+
+  ```sh
+  docker run -d --rm --name keepia-test-pg -p 127.0.0.1:5432:5432 \
+    -e POSTGRES_USER=keepia -e POSTGRES_PASSWORD=keepia -e POSTGRES_DB=keepia \
+    mirror.gcr.io/library/postgres:18
+  ```
+
+```sh
+make build   # bin/keepia-mail
+```
+
+`keepia-mail` reads its configuration from the environment:
+
+| Variable | Default | Used by |
+|---|---|---|
+| `KEEPIA_DATABASE_URL` | none (required) | `serve`, `migrate`; holds the password and is never logged |
+| `KEEPIA_LISTEN` | `127.0.0.1:8080` | `serve` and `healthcheck`; flag `--listen` |
+| `KEEPIA_LOG_LEVEL` | `info` | `serve` (`debug`, `info`, `warn`, `error`) |
+
+Commands: `serve` (migrate, then answer `GET /healthz`), `migrate`,
+`migrate status`, `healthcheck` and `--version`.
+
+## Tests
+
+This is the test command the implementer and reviewer agents run:
+
+```sh
+make test       # all tests, -race -shuffle=on -count=1, with TEST_DATABASE_URL
+make test-unit  # the tests that need no database; the database tests skip
+make lint       # golangci-lint (.golangci.yml), version pinned in the Makefile
+make vuln       # govulncheck, version pinned in the Makefile
+```
+
+`make test` uses `TEST_DATABASE_URL` (default
+`postgres://keepia:keepia@localhost:5432/keepia?sslmode=disable`). Every
+database test creates a database of its own, `keepia_test_<hex>`, and drops
+it when it ends (`internal/store/storetest`). Without `TEST_DATABASE_URL`
+the database tests skip, except in CI (`CI` set): there they fail, so CI
+never passes with them skipped. Test rules: `.claude/rules/go-tests.md`.
+
+CI runs the jobs `test` (against a `postgres:18` service), `lint` and
+`vulncheck` on every pull request and every push to `main`.
+
+## Database migrations
+
+Migrations are SQL files for [goose](https://github.com/pressly/goose) in
+`internal/store/migrations/`, embedded in the binary. `00001_baseline.sql`
+is a no-op; the first tables come with the data model (#2).
+
+- `keepia-mail migrate` applies the pending migrations; `keepia-mail migrate
+  status` lists them.
+- `keepia-mail serve` applies them first and opens its listener only
+  afterwards, so a healthy `/healthz` also means the schema is current.
+- Two instances starting at once apply each version once: goose takes the
+  PostgreSQL advisory lock `4097083626` (goose's default lock id). It polls
+  every 5 s for up to 5 minutes; after that `serve` and `migrate` exit 1
+  with an error naming the lock, and `serve` never listens.
+- Never edit a migration that is on `main`; add a new one. `Down` must work
+  and is tested. Rules: `.claude/rules/migrations.md`.
+
+## Wrapper
+
+`km` runs `keepia-mail` commands through Docker Compose, for example
+`./km migrate`. It starts the Compose service `postgres` (`docker compose up
+-d --wait postgres`), then runs the command in a one-off container of the
+service `keepia`, whose entrypoint is `keepia-mail` (`docker compose run
+--rm -T keepia …`), with `--build` when a `Dockerfile` lies next to it. Its
+exit status is the command's. That is the contract the Compose template of
+#5 meets; the image's health probe is `keepia-mail healthcheck` (exit 0 when
+`/healthz` answers 200), because the image has no curl. The tests use a fake
+`docker` (`cmd/keepia-mail/km_test.go`).
 
 ## Security checks
 
