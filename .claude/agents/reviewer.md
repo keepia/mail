@@ -27,7 +27,7 @@ Read the PR, its diff and the changed files in full. Look for: plan fidelity, da
    3. A routing or store failure delays mail and never bounces or misdelivers it.
    4. Secrets and keys stay protected.
    5. Deletion and retention affect only the intended data.
-5. **Workflow checks.** Read the output of the `workflows` and `links` checks first (the CI jobs, or `make workflows links` on the head). Give every finding an outcome: fixed, or not affected (reason). A red, missing or skipped check is not a pass. A change to `.github/workflows/` or `tools/check-action-pins/` carries `second-review`; check that the label is there.
+5. **Workflow checks.** Read the output of the `workflows` and `links` checks first (the CI jobs, or `make workflows links` on the head). Give every finding an outcome: fixed, or not affected (reason). A red, missing or skipped check is not a pass. A change to `.github/workflows/`, `tools/check-action-pins/`, the Makefile's `workflows`/`workflows-test` targets, or the `go.yaml.in/yaml/v3` line in `go.mod` carries `second-review`; check that the label is there.
 
 ## Checks
 State the verified head SHA. Read CI status once (don't watch). Run the tests of the changed code (the test command in `docs/development/index.md` from #6; before that, the `make` targets the plan names). Apply at least one counter-proof of your own; for a regression test, show it fails without the fix. For a start-file change, check that the body states the sizes.

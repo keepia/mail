@@ -55,9 +55,10 @@ every local action (`uses: ./path`) that a checked file names. Its rules:
   (`- {uses: …}`, `steps: [{uses: …}]`) is reported, also when it is pinned:
   in flow style the parser does not reliably attach the trailing comment to
   the value, so the version comment cannot be read there.
-- The value is a plain string: an alias (`uses: *x`), a block scalar
-  (`>-`, `|`), another tag than `!!str`, an empty value, a mapping or a
-  sequence is reported. The value may sit on the next line.
+- The value must be a single-line string, plain or quoted. An alias
+  (`uses: *x`), a block scalar (`>-`, `|`), another tag than `!!str`, an
+  empty value, a mapping or a sequence is reported. The value may sit on
+  the next line.
 - The version comment is the value's own line comment: a real YAML comment
   after the value on its line. `# v7.0.1` inside a quoted value, on the key's
   line above the value, or on the next line does not count.
