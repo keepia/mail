@@ -246,7 +246,10 @@ profile each (architecture section 7); with
 `COMPOSE_PROFILES=control,edge,store,filter,groupware` it is the template
 "all roles on one server": 14 containers, plus the one-shot
 `edge-addresses`, which exits once it has checked the edge addresses. It
-needs Docker Engine 28 or later (the gateway mode `isolated`).
+needs Docker Engine 28 or later (the gateway mode `isolated`): Engine 27
+refuses to create the networks, and 26 or older creates them without the
+isolation, silently. [Architecture section 7](architecture.md#7-docker)
+has the check to run.
 
 ```sh
 cp .env.example .env              # then set KEEPIA_POSTGRES_PASSWORD and the edge addresses
@@ -265,11 +268,18 @@ docker compose up -d --wait --no-build --pull never
 
 - **Only port 25 is published**, to `EDGE_IPV4` and `EDGE_IPV6`; outbound
   mail is SNATed to them. A wildcard there (`0.0.0.0`, `::` or another
-  spelling of them) is refused: `edge-addresses` runs
-  [`deploy/edge/check-edge-addresses.sh`](../../deploy/edge/check-edge-addresses.sh)
-  first, and `edge-postfix` starts only after it exited 0. The check is a
-  Compose service and not part of `km`, because `km` never starts the
-  edge role; every start of the template goes through Compose.
+  spelling of them) is refused by
+  [`deploy/edge/check-edge-addresses.sh`](../../deploy/edge/check-edge-addresses.sh),
+  in two places. On `up`, the one-shot `edge-addresses` runs it, and
+  `edge-postfix` starts only after it exited 0, so a refused `up`
+  publishes nothing; it leaves `edge-postfix` Created with the wildcard
+  in its port bindings. A start that skips that dependency (`docker
+  compose restart`, `docker start`, `up --no-deps`) reaches the second
+  place, `edge-postfix`'s own entrypoint, which exits 1 before Postfix
+  runs. Docker binds the port for that moment (and for each restart
+  attempt), but nothing listens on it. After a refusal, fix `.env`, then
+  run `docker compose rm -f edge-postfix` and `up` again. The check is in
+  Compose and not in `km`, because `km` never starts the edge role.
 - **The host cannot reach the internal networks:** their bridges use the
   gateway mode `isolated` and have no host address, so host processes
   cannot reach memcached, olefy, clamd or rspamd (no authentication), and
@@ -313,11 +323,13 @@ docker compose up -d --wait --no-build --pull never
 [`scripts/compose-test.sh`](../../scripts/compose-test.sh) starts the
 template (`up -d --wait --no-build --pull never`) and checks it. First, a
 start with `EDGE_IPV4=0.0.0.0` and then `EDGE_IPV6=::` must fail in
-`edge-addresses` without `edge-postfix` ever running (test 14). Then:
+`edge-addresses` without `edge-postfix` ever running, and a `docker
+start` of the `edge-postfix` that the refusal left behind must exit 1 on
+its own check, before Postfix (test 14). Then:
 exactly the 14 containers, each with a healthcheck and healthy, the guard
 exited 0, and an olefy scan (test 6); every listening socket either on
-loopback or exactly one of the container's planned listeners (address and
-port), each planned one present, none on 8080/9090 in Dovecot, read by a
+loopback or exactly one of the container's planned listeners (protocol,
+address and port), each planned one present, none on 8080/9090 in Dovecot, read by a
 helper container in the container's network namespace (test 8); the
 networks, their gateway mode `isolated`, no host address in them, no host
 reach to rspamd, clamd, olefy or memcached while a container on the

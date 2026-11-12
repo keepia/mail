@@ -1,8 +1,14 @@
 # Keepia Mail: refuses edge addresses that would publish port 25 on every
-# interface (#61). The Compose service edge-addresses runs it before
-# edge-postfix starts (depends_on: service_completed_successfully), so a
-# wildcard in EDGE_IPV4 or EDGE_IPV6 stops the start of the edge role
-# before anything is published.
+# interface (#61). It runs in two places:
+# - as the one-shot Compose service edge-addresses, which edge-postfix
+#   depends on (service_completed_successfully): on `up`, a wildcard in
+#   EDGE_IPV4 or EDGE_IPV6 stops the edge role before edge-postfix starts,
+#   so nothing is published;
+# - as edge-postfix's own first step, with Postfix's command as its
+#   arguments: it runs them (exec) only if the addresses pass. A start that
+#   skips the dependency (`restart`, `docker start`, `up --no-deps`) after
+#   a refused `up` exits 1 before Postfix runs. Docker publishes the port
+#   for that moment, but nothing listens on it.
 #
 # It accepts exactly one form per family and refuses the rest:
 # - EDGE_IPV4: a dotted quad (four decimal octets, no leading zeros, each
@@ -16,7 +22,7 @@
 # it into the documentation address); it is refused all the same.
 #
 # Only shell builtins: the Dovecot image it runs in has no coreutils.
-# Usage: EDGE_IPV4=<a> EDGE_IPV6=<b> sh check-edge-addresses.sh
+# Usage: EDGE_IPV4=<a> EDGE_IPV6=<b> sh check-edge-addresses.sh [command...]
 set -eu
 
 bad=0
@@ -167,3 +173,6 @@ if [ "$bad" != 0 ]; then
 	exit 1
 fi
 echo "keepia: edge addresses $v4 and $v6"
+if [ "$#" -gt 0 ]; then
+	exec "$@"
+fi

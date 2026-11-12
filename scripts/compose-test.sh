@@ -12,7 +12,9 @@
 # 14  wildcard edge addresses (first, before the template starts): with
 #     EDGE_IPV4=0.0.0.0, and then EDGE_IPV6=::, starting edge-postfix
 #     fails, the guard edge-addresses names the variable, and edge-postfix
-#     never runs (#61). The partial start is removed again.
+#     never runs (#61). A `docker start` of the edge-postfix left behind
+#     (the guard's bypass) must exit 1 on edge-postfix's own check, before
+#     Postfix runs. The partial start is removed again.
 #  6  containers and health: the project's containers are exactly the 14
 #     expected services, one each, plus the one-shot guard edge-addresses,
 #     which exited 0; every one of the 14 has a healthcheck and is
@@ -22,8 +24,8 @@
 #     UDP socket of every container (/proc/net/{tcp,tcp6,udp,udp6}, read
 #     by a helper container in the container's network namespace; a
 #     missing file is tolerated) is either on loopback or exactly one of
-#     the container's planned listeners (address and port, want_listen
-#     below), and every planned listener is there; so a bind on another of
+#     the container's planned listeners (protocol, address and port,
+#     want_listen below), and every planned listener is there; so a bind on another of
 #     the container's own addresses fails too (#61). Dovecot has nothing on
 #     8080 or 9090.
 #  9  networks: every network but edge-public is internal, with the gateway
@@ -110,26 +112,27 @@ declare -A want_networks=(
 	[groupware-memcached]="groupware-private"
 )
 
-# The listeners each container has besides loopback (test 8): <network>:
-# <port> is the container's IPv4 address on that network, <network>/6:
-# <port> its IPv6 address. TCP and UDP count alike (Unbound has both on
-# 53). Exactly these, so a listener on another of the container's own
-# addresses (rspamd on filter-olefy) fails.
+# The listeners each container has besides loopback (test 8):
+# <tcp|udp>:<network>:<port>, where <network> is the container's IPv4
+# address on that network and <network>/6 its IPv6 address. Exactly these,
+# so a listener on another of the container's own addresses (rspamd on
+# filter-olefy), a UDP socket on a TCP port (memcached without -U 0), or
+# an Unbound that lost TCP 53 fails.
 declare -A want_listen=(
-	[keepia]="control-private:8080"
-	[postgres]="control-private:5432"
-	[valkey]="control-private:6379"
-	[control-unbound]="control-private:53"
-	[edge-postfix]="edge-private:25 edge-public:25 edge-public/6:25"
-	[edge-dovecot]="edge-private:24 edge-private:143"
-	[edge-unbound]="edge-private:53"
-	[store-dovecot]="store-private:24 store-private:143"
-	[filter-rspamd]="filter-private:11332 filter-private:11333"
-	[filter-clamd]="filter-private:3310"
-	[filter-olefy]="filter-olefy:10050"
-	[filter-unbound]="filter-private:53"
-	[groupware-sogo]="groupware-private:20000"
-	[groupware-memcached]="groupware-private:11211"
+	[keepia]="tcp:control-private:8080"
+	[postgres]="tcp:control-private:5432"
+	[valkey]="tcp:control-private:6379"
+	[control-unbound]="tcp:control-private:53 udp:control-private:53"
+	[edge-postfix]="tcp:edge-private:25 tcp:edge-public:25 tcp:edge-public/6:25"
+	[edge-dovecot]="tcp:edge-private:24 tcp:edge-private:143"
+	[edge-unbound]="tcp:edge-private:53 udp:edge-private:53"
+	[store-dovecot]="tcp:store-private:24 tcp:store-private:143"
+	[filter-rspamd]="tcp:filter-private:11332 tcp:filter-private:11333"
+	[filter-clamd]="tcp:filter-private:3310"
+	[filter-olefy]="tcp:filter-olefy:10050"
+	[filter-unbound]="tcp:filter-private:53 udp:filter-private:53"
+	[groupware-sogo]="tcp:groupware-private:20000"
+	[groupware-memcached]="tcp:groupware-private:11211"
 )
 
 # The one-shot services: each runs once per start and must exit 0.
@@ -189,8 +192,9 @@ tcp_open() {
 # ---- test 14: wildcard edge addresses -------------------------------------
 
 # Before the template starts: a start of edge-postfix with a wildcard edge
-# address must fail in the guard, and edge-postfix must never run. Then
-# the partial start is removed.
+# address must fail in the guard, and edge-postfix must never run; a
+# direct start of that edge-postfix must fail in its own check. Then the
+# partial start is removed.
 echo "---- test 14: wildcard edge addresses are refused"
 for wildcard in EDGE_IPV4=0.0.0.0 EDGE_IPV6=::; do
 	var=${wildcard%%=*}
@@ -207,6 +211,23 @@ for wildcard in EDGE_IPV4=0.0.0.0 EDGE_IPV6=::; do
 		pass "test 14: $wildcard refused, edge-postfix never ran ($state): $(grep -m1 "$var" <<<"$guard")"
 	else
 		fail "test 14: $wildcard: up exited $rc, edge-postfix is $state, guard: $(tr '\n' ' ' <<<"$guard" | cut -c1-300); up: $(tr '\n' ' ' <<<"$out" | tail -c 300)"
+	fi
+	# The bypass: start the edge-postfix the refusal left Created directly,
+	# as `docker compose restart` or `docker start` would, without the
+	# dependency. Its own entrypoint check must end it with exit 1 before
+	# Postfix runs. The signal is its first "die" event, read with a
+	# timeout; a Postfix that runs gives none.
+	if [ -n "$c" ]; then
+		since=$(date +%s)
+		docker start "$c" >/dev/null 2>&1 || true
+		code=$(timeout 60 docker events --since "$since" --filter "container=$c" --filter event=die \
+			--format '{{index .Actor.Attributes "exitCode"}}' | head -n 1) || true
+		logs=$(docker logs "$c" 2>&1 || true)
+		if [ "$code" = 1 ] && [[ $logs == *"keepia: $var='${wildcard#*=}'"* ]] && [[ $logs != *"starting the Postfix"* ]]; then
+			pass "test 14: $wildcard: a docker start of that edge-postfix exits 1 on its own check, before Postfix: $(grep -m1 "$var" <<<"$logs")"
+		else
+			fail "test 14: $wildcard: a docker start of that edge-postfix gave exit '${code:-none within 60 s}', log: $(tr '\n' ' ' <<<"$logs" | tail -c 300)"
+		fi
 	fi
 	timeout 120 docker compose down --volumes --timeout 10 2>&1 | tail -n 3 || true
 done
@@ -361,22 +382,23 @@ listeners() {
 	done <<<"$tables"
 }
 
-# planned_listeners <service>: "<address>:<port>" per planned listener
-# (want_listen), the IPv6 address in full form, from the template.
+# planned_listeners <service>: "<tcp|udp>:<address>:<port>" per planned
+# listener (want_listen), the IPv6 address in full form, from the template.
 planned_listeners() {
-	local s=$1 l net port fam a
+	local s=$1 l proto net port fam a
 	for l in ${want_listen[$s]}; do
-		net=${l%:*} port=${l##*:} fam=ipv4_address
+		IFS=: read -r proto net port <<<"$l"
+		fam=ipv4_address
 		if [[ $net == */6 ]]; then
 			net=${net%/6} fam=ipv6_address
 		fi
 		a=$(jq -r --arg s "$s" --arg n "$net" --arg f "$fam" '.services[$s].networks[$n][$f] // ""' <<<"$config")
 		[ "$fam" = ipv6_address ] && [ -n "$a" ] && a=$(full6 "$a")
-		echo "${a:-<no $fam on $net>}:$port"
+		echo "$proto:${a:-<no $fam on $net>}:$port"
 	done
 }
 
-echo "---- test 8: listeners (R-BIND-PRIVATE, one planned address per listener)"
+echo "---- test 8: listeners (R-BIND-PRIVATE, one planned protocol and address per listener)"
 loop6=$(full6 ::1)
 for s in "${expected_services[@]}"; do
 	c=$(container "$s")
@@ -413,10 +435,12 @@ for s in "${expected_services[@]}"; do
 			continue
 			;;
 		esac
-		if [[ " ${planned[*]} " == *" $addr:$port "* ]]; then
-			seen+="$addr:$port "
+		# tcp6/udp6 are the same protocols as tcp/udp.
+		key="${proto%6}:$addr:$port"
+		if [[ " ${planned[*]} " == *" $key "* ]]; then
+			seen+="$key "
 		else
-			fail "test 8: $s listens on $proto $addr:$port, which is not one of its planned listeners [${planned[*]}] nor loopback"
+			fail "test 8: $s listens on $key, which is not one of its planned listeners [${planned[*]}] nor loopback"
 			bad=$((bad + 1))
 		fi
 	done <<<"$socks"

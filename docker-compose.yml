@@ -10,7 +10,9 @@
 # with ./km; without --pull never, Compose would pull a missing own image's
 # mutable tag). The upstream images are pinned by digest
 # (tools/check-image-pins). Needs Docker Engine 28 or later (the internal
-# networks' gateway mode isolated).
+# networks' gateway mode isolated): Engine 27 refuses to create the
+# networks, and 26 or older creates them WITHOUT the isolation, silently.
+# Check the version and the result as architecture section 7 shows.
 #
 # Every container:
 # - drops every capability and runs with no-new-privileges; only Postfix
@@ -184,9 +186,11 @@ services:
 
   # Refuses an edge address that means every interface (0.0.0.0, :: and
   # their other spellings; deploy/edge/check-edge-addresses.sh, #61). It
-  # runs once on every `up`; edge-postfix starts, and publishes port 25,
-  # only after it exited 0. In the Dovecot image the edge role pulls
-  # anyway, with no network.
+  # runs once on every `up`; there, edge-postfix starts, and publishes port
+  # 25, only after it exited 0. In the Dovecot image the edge role pulls
+  # anyway, with no network. A start that skips the dependency (`restart`,
+  # `docker start`, `up --no-deps`) does not run it; edge-postfix's own
+  # first step does (below).
   edge-addresses:
     <<: *service
     profiles: [edge]
@@ -222,17 +226,29 @@ services:
     mem_limit: 128m
     # The master and its services, each up to default_process_limit (100).
     pids_limit: 512
+    # The image's entrypoint and command, with the edge address check as
+    # the first step: with a wildcard the container exits 1 before Postfix
+    # runs, however it was started (#61). The check sees the addresses this
+    # container was created with, the same ones as its port bindings.
+    entrypoint: ["/usr/bin/tini", "--", "sh", "/etc/keepia/check-edge-addresses.sh", "/usr/local/bin/keepia-reload-watch"]
+    command: ["postfix", "start-fg"]
     environment:
       KEEPIA_HEALTH_ADDR: ${KEEPIA_SUBNET4:-172.29}.2.10
+      EDGE_IPV4: ${EDGE_IPV4:-192.0.2.10}
+      EDGE_IPV6: ${EDGE_IPV6:-2001:db8::10}
     configs:
       - source: edge-postfix-main
         target: /etc/postfix/main.cf
+      - source: edge-addresses
+        target: /etc/keepia/check-edge-addresses.sh
     volumes:
       - postfix-spool:/var/spool/postfix
     # Only to the edge addresses. Unset, they are documentation addresses
     # (RFC 5737, RFC 3849) that no host has, so nothing is published by
-    # accident; a wildcard is refused by edge-addresses, so never on every
-    # interface.
+    # accident. A wildcard is refused on `up` by edge-addresses before
+    # anything is published; a start that skips it ends in the check above,
+    # so Postfix never runs with one. After a refusal: fix .env, then
+    # `docker compose rm -f edge-postfix` and `up` again.
     depends_on:
       edge-addresses:
         condition: service_completed_successfully

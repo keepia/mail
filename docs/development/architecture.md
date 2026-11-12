@@ -907,6 +907,37 @@ the groupware listeners to the same test.
   matches PTR and SPF. The bridge's SNAT address is set with Docker's
   `com.docker.network.host_ipv4` option (upstream); #5 verifies the IPv6
   equivalent (predicted).
+- **Docker Engine 28 or later** (gateway mode `isolated` on the internal
+  networks, #61). Every internal network sets
+  `com.docker.network.bridge.gateway_mode_ipv4/ipv6: isolated`, so its
+  bridge has no address on the host: host processes cannot reach the
+  services without authentication (memcached, olefy, clamd, rspamd), and
+  containers cannot reach host services through the bridge. By Engine
+  version (measured in the reviews of PR #65):
+  - **28 and later** isolate.
+  - **27.x** refuses to create the networks (`unknown gateway mode
+    isolated`, measured on 27.5.1): the template does not start, so it
+    fails closed.
+  - **26.x and older** create the networks and ignore the option
+    silently (measured on 26.1.4): `docker network inspect` even shows
+    `isolated`, but the bridge keeps its host address and the host
+    reaches memcached. That fails open. Treat any Engine below 28 as
+    unsupported.
+
+  The check before and after the first start, with the default subnets
+  (`KEEPIA_SUBNET4`/`KEEPIA_SUBNET6`):
+
+  ```sh
+  docker version --format '{{.Server.Version}}'    # 28.0.0 or later
+  docker network inspect -f '{{index .Options "com.docker.network.bridge.gateway_mode_ipv4"}} {{index .Options "com.docker.network.bridge.gateway_mode_ipv6"}}' keepia-mail_filter-private    # isolated isolated
+  ip -o addr show | grep -E ' (172\.29\.|fd7c:3b9e:5a21:)'    # nothing
+  ```
+
+  The last line is the one that decides: an older Engine passes the
+  second. Neither Compose nor the template can check the Engine version
+  at run time, and `km` starts only `postgres` and `keepia`, never the
+  template, so there is no run-time refusal; the CI `compose` job checks all three conditions
+  (test 9).
 - **Logs:** containers log to stdout. The `journald` log driver is required,
   with the host's journald retention at 30 days, which the operator sets
   (logs are kept at most 30 days, #2 scope; [coordinator decision T7][cd]).
@@ -1033,7 +1064,9 @@ control 768 MiB, edge 640 MiB, store 512 MiB, filter 3840 MiB, groupware
   and is not counted. Measured idle, the 14 use about 1.2
   GiB (1189 MiB), 956 MiB of it clamd ([#26][c26]); CPU is 0.00–0.16 %
   per container. **Minimum server: 8 GiB RAM, 2 vCPU; recommended 4
-  vCPU** (predicted from the limits). Disk: the images of the template,
+  vCPU** (predicted from the limits), **with Docker Engine 28 or later**
+  (section 7: below 28 the internal networks either fail to start or,
+  on 26 and older, are not isolated from the host). Disk: the images of the template,
   measured ([#26][c26]; Docker's image size on the CI runner): Postgres
   456 MB, ClamAV 338 MB (with its signatures), SOGo 302 MB, rspamd 204
   MB, Dovecot 182 MB, olefy 170 MB, Postfix 125 MB, Valkey 116 MB,

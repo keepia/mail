@@ -113,6 +113,32 @@ else
 	failed=$((failed + 1))
 fi
 
+# As edge-postfix's first step: the command runs (exec, with its
+# arguments intact) only when the addresses pass.
+n=$((n + 1))
+out=$(EDGE_IPV4=$good4 EDGE_IPV6=$good6 sh "$guard" sh -c 'echo "ran: $0 [$1]"' a "b c" 2>&1) && rc=0 || rc=$?
+case "$rc:$out" in
+0:*"ran: a [b c]"*) echo "ok   command runs after a pass, with its arguments" ;;
+*)
+	echo "FAIL command after a pass: exit $rc: $out" >&2
+	failed=$((failed + 1))
+	;;
+esac
+for wildcard in "0.0.0.0 $good6" "$good4 ::"; do
+	n=$((n + 1))
+	# shellcheck disable=SC2086 # two words: the two addresses
+	set -- $wildcard
+	out=$(EDGE_IPV4=$1 EDGE_IPV6=$2 sh "$guard" sh -c 'echo COMMAND-RAN' 2>&1) && rc=0 || rc=$?
+	case "$rc:$out" in
+	1:*COMMAND-RAN*) echo "FAIL $wildcard: refused but the command ran: $out" >&2 && failed=$((failed + 1)) ;;
+	1:*) echo "ok   command does not run after a refusal ($wildcard)" ;;
+	*)
+		echo "FAIL command after a refusal ($wildcard): exit $rc: $out" >&2
+		failed=$((failed + 1))
+		;;
+	esac
+done
+
 if [ "$failed" != 0 ]; then
 	echo "FAIL check-edge-addresses-test: $failed of $n failed" >&2
 	exit 1
