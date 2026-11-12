@@ -329,7 +329,7 @@ services:
   filter-clamd:
     <<: *service
     profiles: [filter]
-    image: clamav/clamav-debian:1.4.6@sha256:aedee9daad6b069b26adad61af7ec50a41efe33fd8eff7f985c1f31e3a6ae9de
+    image: clamav/clamav-debian:1.5.3@sha256:741e6c447241220e0792a901befcaec1d55a755c5097fc9cd88d7fd8be251a5c
     user: "1000:1000"
     # clamd itself, not the image's root /init (#5 plan, C3); the
     # signatures are in the image, freshclam comes with 0.3.0.
