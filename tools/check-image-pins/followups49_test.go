@@ -26,7 +26,7 @@ func TestBuildCommands49(t *testing.T) {
 		{"await exec.exec('docker', [\n  'buildx',\n  'bake',\n])", []string{"buildx bake"}},
 		{"docker compose up -d", []string{"docker compose up without --no-build"}},
 		{"docker compose create", []string{"docker compose create without --no-build"}},
-		{"docker compose run --rm a true", []string{"docker compose run without --no-build"}},
+		{"docker compose run --rm a true", []string{"docker compose run, which builds and has no --no-build (use up -d --no-build and exec)"}},
 		{"docker-compose up -d", []string{"docker-compose up without --no-build"}},
 		{"docker compose up --build=true -d", []string{"docker compose up --build"}},
 		{"docker compose up --no-build -d", nil},

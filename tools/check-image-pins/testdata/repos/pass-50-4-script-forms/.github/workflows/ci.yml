@@ -1,0 +1,27 @@
+# #50 review A finding 2a/2b and review B note 4: forms ae164e4 reported
+# as scripts it cannot resolve, in a job that builds. A combined shell
+# flag that takes a value (-euo pipefail), Python read from stdin
+# (python3 -), a Python script whose words are not commands, and a
+# composite action that runs its own script through $GITHUB_ACTION_PATH
+# and ${{ github.action_path }}.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: postfix
+      PLATFORM: linux/amd64
+    steps:
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+      - run: bash -euo pipefail scripts/hello.sh
+      - run: python3 - "$RUNNER_TEMP/out.txt" < scripts/hello.sh
+      - run: python3 scripts/report.py
+      - uses: ./.github/actions/hello

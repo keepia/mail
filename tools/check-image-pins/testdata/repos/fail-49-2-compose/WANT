@@ -1,5 +1,6 @@
 job compose: step 1 runs "docker compose up without --no-build"
 job compose: step 2 runs "docker compose create without --no-build"
-job compose: step 3 runs "docker compose run without --no-build"
+job compose: step 3 runs "docker compose run, which builds and has no --no-build (use up -d --no-build and exec)"
 job compose: step 4 runs "docker compose up --build"
 job compose: step 5 runs "docker-compose up without --no-build"
+job compose: step 6 runs "docker compose run, which builds and has no --no-build (use up -d --no-build and exec)"

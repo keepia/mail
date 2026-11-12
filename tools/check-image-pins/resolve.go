@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path"
@@ -45,6 +46,7 @@ var (
 	cwdPrefix       = regexp.MustCompile(`\$\{PWD\}|\$PWD\b|\$\(pwd\)`)
 	scriptDirExpr   = `\$\(dirname\s+(?:--\s+)?"?\$\{?(?:0|BASH_SOURCE(?:\[0\])?)\}?"?\s*\)|\$\{(?:0|BASH_SOURCE(?:\[0\])?)%/\*\}`
 	scriptDirPrefix = regexp.MustCompile(`\$\(cd\s+(?:--\s+)?"?(?:` + scriptDirExpr + `)"?\s*&&\s*pwd(?:\s+-P)?\s*\)|` + scriptDirExpr)
+	actionPath      = regexp.MustCompile(`\$\{\{\s*github\.action_path\s*\}\}|\$\{GITHUB_ACTION_PATH\}|\$GITHUB_ACTION_PATH\b`)
 	markNames       = strings.NewReplacer(rootMark, "$GITHUB_WORKSPACE", dirMark, `$(dirname "$0")`)
 )
 
@@ -80,6 +82,8 @@ type refWalk struct {
 	problems []string
 	src      map[string]string // followed file → its text
 	scanned  map[string]bool   // file → its commands were read
+	ran      map[string]bool   // file → a command runs it
+	binary   map[string]bool   // file → not text
 	queue    []refItem
 }
 
@@ -88,7 +92,7 @@ type refWalk struct {
 // workdir is the step's working-directory ("" for none); shell is false
 // for a text that is not shell (actions/github-script).
 func referencedTexts(root, text, workdir string, shell bool) ([]refText, []string) {
-	w := &refWalk{root: root, src: map[string]string{}, scanned: map[string]bool{}}
+	w := &refWalk{root: root, src: map[string]string{}, scanned: map[string]bool{}, ran: map[string]bool{}, binary: map[string]bool{}}
 	dirs := []string{root}
 	if workdir != "" {
 		if d, ok := w.dir(workdir, dirs, ""); ok {
@@ -132,7 +136,7 @@ func (w *refWalk) run() {
 		}
 		for _, word := range shellSplit.Split(shellQuoting.Replace(text), -1) {
 			for _, p := range w.existing(word, dirs, it.file) {
-				w.follow(p, false, dirs, it.depth)
+				w.follow(p, false, false, dirs, it.depth)
 			}
 		}
 		if it.shell {
@@ -193,21 +197,25 @@ func targets(p string) ([]string, bool) {
 }
 
 // existing returns the files a word names, if any (words that name
-// nothing are arguments, not files).
+// nothing are arguments, not files). A relative word names a file in
+// every directory it may run in (the root, a working-directory, a cd
+// target), and all of them are returned: the check cannot tell which
+// one the shell reaches (#50 review B, finding 2).
 func (w *refWalk) existing(word string, dirs []string, file string) []string {
 	if strings.HasPrefix(word, "-") || strings.Contains(word, "=") {
 		return nil
 	}
 	cands, _ := w.candidates(word, dirs, file)
+	var out []string
 	for _, c := range cands {
 		if !w.inRoot(c) {
 			continue
 		}
 		if t, ok := targets(c); ok {
-			return t
+			out = append(out, t...)
 		}
 	}
-	return nil
+	return out
 }
 
 // dir resolves a directory word (a working-directory, a cd target).
@@ -254,8 +262,10 @@ func isActionFile(p string) bool {
 }
 
 // follow adds a file: its text, and the item that resolves what it runs
-// or names. script is set when a command runs it.
-func (w *refWalk) follow(p string, script bool, dirs []string, depth int) {
+// or names. script is set when a command runs it, and shell when its
+// commands are read as shell. A file that is not text (a binary) is not
+// read; running one is a problem (#50 review A, finding 2e).
+func (w *refWalk) follow(p string, script, shell bool, dirs []string, depth int) {
 	p = filepath.Clean(p)
 	rel := filepath.ToSlash(mustRel(w.root, p))
 	if _, seen := w.src[p]; !seen {
@@ -269,23 +279,41 @@ func (w *refWalk) follow(p string, script bool, dirs []string, depth int) {
 			w.out = append(w.out, refText{rel, err.Error(), false})
 			return
 		}
+		if bytes.IndexByte(src[:min(len(src), 8000)], 0) >= 0 {
+			w.src[p] = ""
+			w.binary[p] = true
+			if script {
+				w.problem("it runs %s, a binary the check cannot read", rel)
+			}
+			return
+		}
 		w.src[p] = string(src)
 		if isActionFile(p) {
 			w.action(p, src, depth)
 			return
 		}
 		w.out = append(w.out, refText{rel, string(src), script})
-		w.scanned[p] = script
-		w.queue = append(w.queue, refItem{text: string(src), dirs: dirs, file: p, shell: script, depth: depth})
+		w.scanned[p] = script && shell
+		w.queue = append(w.queue, refItem{text: string(src), dirs: dirs, file: p, shell: script && shell, depth: depth})
+		if script {
+			w.ran[p] = true
+		}
 		return
 	}
-	if script && !w.scanned[p] && !isActionFile(p) {
-		w.scanned[p] = true
+	if script && w.binary[p] {
+		w.problem("it runs %s, a binary the check cannot read", rel)
+		return
+	}
+	if script && !w.ran[p] {
+		w.ran[p] = true
 		for i := range w.out {
 			if w.out[i].path == rel {
 				w.out[i].exec = true
 			}
 		}
+	}
+	if script && shell && !w.scanned[p] && !isActionFile(p) {
+		w.scanned[p] = true
 		w.queue = append(w.queue, refItem{text: w.src[p], dirs: dirs, file: p, shell: true, depth: depth})
 	}
 }
@@ -315,7 +343,7 @@ func (w *refWalk) action(p string, src []byte, depth int) {
 	dirs := []string{w.root}
 	for _, f := range []string{a.Runs.Main, a.Runs.Pre, a.Runs.Post} {
 		if f != "" {
-			w.follow(filepath.Join(filepath.Dir(p), filepath.FromSlash(f)), false, dirs, depth)
+			w.follow(filepath.Join(filepath.Dir(p), filepath.FromSlash(f)), false, false, dirs, depth)
 		}
 	}
 	for _, step := range a.Runs.Steps {
@@ -327,13 +355,17 @@ func (w *refWalk) action(p string, src []byte, depth int) {
 				w.problem("%s: working-directory %q is not a directory the check can resolve", rel, wd)
 			}
 		}
+		// $GITHUB_ACTION_PATH and ${{ github.action_path }} are the
+		// action's own directory: dirMark, with p as the file.
 		if run, ok := step["run"].(string); ok {
+			run = actionPath.ReplaceAllString(run, dirMark)
 			w.out = append(w.out, refText{rel, run, true})
-			w.queue = append(w.queue, refItem{text: run, dirs: stepDirs, shell: true, depth: depth})
+			w.queue = append(w.queue, refItem{text: run, dirs: stepDirs, file: p, shell: true, depth: depth})
 		}
 		if script := githubScript(step); script != "" {
+			script = actionPath.ReplaceAllString(script, dirMark)
 			w.out = append(w.out, refText{rel, script, true})
-			w.queue = append(w.queue, refItem{text: script, dirs: stepDirs, depth: depth})
+			w.queue = append(w.queue, refItem{text: script, dirs: stepDirs, file: p, depth: depth})
 		}
 		if uses, _ := step["uses"].(string); strings.HasPrefix(uses, "./") {
 			w.localAction(uses, depth)
@@ -346,7 +378,7 @@ func (w *refWalk) localAction(uses string, depth int) {
 	d := filepath.Join(w.root, filepath.FromSlash(strings.TrimSuffix(strings.TrimPrefix(uses, "./"), "/")))
 	if t, _ := targets(d); w.inRoot(d) && len(t) > 0 {
 		for _, p := range t {
-			w.follow(p, false, []string{w.root}, depth)
+			w.follow(p, false, false, []string{w.root}, depth)
 		}
 		return
 	}
@@ -417,46 +449,83 @@ func dropRedirects(words []string) []string {
 // commandTarget returns what a command runs: the script file it names
 // (script), an inline command (inline, shell or not), or make's
 // arguments (isMake).
-func commandTarget(words []string) (script, inline string, inlineShell bool, makeArgs []string, isMake bool) {
+func commandTarget(words []string) (script string, lang int, inline string, inlineShell bool, makeArgs []string, isMake bool) {
 	words = dropRedirects(words)
 	i := commandStart(words)
 	if i >= len(words) {
-		return "", "", false, nil, false
+		return "", 0, "", false, nil, false
 	}
 	w0, base := words[i], path.Base(words[i])
 	switch base {
 	case "eval":
-		return "", strings.Join(words[i+1:], " "), true, nil, false
+		return "", 0, strings.Join(words[i+1:], " "), true, nil, false
 	case "make", "gmake":
-		return "", "", false, words[i+1:], true
+		return "", 0, "", false, words[i+1:], true
 	}
 	name := base
 	if a, ok := interpAlias[name]; ok {
 		name = a
 	}
 	if in, ok := interpreters[name]; ok {
+		lang := langOther
+		if in.shell || name == "source" || name == "." {
+			lang = langShell
+		}
 		for j := i + 1; j < len(words); j++ {
 			a := words[j]
 			switch {
+			case a == "-":
+				return "", 0, "", false, nil, false // the program comes from stdin
 			case in.inline[a] || (in.inlineDash && len(a) > 2 && a[0] == '-' && a[1] != '-' && strings.HasSuffix(a, "c")):
 				if j+1 < len(words) {
-					return "", words[j+1], in.shell, nil, false
+					return "", 0, words[j+1], in.shell, nil, false
 				}
-				return "", "", false, nil, false
-			case in.values[a]:
-				j++
+				return "", 0, "", false, nil, false
+			case in.values[a] || (in.shell && len(a) > 2 && (a[0] == '-' || a[0] == '+') && a[1] != '-' && strings.ContainsAny(a[len(a)-1:], "oO")):
+				j++ // -o pipefail, -euo pipefail: the flag takes the next word
 			case strings.HasPrefix(a, "-") || strings.HasPrefix(a, "+"):
 			default:
-				return a, "", false, nil, false
+				return a, lang, "", false, nil, false
 			}
 		}
-		return "", "", false, nil, false
+		return "", 0, "", false, nil, false
 	}
-	if looksLikeScript(w0) {
-		return w0, "", false, nil, false
+	if looksLikeScript(w0) || strings.ContainsAny(w0, "$`") {
+		return w0, langDirect, "", false, nil, false
 	}
-	return "", "", false, nil, false
+	return "", 0, "", false, nil, false
 }
+
+// literalCommands returns the variables a shell text assigns only literal
+// command names (no $, `, / or space), such as sudo=sudo: running "$sudo"
+// runs a command on PATH, not a script.
+func literalCommands(text string) map[string]bool {
+	out := map[string]bool{}
+	bad := map[string]bool{}
+	for _, words := range shellCommands(text) {
+		for _, wd := range words {
+			m := shellAssignValue.FindStringSubmatch(wd)
+			if m == nil {
+				break
+			}
+			if strings.ContainsAny(m[2], "$`/ \t") {
+				bad[m[1]] = true
+			} else {
+				out[m[1]] = true
+			}
+		}
+	}
+	for n := range bad {
+		delete(out, n)
+	}
+	return out
+}
+
+var (
+	shellAssignValue = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=(.*)$`)
+	bareVar          = regexp.MustCompile(`^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$`)
+	positional       = regexp.MustCompile(`^\$\{?([0-9]+|[@*])\}?$`)
+)
 
 // commandStart returns the index of the word a command runs, after
 // assignments and the words that run the rest (sudo, env, exec, if …)
@@ -507,41 +576,99 @@ func (w *refWalk) commands(text string, dirs []string, file string, depth int) {
 		w.problem("its commands nest too deep for the check")
 		return
 	}
+	literal := literalCommands(text)
 	for _, words := range shellCommands(text) {
-		script, inline, inlineShell, makeArgs, isMake := commandTarget(words)
+		script, lang, inline, inlineShell, makeArgs, isMake := commandTarget(words)
+		if m := bareVar.FindStringSubmatch(script); m != nil && literal[m[1]] {
+			continue // "$sudo" with sudo=sudo: a command on PATH
+		}
+		if file != "" && positional.MatchString(script) {
+			// "$@" in a script runs the words its caller passed; those are
+			// in the caller's text, whose words are followed as files.
+			continue
+		}
 		switch {
 		case inline != "" && inlineShell:
 			w.commands(inline, dirs, file, depth+1)
 		case isMake:
 			w.makeCall(makeArgs, dirs, file, depth)
 		case script != "":
-			w.script(script, dirs, file, depth)
+			// A command word with a variable ("$SAVE", the "$CMD" of
+			// sh -c "$CMD") does not resolve: reported (#50 review B,
+			// finding 3).
+			w.script(script, lang, dirs, file, depth)
 		}
 	}
 }
 
 // script follows a script a command runs, or records it as a problem.
-func (w *refWalk) script(word string, dirs []string, file string, depth int) {
+// Every existing candidate is followed (see existing). lang says how the
+// script is read: as shell, or (langOther) only for image commands;
+// langDirect means the command runs the file itself, and its #! line
+// decides.
+func (w *refWalk) script(word string, lang int, dirs []string, file string, depth int) {
 	for _, d := range systemDirs {
 		if strings.HasPrefix(word, d) {
 			return
 		}
 	}
-	cands, ok := w.candidates(word, dirs, file)
-	if ok {
+	found := false
+	if cands, ok := w.candidates(word, dirs, file); ok {
 		for _, c := range cands {
 			if !w.inRoot(c) {
 				continue
 			}
 			if t, ok := targets(c); ok && len(t) > 0 {
 				for _, p := range t {
-					w.follow(p, true, dirs, depth+1)
+					w.follow(p, true, scriptIsShell(p, lang), dirs, depth+1)
 				}
-				return
+				found = true
 			}
 		}
 	}
-	w.problem("it runs %s, which the check cannot resolve to a file in the repository", word)
+	if !found {
+		w.problem("it runs %s, which the check cannot resolve to a file in the repository", word)
+	}
+}
+
+// The language a script is read in (script, commandTarget).
+const (
+	langDirect = iota // ./x: its #! line decides
+	langShell
+	langOther
+)
+
+// scriptIsShell reports whether a script is read as shell: run by a
+// shell, or run directly with a shell #! line or none (execve falls back
+// to /bin/sh). A Python or other script is only scanned for image
+// commands; its words are not resolved as commands (#50 review B, note 4).
+func scriptIsShell(p string, lang int) bool {
+	switch lang {
+	case langShell:
+		return true
+	case langOther:
+		return false
+	}
+	src, err := os.ReadFile(p) //nolint:gosec // p is under the root
+	if err != nil || !bytes.HasPrefix(src, []byte("#!")) {
+		return true
+	}
+	first, _, _ := bytes.Cut(src, []byte("\n"))
+	f := strings.Fields(strings.TrimPrefix(string(first), "#!"))
+	if len(f) == 0 {
+		return true
+	}
+	prog := path.Base(f[0])
+	if prog == "env" {
+		prog = ""
+		for _, a := range f[1:] {
+			if !strings.HasPrefix(a, "-") {
+				prog = path.Base(a)
+				break
+			}
+		}
+	}
+	return interpreters[prog].shell
 }
 
 // makeCall follows `make [options] [targets]`: the recipes of the named
@@ -619,12 +746,19 @@ func (w *refWalk) makeCall(args []string, dirs []string, file string, depth int)
 			return
 		}
 	}
-	src, err := os.ReadFile(mfPath) //nolint:gosec // under the root
-	if err != nil {
-		w.problem("it runs make, but %s does not read: %v", mustRel(w.root, mfPath), err)
-		return
-	}
-	rules, order, vars := parseMakefile(src)
+	// The Makefile and every file it includes are texts of the step as a
+	// whole, so the image-use and GITHUB_ENV rules read every recipe line
+	// whatever make runs (#50 review B, finding 1; this over-reports).
+	makeDir := filepath.Dir(mfPath)
+	var files []string
+	src := w.readMake(mfPath, makeDir, &files, 0)
+	defer func() { // after the recipe's own text
+		for _, f := range files {
+			w.follow(f, false, false, makeDirs, depth)
+		}
+	}()
+	rel := filepath.ToSlash(mustRel(w.root, mfPath))
+	rules, order, vars := parseMakefile([]byte(src))
 	if len(goals) == 0 {
 		for _, t := range order {
 			if !strings.HasPrefix(t, ".") && !strings.ContainsAny(t, "%$") {
@@ -633,16 +767,19 @@ func (w *refWalk) makeCall(args []string, dirs []string, file string, depth int)
 			}
 		}
 	}
-	rel := filepath.ToSlash(mustRel(w.root, mfPath))
-	var recipe []string
+	var recipe, missing []string
 	seen := map[string]bool{}
 	for _, g := range goals {
 		if rules[g] == nil {
 			w.problem("it runs make %s, which has no explicit rule in %s", g, rel)
-			w.follow(mfPath, false, makeDirs, depth)
 			continue
 		}
-		recipe = append(recipe, makeRecipe(rules, g, seen)...)
+		recipe = append(recipe, makeRecipe(rules, g, seen, &missing)...)
+	}
+	for _, p := range missing {
+		if st, err := os.Stat(filepath.Join(makeDir, filepath.FromSlash(p))); err != nil || !st.Mode().IsRegular() { //nolint:gosec // a prerequisite name, read only for Stat
+			w.problem("it runs make, and the prerequisite %s has neither a rule in %s nor a file the check can read", p, rel)
+		}
 	}
 	if len(recipe) == 0 {
 		return
@@ -654,6 +791,68 @@ func (w *refWalk) makeCall(args []string, dirs []string, file string, depth int)
 
 type makeRule struct {
 	prereqs, recipe []string
+}
+
+var (
+	makeIncludeLine = regexp.MustCompile(`^\s*(-|s)?include\s+(.*)$`)
+	makeDirective   = regexp.MustCompile(`^\s*(ifeq|ifneq|ifdef|ifndef|define|undefine|vpath)\b|^\s*(?:override\s+|export\s+)?(\.DEFAULT_GOAL|\.RECIPEPREFIX|\.ONESHELL|\.SECONDEXPANSION)\b|\$[({](eval|call|value)\s`)
+)
+
+// makeUnmodelled returns the first construct of a Makefile text that
+// parseMakefile does not model (conditionals, define, .DEFAULT_GOAL,
+// $(eval)/$(call) …), or "". A make call on such a Makefile is reported
+// rather than read partly.
+func makeUnmodelled(src string) string {
+	for _, l := range makeLogicalLines([]byte(src)) {
+		if m := makeDirective.FindStringSubmatch(l.text); m != nil {
+			c := m[1] + m[2] + m[3]
+			if m[3] != "" {
+				c = "$(" + m[3] + ")"
+			}
+			return fmt.Sprintf("%s (line %d)", c, l.line)
+		}
+	}
+	return ""
+}
+
+// readMake returns a Makefile's text with its literal includes inlined
+// (relative to make's directory), and adds every file it read to files.
+// An include the check cannot resolve is a problem.
+func (w *refWalk) readMake(p, makeDir string, files *[]string, depth int) string {
+	p = filepath.Clean(p)
+	if slices.Contains(*files, p) || depth > 5 {
+		return ""
+	}
+	src, err := os.ReadFile(p) //nolint:gosec // under the root
+	if err != nil {
+		w.problem("it runs make, but %s does not read: %v", mustRel(w.root, p), err)
+		return ""
+	}
+	*files = append(*files, p)
+	if c := makeUnmodelled(string(src)); c != "" {
+		w.problem("it runs make, but %s uses %s, which the check does not model", filepath.ToSlash(mustRel(w.root, p)), c)
+	}
+	var b strings.Builder
+	for _, l := range strings.Split(string(src), "\n") {
+		m := makeIncludeLine.FindStringSubmatch(l)
+		if m == nil || strings.HasPrefix(l, "\t") {
+			b.WriteString(l + "\n")
+			continue
+		}
+		for _, f := range strings.Fields(m[2]) {
+			inc := filepath.Join(makeDir, filepath.FromSlash(f))
+			st, err := os.Stat(inc) //nolint:gosec // checked below to be under the root
+			switch {
+			case strings.ContainsAny(f, "$`*?[") || !w.inRoot(inc):
+				w.problem("it runs make, but %s includes %s, which the check cannot resolve", mustRel(w.root, p), f)
+			case err == nil && st.Mode().IsRegular():
+				b.WriteString(w.readMake(inc, makeDir, files, depth+1))
+			case m[1] == "":
+				w.problem("it runs make, but %s includes %s, which is not there", mustRel(w.root, p), f)
+			}
+		}
+	}
+	return b.String()
 }
 
 var (
@@ -720,8 +919,9 @@ func parseMakefile(src []byte) (map[string]*makeRule, []string, map[string]strin
 }
 
 // makeRecipe returns the recipe lines of a target and of its
-// prerequisites, prerequisites first.
-func makeRecipe(rules map[string]*makeRule, t string, seen map[string]bool) []string {
+// prerequisites, prerequisites first. A prerequisite without a rule is
+// added to missing (it must be a file).
+func makeRecipe(rules map[string]*makeRule, t string, seen map[string]bool, missing *[]string) []string {
 	r := rules[t]
 	if r == nil || seen[t] {
 		return nil
@@ -729,7 +929,16 @@ func makeRecipe(rules map[string]*makeRule, t string, seen map[string]bool) []st
 	seen[t] = true
 	var out []string
 	for _, p := range r.prereqs {
-		out = append(out, makeRecipe(rules, p, seen)...)
+		if p == "|" {
+			continue // order-only prerequisites follow
+		}
+		if rules[p] == nil {
+			if !slices.Contains(*missing, p) {
+				*missing = append(*missing, p)
+			}
+			continue
+		}
+		out = append(out, makeRecipe(rules, p, seen, missing)...)
 	}
 	for _, l := range r.recipe {
 		out = append(out, strings.TrimLeft(strings.TrimSpace(l), "@-+"))
@@ -854,6 +1063,11 @@ func shellCommands(s string) [][]string {
 			for i+1 < len(s) && s[i+1] != '\n' {
 				i++
 			}
+		case c == '(' && inWord && strings.HasSuffix(w.String(), "="):
+			// An array assignment, a=(…) or a+=(…): one word.
+			end := matchClose(s, i)
+			w.WriteString(s[i : end+1])
+			i = end
 		case c == ' ' || c == '\t' || c == '\r':
 			endWord()
 		case strings.IndexByte("\n;&|(){}", c) >= 0:

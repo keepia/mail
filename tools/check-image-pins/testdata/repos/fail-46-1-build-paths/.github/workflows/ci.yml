@@ -34,4 +34,4 @@ jobs:
       - run: |
           docker compose up --no-build -d
           docker --context x run --rm busybox build
-          docker compose run --no-build --rm postfix true
+          docker compose exec -T postfix true

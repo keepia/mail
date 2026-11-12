@@ -1,0 +1,11 @@
+job build: step 3: it runs make, but mk/cond/Makefile uses ifeq (line 2), which the check does not model
+job build: step 3 tests, saves, pushes or tags the image; the step right before must be
+job build: step 4 tests, saves, pushes or tags the image; the step right before must be
+job build: step 4 pushes ghcr.io/keepia/mail-root:dev by a name it did not tag from "$VERIFIED_IMAGE"
+job build: step 5: it runs make, but mk/define/Makefile uses define (line 1), which the check does not model
+job build: step 5: it runs $PUSH_IT, which the check cannot resolve to a file in the repository
+job build: step 5 tests, saves, pushes or tags the image; the step right before must be
+job build: step 6: it runs make, but mk/goal/Makefile uses .DEFAULT_GOAL (line 1), which the check does not model
+job build: step 6 tests, saves, pushes or tags the image; the step right before must be
+job build: step 7: it runs make, and the prerequisite root.pushed has neither a rule in mk/pattern/Makefile nor a file the check can read
+job build: step 7 tests, saves, pushes or tags the image; the step right before must be

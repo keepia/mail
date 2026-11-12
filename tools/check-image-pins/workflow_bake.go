@@ -364,6 +364,7 @@ func usesImage(texts []refText) imageUse {
 // core.exportVariable and core.addPath write the same files (#49 point 7).
 func envFileWrites(texts []refText) []string {
 	var out []string
+	seen := map[string]bool{} // a line reached twice (a make recipe and its Makefile) once
 	for _, t := range texts {
 		for _, l := range strings.Split(t.text, "\n") {
 			l = strings.TrimSpace(l)
@@ -371,7 +372,8 @@ func envFileWrites(texts []refText) []string {
 			if strings.HasPrefix(l, "#") {
 				continue // a comment line (shell, Python, YAML)
 			}
-			if (strings.Contains(n, "github_env") || strings.Contains(n, "github_path") || actionsEnvCall.MatchString(n)) && !envFileLines[t.path][l] {
+			if (strings.Contains(n, "github_env") || strings.Contains(n, "github_path") || actionsEnvCall.MatchString(n)) && !envFileLines[t.path][l] && !seen[envLineKey(l)] {
+				seen[envLineKey(l)] = true
 				where := "run"
 				if t.path != "" {
 					where = t.path
@@ -381,6 +383,12 @@ func envFileWrites(texts []refText) []string {
 		}
 	}
 	return out
+}
+
+// envLineKey is a line as a make recipe runs it: $$ is $, without the
+// recipe prefixes @, - and +.
+func envLineKey(l string) string {
+	return strings.TrimLeft(strings.ReplaceAll(l, "$$", "$"), "@-+ \t")
 }
 
 // actionsEnvCall finds @actions/core's writes of GITHUB_ENV and

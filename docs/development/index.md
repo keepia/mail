@@ -307,14 +307,24 @@ lives, also under a skipped path.
        - every step of the job runs only what the check can read. It
          follows a step's scripts by their repository path, also written
          as `$GITHUB_WORKSPACE/…` or `${{ github.workspace }}/…`, under
-         `working-directory:` or after `cd`, and as `$(dirname "$0")/…`
-         inside a script; `make <target>` (the target's recipe and
-         prerequisites, with the Makefile's variables); local actions,
-         nested ones included; and the `script` of `actions/github-script`.
-         A step that runs a script path it cannot resolve this way (a
-         variable, an absolute path outside `/usr`, `/bin` and `/sbin`, a
-         missing file, a make target without an explicit rule), or that
-         names more than 200 files, is reported;
+         `working-directory:` or after `cd` (a relative path is followed
+         in every directory it may run in), as `$(dirname "$0")/…`
+         inside a script, and as `$GITHUB_ACTION_PATH/…` or `${{
+         github.action_path }}/…` in a composite action; `make <target>`
+         (the target's recipe and prerequisites, with the Makefile's
+         variables and literal includes, plus the whole Makefile and its
+         includes as text); local actions, nested ones included; and the
+         `script` of `actions/github-script`. A script run by `python`,
+         `node` and other non-shell interpreters is read only for image
+         commands, and a file that is not text is not read. A step that
+         runs a script path it cannot resolve this way (a variable, a
+         command word that is a variable such as `"$SAVE"` or the body of
+         `sh -c "$CMD"`, an absolute path outside `/usr`, `/bin` and
+         `/sbin`, a missing file or a binary, a make target without an
+         explicit rule, a prerequisite with neither rule nor file, or a
+         Makefile that uses a conditional, `define`, `.DEFAULT_GOAL`,
+         `$(eval)` or `$(call)`), or that names more than 200 files, is
+         reported;
        - no step of the job writes `GITHUB_ENV` or `GITHUB_PATH` (in what it
          runs, as above, or with `core.exportVariable`/`core.addPath` in a
          github-script), except the commit time (`SOURCE_DATE_EPOCH`) and
@@ -339,9 +349,11 @@ lives, also under a skipped path.
        - `docker`, `podman` and `nerdctl` `build`, `image build` and
          `builder build`; `buildx build`/`bake`/`b`; Compose builds
          (`compose build`, `compose watch`, any `compose` subcommand with
-         `--build` or `--build=…`, and `up`, `create` and `run` without
+         `--build` or `--build=…`, `up` and `create` without
          `--no-build`, which build every service that has `build:` and no
-         image yet; also `docker-compose`, `podman-compose`); `buildctl`;
+         image yet, and every `run`: Compose's `run` has no `--no-build`,
+         so start services with `up -d --no-build` and use `exec`; also
+         `docker-compose`, `podman-compose`); `buildctl`;
          and `buildah build`. They are matched word by word after quotes
          and backslashes are removed (`ba""ke` matches), with global
          options before a subcommand skipped (`docker --context x build`,

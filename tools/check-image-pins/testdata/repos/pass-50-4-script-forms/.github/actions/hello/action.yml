@@ -1,0 +1,8 @@
+name: hello
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: '"$GITHUB_ACTION_PATH/hello.sh"'
+    - shell: bash
+      run: bash ${{ github.action_path }}/hello.sh

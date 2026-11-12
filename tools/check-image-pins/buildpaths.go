@@ -137,9 +137,12 @@ func subcommand(rest []string) (string, []string) {
 var engines = map[string]bool{"docker": true, "podman": true, "nerdctl": true}
 
 // composeBuild returns the build a Compose command runs: `build`,
-// `watch`, any subcommand with --build or --build=<value>, and up, create
-// and run without --no-build: they build every service that has `build:`
-// and no image yet (#49 point 2).
+// `watch`, any subcommand with --build or --build=<value>, up and create
+// without --no-build, and every run: they build each service that has
+// `build:` and no image yet (#49 point 2). Compose's run has no
+// --no-build (Compose v5.6.1: "unknown flag"), so it is always a build;
+// start services with `up -d --no-build` and use `exec` instead (#50
+// review A, finding 1).
 func composeBuild(rest []string) string {
 	sub, after := subcommand(rest)
 	switch {
@@ -147,7 +150,9 @@ func composeBuild(rest []string) string {
 		return "compose " + sub
 	case sub != "" && slices.ContainsFunc(after, func(w string) bool { return w == "--build" || strings.HasPrefix(w, "--build=") }):
 		return "compose " + sub + " --build"
-	case (sub == "up" || sub == "create" || sub == "run") && !slices.Contains(after, "--no-build"):
+	case sub == "run":
+		return "compose run, which builds and has no --no-build (use up -d --no-build and exec)"
+	case (sub == "up" || sub == "create") && !slices.Contains(after, "--no-build"):
 		return "compose " + sub + " without --no-build"
 	}
 	return ""

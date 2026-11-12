@@ -45,7 +45,7 @@ func TestBuildCommands(t *testing.T) {
 		{"docker compose up --no-build -d && echo --build", nil},
 		{"docker --context x run --rm busybox build", nil},
 		{"docker -D run --rm busybox build", nil},
-		{"docker compose run --no-build --rm a build", nil},
+		{"docker compose exec -T a build", nil},
 		{"docker image inspect a", nil},
 	}
 	for _, c := range cases {

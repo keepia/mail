@@ -1,7 +1,9 @@
-# #49 point 2 (review B finding 2), for the compose job of #26: up, create
-# and run build every service that has `build:` and no image yet, so
-# they need --no-build; and --build=true is a build. The last two steps
-# build nothing and are not reported.
+# #49 point 2 (review B finding 2), for the compose job of #26: up and
+# create build every service that has `build:` and no image yet, so they
+# need --no-build; and --build=true is a build. Compose's run has no
+# --no-build at all (#50 review A, finding 1: "unknown flag" on Compose
+# v5.6.1), so every run is reported, also with the flag. The last three
+# steps build nothing and are not reported.
 on: pull_request
 permissions:
   contents: read
@@ -14,5 +16,7 @@ jobs:
       - run: docker compose run --rm postfix true
       - run: docker compose up --build=true -d
       - run: docker-compose up -d
+      - run: docker compose run --no-build --rm postfix true
       - run: docker compose up --no-build -d
+      - run: docker compose exec -T postfix true
       - run: docker compose down
