@@ -907,6 +907,54 @@ the groupware listeners to the same test.
   matches PTR and SPF. The bridge's SNAT address is set with Docker's
   `com.docker.network.host_ipv4` option (upstream); #5 verifies the IPv6
   equivalent (predicted).
+- **Docker Engine 28 or later** (gateway mode `isolated` on the internal
+  networks, #61). Every internal network sets
+  `com.docker.network.bridge.gateway_mode_ipv4/ipv6: isolated`, so its
+  bridge has no address on the host: host processes cannot reach the
+  services without authentication (memcached, olefy, clamd, rspamd), and
+  containers cannot reach host services through the bridge. By Engine
+  version (measured in the reviews of PR #65):
+  - **28 and later** isolate.
+  - **27.x** refuses to create the networks (`unknown gateway mode
+    isolated`, measured on 27.5.1): the template does not start, so it
+    fails closed.
+  - **26.x and older** create the networks and ignore the option
+    silently (measured on 26.1.4): `docker network inspect` even shows
+    `isolated`, but the bridge keeps its host address and the host
+    reaches memcached. That fails open. Treat any Engine below 28 as
+    unsupported.
+
+  The check, with the default subnets (`KEEPIA_SUBNET4`/`KEEPIA_SUBNET6`).
+  The version line works at any time. The other two are meaningful only
+  after the template has started once, because the networks do not exist
+  before that, on any Engine:
+
+  ```sh
+  docker version --format '{{.Server.Version}}'    # 28.0.0 or later
+  docker network inspect -f '{{index .Options "com.docker.network.bridge.gateway_mode_ipv4"}} {{index .Options "com.docker.network.bridge.gateway_mode_ipv6"}}' keepia-mail_filter-private    # isolated isolated
+  ip -o addr show | grep -E ' (172\.29\.[124567]\.|fd7c:3b9e:5a21:[124567]::)'    # nothing
+  ```
+
+  The last line matches only the internal subnets: networks 1, 2, 4, 5, 6
+  and 7 of `docker-compose.yml` (`<prefix>.<n>.0/24`,
+  `<prefix>:<n>::/64`). **edge-public (network 3, `172.29.3.0/24`,
+  `fd7c:3b9e:5a21:3::/64`) is the exception:** it is not internal and
+  keeps the gateway mode `nat`, because outbound mail and the published
+  port 25 go through its gateway. So the host holds `172.29.3.1` and
+  `fd7c:3b9e:5a21:3::1` on every Engine, and the pattern leaves network 3
+  out. With other subnets, or after a change to the networks, take the
+  internal subnets from the template:
+  `docker compose config --format json | jq -r '.networks[] | select(.internal) | .ipam.config[].subnet'`.
+
+  On a correct install the last line prints nothing. On Engine 26 or
+  older it prints the internal bridges' gateway addresses (for example
+  `172.29.6.1/24` and `fd7c:3b9e:5a21:6::1/64`), so it is the line that
+  decides: such an Engine passes the second line. Neither Compose nor the
+  template can check the Engine version at run time, and `km` starts only
+  `postgres` and `keepia`, never the template, so there is no run-time
+  refusal. The CI `compose` job checks all three conditions (test 9; its
+  host-address check covers the internal networks and skips
+  edge-public).
 - **Logs:** containers log to stdout. The `journald` log driver is required,
   with the host's journald retention at 30 days, which the operator sets
   (logs are kept at most 30 days, #2 scope; [coordinator decision T7][cd]).
@@ -1028,10 +1076,14 @@ control 768 MiB, edge 640 MiB, store 512 MiB, filter 3840 MiB, groupware
   6.8 GiB**, with five gates, one agent and three `unbound`; ClamAV is 3 GiB
   of it. The 14 containers of 0.1.0's template have 6336 MiB of it; the
   gates, the agent, keepia-edge, rspamd-proxy, groupware-web and freshclam
-  add 672 MiB in later milestones. Measured idle, the 14 use about 1.2
+  add 672 MiB in later milestones. The one-shot `edge-addresses` (16
+  MiB, #61) only runs for a moment at each start, before `edge-postfix`,
+  and is not counted. Measured idle, the 14 use about 1.2
   GiB (1189 MiB), 956 MiB of it clamd ([#26][c26]); CPU is 0.00–0.16 %
   per container. **Minimum server: 8 GiB RAM, 2 vCPU; recommended 4
-  vCPU** (predicted from the limits). Disk: the images of the template,
+  vCPU** (predicted from the limits), **with Docker Engine 28 or later**
+  (section 7: below 28 the internal networks either fail to start or,
+  on 26 and older, are not isolated from the host). Disk: the images of the template,
   measured ([#26][c26]; Docker's image size on the CI runner): Postgres
   456 MB, ClamAV 338 MB (with its signatures), SOGo 302 MB, rspamd 204
   MB, Dovecot 182 MB, olefy 170 MB, Postfix 125 MB, Valkey 116 MB,
