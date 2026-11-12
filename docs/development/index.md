@@ -84,6 +84,258 @@ exit status is the command's. That is the contract the Compose template of
 
 Architecture and resource budget: [architecture.md](architecture.md).
 
+## Images
+
+The own images are defined once in
+[`docker-bake.hcl`](../../docker-bake.hcl), for CI, `make images` and the
+release (#5):
+
+| Image | Dockerfile | Runs as | Health probe |
+|---|---|---|---|
+| `ghcr.io/keepia/mail` (Keepia) | [`Dockerfile`](../../Dockerfile) | 65532, no capabilities | `keepia-mail healthcheck` (`/healthz` 200) |
+| `ghcr.io/keepia/mail-postfix` | [`images/postfix/Dockerfile`](../../images/postfix/Dockerfile) | root master with `CHOWN DAC_OVERRIDE FOWNER SETUID SETGID`, `chroot = n` everywhere | SMTP `220 ` greeting |
+| `ghcr.io/keepia/mail-unbound` | [`images/unbound/Dockerfile`](../../images/unbound/Dockerfile) | 10053, no capabilities | `unbound-control status` |
+
+Each Debian-based image lists its installed packages in
+`/usr/share/keepia/packages.txt`; the Keepia image has none, because it is
+distroless static and installs no Debian packages.
+
+SOGo, olefy (#44) and the Compose template "all roles on one server" follow in
+the next parts of #5; the upstream images (Dovecot, rspamd, ClamAV,
+Postgres, Valkey, memcached) are used unchanged, pinned by digest in the
+template.
+
+```sh
+make images                       # every image into the local Docker store, tag $(VERSION)
+make image-test IMAGE=postfix     # smoke, health and reload tests of one built image
+make image-pins-test image-pins   # the pin check: tests, then the repository
+```
+
+- **Pins.** Base images and the `# syntax=` frontend are pinned by tag and
+  digest; downloads only by `ADD --checksum=sha256:`; Go modules by `go.sum`
+  and `go mod verify`. Debian packages are not pinned (a superseded
+  security version would leave the archive): each image records them in
+  `/usr/share/keepia/packages.txt`, which CI prints.
+- **Behind a TLS-inspecting proxy** (such as the agents' sandbox), set
+  `KEEPIA_BUILD_CA` to a CA bundle file: `make images
+  KEEPIA_BUILD_CA=/path/to/ca-bundle.crt`. The bundle reaches the build
+  only as the BuildKit secret `ca`, never a layer; apt then fetches from the
+  same Debian archive over https, and the build runs on the host network so
+  `HTTPS_PROXY` (a predefined build argument, kept out of the image
+  history) is reachable. `make images` runs `go run ./tools/check-image-pins
+  -bake-local` with the typed options `-ca`, `-host-network` and
+  `-https-proxy`, and the tool adds the matching `--set` and `--allow`
+  arguments itself.
+- **Reload watcher.** Postfix and Unbound start under `tini` with
+  [`images/common/keepia-reload-watch`](../../images/common/keepia-reload-watch):
+  when `/run/keepia/generation/` exists (the agent's read-only volume from
+  0.2.0), a `generation` file written there (write, then rename) runs the
+  image's reload command (`postfix reload`, `unbound-control reload`). The
+  container exits when the service or the watcher stops, so a dead watcher
+  cannot silently drop reloads (architecture section 5). Without the
+  directory the service runs alone.
+- **Image tests** ([`scripts/image-test.sh`](../../scripts/image-test.sh)):
+  the smoke command; user, capabilities and `NoNewPrivs`; the healthcheck
+  green, then red with every process of the container stopped (and, for
+  Postfix, red with Debian's `chroot = y`, while `postfix status` still says
+  running); the reload watcher (a write-and-rename from another container
+  gives the reload line; killing `inotifywait` stops the container with
+  status 1); and a clean `docker stop`. Every wait reads a Docker event or a
+  log line, bounded by a timeout.
+
+### The docker check
+
+`ci.yml` has two jobs for the images. Both run on every pull request; the
+`docker` job counts as required until the ruleset lists it (HANDOVER).
+
+- **`docker-build (<image>, <arch>)`**: one row per image and platform,
+  amd64 on `ubuntu-24.04` and arm64 on `ubuntu-24.04-arm`, natively (no
+  QEMU). It points dockerd and BuildKit at `mirror.gcr.io` with Docker Hub
+  as the fallback (`scripts/ci-docker-mirror.sh`). The build's bake inputs
+  are defined once, in the job's env (`BAKE_TARGET`, `PLATFORM`,
+  `BAKE_SET`). The step right before the build, `go run
+  ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"`,
+  resolves exactly those inputs in the build's environment and checks
+  them (rule 5, build mode). The job then builds with `docker/bake-action`
+  (`id: build`; it gives BuildKit the GitHub Actions cache: one scope per
+  image and platform, written only by pushes to `main`).
+  `go run ./tools/check-image-pins -verify-built` then compares each built
+  image's local ID with the digest in the build's metadata, right before
+  `make image-test` and again right before `docker save`. Finally the job
+  runs `make image-test`, and on amd64 uploads the image for the `compose` job
+  of #5 part 3 (artifact `image-<name>`, kept 1 day). CI never logs in to a
+  registry and never pushes.
+- **`docker`**: fails unless every `docker-build` row succeeded (a failed or
+  cancelled row turns it red rather than skipped), then runs `make
+  image-pins-test image-pins`.
+
+The `lint` job also runs `scripts/check-go-toolchain-test.sh`; the
+Dockerfile runs `scripts/check-go-toolchain.sh`, so the golang tag cannot
+drift from `go.mod`'s `toolchain`.
+
+`scripts/ci-docker-mirror.sh`, `scripts/ci-pull-images.sh` and
+`scripts/check-go-toolchain.sh` (with its test) are byte-identical copies of
+mail-archive's; change them there first. `ci-pull-images.sh` is used by the
+`compose` job (#5 part 3).
+
+### The image pin check
+
+[`tools/check-image-pins`](../../tools/check-image-pins/main.go) walks the
+repository and fails closed on any form it cannot read. The walk skips only
+these root paths: `.git`, `bin`, `prototypes` (C10) and the checks' own
+fixtures (`scripts/testdata`, `tools/*/testdata`). A directory with one of
+those names elsewhere is walked. A Dockerfile that a bake target or a
+Compose build names is always checked, whatever its name and wherever it
+lives, also under a skipped path.
+
+1. a Dockerfile's `# syntax=` is `name:X.Y.Z@sha256:<64 hex>`;
+2. every `FROM`, `COPY --from=` and `RUN --mount=…,from=` names an earlier
+   stage or `name:tag@sha256:<64 hex>`; `--mount` is read as one CSV record,
+   as BuildKit does (so `"from=…"` counts); only `FROM --platform` may
+   carry a variable (`$BUILDPLATFORM`, `$TARGETPLATFORM`); a `FROM` on
+   several lines and a `--flag` on a continuation line are reported;
+3. every `ADD` from `http(s)://` has `--checksum=sha256:<64 hex>`, one URL
+   per `ADD`; `ADD` of a git URL (`git@`, `git://`, `ssh://`, `.git`, a
+   `#ref`) and any `ADD` source with a variable (`$SRC`, `${SRC}`) are
+   reported, because BuildKit expands variables in `ADD` sources;
+4. a Compose file: a service without `build:` has `image:
+   name:tag@sha256:<64 hex>`; a service with `build:` names its image
+   under `${KEEPIA_REGISTRY…}` and builds from a relative local context.
+   `build` may use only `context`, `dockerfile`, `args`, `target` and
+   `labels` (so `x-bake`, `additional_contexts`, `dockerfile_inline`,
+   `cache_from` and any new key are reported), and `args` may not set
+   `BUILDKIT_SYNTAX`; a URL context, `extends` and `include` are reported;
+5. the bake definition **exactly as each build resolves it**, never its HCL
+   lines. In every resolved target:
+   - only these keys may appear: `context`, `dockerfile`, `args`,
+     `labels`, `tags`, `platforms`, `target`, and, as the mode allows,
+     `cache-from`/`cache-to`, `secret`, `network` and `entitlements`.
+     `output`, `ssh`, `call`, `attest` and any new key are reported;
+   - `context` must be a relative path inside the repository;
+   - named `contexts`, `dockerfile-inline` and a `BUILDKIT_SYNTAX`
+     argument are reported;
+   - every target's Dockerfile is read with rules 1–3.
+
+   The check is part of every build invocation.
+   - **Local mode** (`-bake-local`, the only local build path; `make
+     images`):
+     - The tool builds the bake argument list itself: the root's default
+       files with `--file`, and `--set` lines only from its typed options.
+       `-ca` gives the secret `id=ca` and `--allow fs.read`;
+       `-host-network` gives `network=host` and `--allow network.host`;
+       `-https-proxy` gives `args.HTTPS_PROXY`.
+     - It uses a cleaned environment plus `VERSION`, `REGISTRY` and
+       `PLATFORM` from `-version`, `-registry` and `-platform`.
+     - It resolves `--print` with exactly that, checks it, and then runs
+       `docker buildx bake --load` with the same arguments and environment.
+       No cache is allowed. `-dry-run` prints the command instead of
+       building.
+   - **Build mode** (`-build`, CI): resolves the build step's targets, `--set`
+     lines and environment, as described below. The cache may only be
+     `type=gha` with this row's scope (`<target>-<arch>`, from `PLATFORM`)
+     and no other key: a foreign cache would stand in for build steps by
+     their cache keys.
+   - **Verify mode** (`-verify-built`, CI): the images a job tests and saves
+     are the checked build's output.
+     - It reads bake-action's metadata output (`BAKE_METADATA`) and
+       compares every image name's local ID with the digest the build
+       reported: `containerimage.digest` for Docker's containerd store, or
+       `containerimage.config.digest` for the classic store.
+     - Any other build, `docker tag` or `docker load` in between fails it.
+   - **Repository mode** (`make image-pins`):
+     - The tool passes every one of buildx's default files present at the
+       root to `docker buildx bake` with `--file`, in buildx's order:
+       `compose.yaml`, `compose.yml`, `docker-compose.yml`,
+       `docker-compose.yaml`, `docker-bake.json`, `docker-bake.hcl`,
+       `docker-bake.override.json`, `docker-bake.override.hcl`. A Compose
+       file alone counts too.
+     - It runs bake in a cleaned environment: only `PATH`, `HOME`,
+       `DOCKER_CONFIG`, `DOCKER_HOST` and `DOCKER_CONTEXT` (what the CLI
+       needs to find its plugin and daemon), so no `BUILDX_*` and no bake
+       variable from the caller. Local mode uses the same environment.
+     - Target names come only from `--list` and are passed after `--`.
+       Hidden targets are checked through the targets that inherit them.
+     - It then resolves again with every declared variable at a sentinel
+       value. A target whose `context`, `contexts`, `dockerfile`,
+       `dockerfile-inline` or `BUILDKIT_SYNTAX` moves is reported, because
+       a build's environment could move it. Known variables have sentinels
+       that still resolve (`PLATFORM` must be a platform). If the definition
+       does not resolve with the sentinels, the check fails.
+     - This mode is best effort. One sentinel value per variable cannot
+       show a condition on another value, and a `timestamp()` condition
+       fires only on its day. The local and build modes are authoritative,
+       because they check what is actually built.
+   - **Build mode in CI**: the exact targets (`BAKE_TARGET`), `--set` lines
+     (`BAKE_SET`) and environment of the build step that follows it, with
+     buildx's own file lookup.
+   - **Every build input is visible to the check.**
+     - In workflows, a job builds images only through one
+       `docker/bake-action` step:
+       - inputs only `source: .`, `targets: ${{ env.BAKE_TARGET }}`,
+         `set: ${{ env.BAKE_SET }}`, `load`, `push`, `provenance`, `sbom`,
+         `no-cache` and `pull` (no `files`, `workdir` or `vars`), and
+         `id: build`;
+       - no step env, and job and workflow env only `BAKE_TARGET`,
+         `BAKE_SET` and `PLATFORM`, whose expressions may read only
+         `matrix.*` and `github.event_name`;
+       - `BAKE_SET` lines may set only `cache-from` and `cache-to`, and a
+         literal cache value must be `type=gha`;
+       - the step right before is exactly `run: go run
+         ./tools/check-image-pins -build "$BAKE_TARGET" -build-set
+         "$BAKE_SET"`, with no env, `if` or `continue-on-error`;
+       - the step right before every step that runs `image-test` or
+         `docker save` is the verify step.
+     - **Other build paths are reported** (defence in depth; verify mode is
+       the real guarantee):
+       - `docker build`, `docker image build`, `buildx build`/`bake`/`b`,
+         `buildctl` and `podman`/`buildah build`, matched word by word after
+         quotes and backslashes are removed (`ba""ke` matches);
+       - in workflow `run:` steps, composite actions under
+         `.github/actions/`, `*.sh` files, and any file a workflow, action or
+         Makefile names in a command (`sh scripts/build`);
+       - any build action in `uses:` (`docker/build-push-action`, other
+         `docker/*` actions except the setup, login and metadata ones,
+         `bake-action` outside the allowed step);
+       - a job that calls a remote reusable workflow.
+     - A Makefile or `*.mk` file holds no `buildx` and no `BUILDX_` at all
+       (after quotes are removed), and no other build command.
+   - Any `*.hcl` other than the root's `docker-bake.hcl` and
+     `docker-bake.override.hcl` is reported, unless it is on the tool's
+     `hclAllowlist`, which is empty. A JSON bake file is reported;
+6. no workflow except `release.yml` grants `packages: write`, at workflow or
+   job level; `permissions: write-all`, a job that calls a reusable
+   workflow without its own `permissions`, and a job without permissions in
+   a workflow without them are reported. In every workflow, `release.yml`
+   included, each job's `container` and `services` image is
+   `name:tag@sha256:<64 hex>`.
+
+**Threat model.**
+- The check catches accidental unpinned references and fails closed on
+  forms it cannot resolve.
+- The local and build modes are authoritative, together with verify mode in
+  CI: they check what is actually built, with the real environment.
+- Repository mode is best effort for value-conditional HCL expressions.
+  Its known limits are the single-value sentinel and `timestamp()`
+  conditions.
+- A pull request that edits the check itself, or deliberately disables or
+  routes around it (for example a build command assembled at run time), is
+  the reviewers' responsibility, not the tool's. The rule file
+  `.claude/rules/docker.md` says so as well.
+
+**Rule 5 needs Docker.** It runs the `docker` CLI with the buildx plugin
+(no daemon needed; buildx resolves the file itself). Without it, `make
+image-pins` reports "cannot resolve the bake definition" and fails: it
+never passes a bake file unread. CI's `docker` job runs on a runner with
+Docker.
+
+It also reports here-documents and `ONBUILD` in Dockerfiles. Downloads in
+`RUN` are a review rule (`.claude/rules/docker.md`), not a heuristic. Its
+tests run it on the fixtures in `tools/check-image-pins/testdata/`:
+single files per rule (a fail fixture names its expected lines in its last
+line, `# want-lines: N`), and whole trees in `testdata/repos/` with the
+expected findings in `WANT`. The trees with a bake file need buildx: they
+skip locally without it and fail in CI (`CI` set).
+
 ## Security checks
 
 The required checks are `secret-scan`, `links` and `workflows`. Each runs on
@@ -157,8 +409,10 @@ external service and needs the maintainer's OK.
 
 ### Dependencies
 
-- Dependabot opens weekly update pull requests for Go modules and GitHub
-  Actions (`.github/dependabot.yml`). It waits 14 days after a release
+- Dependabot opens weekly update pull requests for Go modules, GitHub
+  Actions and the images' base images and frontend (`docker`, for the root
+  `Dockerfile` and each `images/<name>/`) (`.github/dependabot.yml`). It
+  waits 14 days after a release
   before it opens a version update (`cooldown`); security updates are
   exempt.
 - Dependabot does not update tools that the Makefile installs with

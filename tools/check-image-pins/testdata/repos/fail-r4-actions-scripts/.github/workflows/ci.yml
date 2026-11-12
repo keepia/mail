@@ -1,0 +1,22 @@
+# B W2 and W4, plus D3: an attacker-controlled expression in BAKE_SET.
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      BAKE_TARGET: ${{ github.head_ref }}
+      PLATFORM: linux/amd64
+      BAKE_SET: |
+        x.cache-from=${{ github.event.pull_request.body }}
+    steps:
+      - uses: ./.github/actions/b
+      - run: sh scripts/build
+      - run: go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          set: ${{ env.BAKE_SET }}

@@ -1,0 +1,9 @@
+x-base: &base
+  image: postgres:18
+
+services:
+  postgres:
+    <<: *base
+  other:
+    *base
+# want-lines: 5 7

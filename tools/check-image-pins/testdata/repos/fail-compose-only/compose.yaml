@@ -1,0 +1,14 @@
+# A root Compose file alone, no docker-bake.hcl (review A delta, review B
+# R3): `docker buildx bake` reads it by default. The Compose rule reports
+# the keys outside its allowlist, and the resolved bake definition shows
+# what they do.
+services:
+  app:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-app:dev
+    build:
+      context: .
+      args:
+        BUILDKIT_SYNTAX: docker/dockerfile:latest
+      x-bake:
+        contexts:
+          base: docker-image://busybox:latest

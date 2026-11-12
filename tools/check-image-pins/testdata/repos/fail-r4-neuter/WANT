@@ -1,0 +1,1 @@
+job build: the step right before docker/bake-action must be exactly `run: go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"`

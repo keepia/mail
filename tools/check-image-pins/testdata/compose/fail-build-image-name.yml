@@ -1,0 +1,10 @@
+services:
+  a:
+    image: keepia-mail:dev
+    build: .
+  b:
+    build: .
+  c:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-c:dev
+    build: 7
+# want-lines: 2 5 7

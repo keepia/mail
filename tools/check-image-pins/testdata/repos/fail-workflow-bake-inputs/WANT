@@ -1,0 +1,9 @@
+job build: docker/bake-action input "files" is not allowed
+job build: docker/bake-action input "vars" is not allowed
+job build: docker/bake-action input "workdir" is not allowed
+job build: docker/bake-action needs source: . (got https://example.invalid/team/repo.git)
+job build: docker/bake-action targets must be ${{ env.BAKE_TARGET }} (got app)
+job build: docker/bake-action set must be ${{ env.BAKE_SET }}
+job build: the docker/bake-action step has its own env
+job build: the docker/bake-action step needs id: build
+job build: the step right before docker/bake-action must be exactly `run: go run ./tools/check-image-pins

@@ -1,0 +1,4 @@
+target "app": named contexts are not allowed (base=docker-image://busybox:latest)
+build.txt:1: no # syntax= directive
+build.txt:1: FROM image "busybox:latest" is not pinned
+decoy.hcl:0: an HCL file that is not the root's docker-bake.hcl

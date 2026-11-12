@@ -1,0 +1,105 @@
+#!/bin/bash
+# keepia-reload-watch: the entrypoint of the images whose service the agent
+# reconfigures (docs/development/architecture.md, section 5, "Reloads
+# without the Docker socket"; #5 coordinator decision C15). It runs under
+# tini as PID 1.
+#
+# Usage: keepia-reload-watch SERVICE [ARGS...]
+#
+# 1. It starts SERVICE [ARGS...] in the foreground, as its child.
+# 2. If the generation directory exists ($KEEPIA_GENERATION_DIR, default
+#    /run/keepia/generation: a read-only volume the agent writes from 0.2.0),
+#    it watches it with inotifywait for close_write and moved_to. A file
+#    named "generation" written there (the agent writes a temporary file
+#    and renames it) runs $KEEPIA_RELOAD_COMMAND, split into words, and
+#    logs "keepia-entrypoint: generation <value>, reloading". Without the
+#    directory the service runs alone, which is the 0.1.0 state.
+# 3. It exits when the service or the watcher stops (wait -n), so a dead
+#    watcher cannot silently drop reloads: with the service's status when
+#    the service stopped, with 1 (after stopping the service) when the
+#    watcher did.
+#
+# SIGTERM and SIGINT go to the service's process group (docker stop); the
+# script then exits 0 when the service exits 0 or on that SIGTERM, else
+# with the service's status.
+set -euo pipefail
+set -f # the reload command is split into words, never globbed
+
+log() { echo "keepia-entrypoint: $*" >&2; }
+
+if [ $# -eq 0 ]; then
+	log "usage: keepia-reload-watch SERVICE [ARGS...]"
+	exit 2
+fi
+dir=${KEEPIA_GENERATION_DIR:-/run/keepia/generation}
+# shellcheck disable=SC2206 # split into words on purpose (globbing is off)
+reload=(${KEEPIA_RELOAD_COMMAND:?KEEPIA_RELOAD_COMMAND is not set})
+
+# The service gets a process group of its own (job control on), so a stop
+# signal reaches the whole service: `postfix start-fg` is a shell that
+# runs the master as its child when it is not PID 1.
+set -m
+"$@" &
+service=$!
+set +m
+
+watcher=
+if [ -d "$dir" ]; then
+	log "watching $dir for generation; reload command: ${reload[*]}"
+	(
+		# inotifywait prints "Watches established." on stderr once it
+		# watches; tests wait for that line before they write.
+		inotifywait -m -e close_write,moved_to --format '%f' "$dir" |
+			while IFS= read -r name; do
+				[ "$name" = generation ] || continue
+				gen=$(head -c 64 "$dir/generation" 2>/dev/null | tr -cd '[:alnum:]._-' || true)
+				log "generation ${gen:-?}, reloading"
+				if "${reload[@]}"; then
+					log "reload of generation ${gen:-?} done"
+				else
+					log "reload of generation ${gen:-?} failed (exit $?)"
+				fi
+			done
+	) &
+	watcher=$!
+else
+	log "no $dir: reloads are not watched"
+fi
+
+stopping=0
+stop_service() {
+	stopping=1
+	kill -TERM -- "-$service" 2>/dev/null || true
+}
+trap stop_service TERM INT
+
+set +e
+while :; do
+	done_pid=
+	wait -n -p done_pid "$service" ${watcher:+"$watcher"}
+	rc=$?
+	if [ -z "${done_pid:-}" ]; then
+		# A trapped signal interrupted wait; keep waiting for the service.
+		continue
+	fi
+	if [ "$done_pid" = "$service" ]; then
+		[ -z "$watcher" ] || kill -TERM "$watcher" 2>/dev/null
+		if [ "$stopping" = 1 ]; then
+			# Stopped by the signal this script forwarded: a clean stop
+			# when the service exits 0 or on that SIGTERM (143).
+			case $rc in 0 | 143) rc=0 ;; esac
+			exit "$rc"
+		fi
+		log "the service exited with status $rc"
+		exit "$rc"
+	fi
+	# The watcher stopped.
+	watcher=
+	if [ "$stopping" = 1 ]; then
+		continue
+	fi
+	log "the reload watcher stopped (status $rc); stopping the service"
+	stop_service
+	wait "$service"
+	exit 1
+done

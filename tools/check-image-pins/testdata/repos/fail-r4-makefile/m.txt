@@ -1,0 +1,4 @@
+target "postfix" {
+  context  = "https://example.invalid/repo.git"
+  contexts = { base = "docker-image://busybox:latest" }
+}

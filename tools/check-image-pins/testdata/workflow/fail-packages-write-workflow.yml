@@ -1,0 +1,10 @@
+on: pull_request
+permissions:
+  contents: read
+  packages: write
+jobs:
+  a:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+# want-lines: 2

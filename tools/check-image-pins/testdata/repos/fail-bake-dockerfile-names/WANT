@@ -1,0 +1,3 @@
+build.txt:2: FROM image "debian:trixie-slim" is not pinned
+Dockerfile-alt:2: FROM image "busybox:latest" is not pinned
+x/Dockerfile:2: FROM image "alpine:3.22" is not pinned

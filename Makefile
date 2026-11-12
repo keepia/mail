@@ -24,7 +24,8 @@ SECRETS_SOURCE ?= .
 ACTIONLINT_VERSION := v1.7.12
 ACTIONLINT := bin/actionlint-$(ACTIONLINT_VERSION)/actionlint
 
-.PHONY: build test test-unit lint vuln tidy secrets secrets-test links links-test workflows workflows-test
+.PHONY: build test test-unit lint vuln tidy secrets secrets-test links links-test workflows workflows-test \
+	images image-test image-pins image-pins-test
 
 ## build: the keepia-mail binary in bin/
 build:
@@ -98,3 +99,33 @@ workflows: $(ACTIONLINT)
 ## workflows-test: tests of the action pin check (fixtures, no network)
 workflows-test:
 	$(GO) test -count=1 ./tools/check-action-pins/
+
+# Registry prefix and tag of the own images (docker-bake.hcl variables).
+REGISTRY ?= ghcr.io/keepia
+# A CA bundle file for local image builds behind a TLS-inspecting proxy. When
+# set, the bundle reaches the build only as the BuildKit secret "ca" (never a
+# layer), and the build runs on the host network so HTTPS_PROXY (a
+# predefined build argument, kept out of the image history) is reachable.
+# CI leaves it empty.
+KEEPIA_BUILD_CA ?=
+LOCAL_BUILD_OPTIONS = $(if $(KEEPIA_BUILD_CA),-ca "$(KEEPIA_BUILD_CA)" -host-network -https-proxy "$(HTTPS_PROXY)")
+
+## images: build every own image (docker-bake.hcl) into the local Docker store
+# The tool is the only local build path (tools/check-image-pins, local mode):
+# it resolves the exact definition it will build, checks it, then runs the
+# build itself with the same arguments and a cleaned environment. This
+# Makefile names no build command of its own.
+images:
+	$(GO) run ./tools/check-image-pins -bake-local -version "$(VERSION)" -registry "$(REGISTRY)" $(LOCAL_BUILD_OPTIONS)
+
+## image-test: smoke, health and reload tests of one built image (IMAGE=postfix)
+image-test:
+	bash scripts/image-test.sh $(IMAGE) $(REGISTRY)/$(if $(filter keepia,$(IMAGE)),mail,mail-$(IMAGE)):$(VERSION)
+
+## image-pins: every image, frontend and download pinned; packages: write only in release.yml
+image-pins:
+	$(GO) run ./tools/check-image-pins
+
+## image-pins-test: tests of the image pin check (fixtures, no network)
+image-pins-test:
+	$(GO) test -count=1 ./tools/check-image-pins/

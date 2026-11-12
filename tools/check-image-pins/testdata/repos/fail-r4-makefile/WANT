@@ -1,0 +1,8 @@
+Makefile:6: a Makefile may not mention buildx
+Makefile:15: a Makefile may not mention buildx
+Makefile:21: a Makefile may not mention buildx
+Makefile:24: a Makefile may not mention buildx
+Makefile:27: a Makefile may not mention buildx
+Makefile:30: a Makefile may not mention buildx
+Makefile:33: a Makefile runs "docker build"
+extra.mk:2: a Makefile may not mention buildx

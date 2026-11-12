@@ -1,0 +1,3 @@
+# A bake file outside the root (`bake -f build/docker-bake.hcl`) is not
+# resolved, so it is reported instead of passed (any stray *.hcl).
+target "a" { context = "https://example.invalid/team/repo.git" }

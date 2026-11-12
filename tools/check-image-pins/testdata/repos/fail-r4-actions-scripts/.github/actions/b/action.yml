@@ -1,0 +1,10 @@
+# Review B delta 2, W2: a composite action that builds.
+name: b
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: docker buildx bake --load --file=m.txt postfix
+    - uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+      with:
+        source: .
