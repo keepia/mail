@@ -249,7 +249,9 @@ profile each (architecture section 7); with
 needs Docker Engine 28 or later (the gateway mode `isolated`): Engine 27
 refuses to create the networks, and 26 or older creates them without the
 isolation, silently. [Architecture section 7](architecture.md#7-docker)
-has the check to run.
+has the check to run after the first start: the host must have no
+address in the internal subnets (`edge-public`, which is not internal,
+keeps its gateway address on the host).
 
 ```sh
 cp .env.example .env              # then set KEEPIA_POSTGRES_PASSWORD and the edge addresses
@@ -276,8 +278,10 @@ docker compose up -d --wait --no-build --pull never
   in its port bindings. A start that skips that dependency (`docker
   compose restart`, `docker start`, `up --no-deps`) reaches the second
   place, `edge-postfix`'s own entrypoint, which exits 1 before Postfix
-  runs. Docker binds the port for that moment (and for each restart
-  attempt), but nothing listens on it. After a refusal, fix `.env`, then
+  runs. Docker publishes the port for that moment (and for each restart
+  attempt): docker-proxy can briefly accept a TCP handshake, but nothing
+  in the container listens and no data is handled (measured: 8 of 6468
+  probes accepted, no `220` banner). After a refusal, fix `.env`, then
   run `docker compose rm -f edge-postfix` and `up` again. The check is in
   Compose and not in `km`, because `km` never starts the edge role.
 - **The host cannot reach the internal networks:** their bridges use the

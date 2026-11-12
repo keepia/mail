@@ -924,20 +924,37 @@ the groupware listeners to the same test.
     reaches memcached. That fails open. Treat any Engine below 28 as
     unsupported.
 
-  The check before and after the first start, with the default subnets
-  (`KEEPIA_SUBNET4`/`KEEPIA_SUBNET6`):
+  The check, with the default subnets (`KEEPIA_SUBNET4`/`KEEPIA_SUBNET6`).
+  The version line works at any time. The other two are meaningful only
+  after the template has started once, because the networks do not exist
+  before that, on any Engine:
 
   ```sh
   docker version --format '{{.Server.Version}}'    # 28.0.0 or later
   docker network inspect -f '{{index .Options "com.docker.network.bridge.gateway_mode_ipv4"}} {{index .Options "com.docker.network.bridge.gateway_mode_ipv6"}}' keepia-mail_filter-private    # isolated isolated
-  ip -o addr show | grep -E ' (172\.29\.|fd7c:3b9e:5a21:)'    # nothing
+  ip -o addr show | grep -E ' (172\.29\.[124567]\.|fd7c:3b9e:5a21:[124567]::)'    # nothing
   ```
 
-  The last line is the one that decides: an older Engine passes the
-  second. Neither Compose nor the template can check the Engine version
-  at run time, and `km` starts only `postgres` and `keepia`, never the
-  template, so there is no run-time refusal; the CI `compose` job checks all three conditions
-  (test 9).
+  The last line matches only the internal subnets: networks 1, 2, 4, 5, 6
+  and 7 of `docker-compose.yml` (`<prefix>.<n>.0/24`,
+  `<prefix>:<n>::/64`). **edge-public (network 3, `172.29.3.0/24`,
+  `fd7c:3b9e:5a21:3::/64`) is the exception:** it is not internal and
+  keeps the gateway mode `nat`, because outbound mail and the published
+  port 25 go through its gateway. So the host holds `172.29.3.1` and
+  `fd7c:3b9e:5a21:3::1` on every Engine, and the pattern leaves network 3
+  out. With other subnets, or after a change to the networks, take the
+  internal subnets from the template:
+  `docker compose config --format json | jq -r '.networks[] | select(.internal) | .ipam.config[].subnet'`.
+
+  On a correct install the last line prints nothing. On Engine 26 or
+  older it prints the internal bridges' gateway addresses (for example
+  `172.29.6.1/24` and `fd7c:3b9e:5a21:6::1/64`), so it is the line that
+  decides: such an Engine passes the second line. Neither Compose nor the
+  template can check the Engine version at run time, and `km` starts only
+  `postgres` and `keepia`, never the template, so there is no run-time
+  refusal. The CI `compose` job checks all three conditions (test 9; its
+  host-address check covers the internal networks and skips
+  edge-public).
 - **Logs:** containers log to stdout. The `journald` log driver is required,
   with the host's journald retention at 30 days, which the operator sets
   (logs are kept at most 30 days, #2 scope; [coordinator decision T7][cd]).

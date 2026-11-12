@@ -8,7 +8,8 @@
 #   arguments: it runs them (exec) only if the addresses pass. A start that
 #   skips the dependency (`restart`, `docker start`, `up --no-deps`) after
 #   a refused `up` exits 1 before Postfix runs. Docker publishes the port
-#   for that moment, but nothing listens on it.
+#   for that moment: docker-proxy can briefly accept a TCP handshake, but
+#   nothing in the container listens and no data is handled.
 #
 # It accepts exactly one form per family and refuses the rest:
 # - EDGE_IPV4: a dotted quad (four decimal octets, no leading zeros, each
