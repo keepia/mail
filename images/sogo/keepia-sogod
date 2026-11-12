@@ -15,16 +15,23 @@
 # running. A worker in the middle of a request finishes it within the grace
 # time or loses it, as it would at Docker's SIGKILL. The master then sees
 # its workers gone and exits by itself; this script exits with its status.
+#
+# KEEPIA_SOGOD_GRACE must be a whole number of seconds from 0 to 300 (#55):
+# anything else ends the script with status 2 before sogod starts, because
+# bash would evaluate the raw value as an arithmetic expression (one that
+# could run a command, or kill the workers at once).
 set -u
 
 grace=${KEEPIA_SOGOD_GRACE:-5}
+if [[ ! $grace =~ ^[0-9]{1,3}$ ]] || ((10#$grace > 300)); then
+	echo "keepia-sogod: KEEPIA_SOGOD_GRACE must be a whole number of seconds from 0 to 300, not $(printf '%q' "$grace")" >&2
+	exit 2
+fi
+grace=$((10#$grace))
 if [ $# -eq 0 ]; then
 	echo "usage: keepia-sogod SOGOD-COMMAND..." >&2
 	exit 2
 fi
-
-"$@" &
-master=$!
 
 # workers: the pids whose parent is the master (no procps in the image).
 workers() {
@@ -43,6 +50,12 @@ workers() {
 }
 
 stop() {
+	if [ -z "$master" ]; then
+		# The signal came before the fork: stop sogod once it is started.
+		# The trap stays, so the fork does not inherit an ignored TERM.
+		pending=1
+		return 0
+	fi
 	trap '' TERM INT
 	interrupted=1
 	echo "keepia-sogod: stopping sogod (pid $master)"
@@ -60,7 +73,15 @@ stop() {
 		kill -KILL $pids 2>/dev/null || true
 	fi
 }
+
+# The trap is set before the fork (#55), so a signal in between is not lost.
+master= pending=0
 trap stop TERM INT
+"$@" &
+master=$!
+if [ "$pending" = 1 ]; then
+	stop
+fi
 
 # wait returns early when a trapped signal arrives (stop sets
 # interrupted); then it waits again, for the master's own exit status.

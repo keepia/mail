@@ -1,6 +1,7 @@
 # Alinto/sope at tag SOPE-5.12.13: commit d6dd1e7141e9c7b216e1f88e3c3fc277499b97bd,
 # tree 43e1a22a35ca6db5801df65b69a784f11c52e56f (#25). A digest manifest
-# (images/common/check-source): the sha256 of the listing of every file of
-# the tag's tree as "<sha256>  <path>", sorted by path (C locale), and the
-# number of files. To regenerate it from a clone, see docs/development/index.md.
-listing 13d8b9e6aa482347649b8c74c106f8b722c5c0bded8aa3c413a7439b0b5a5968 2097
+# (images/common/check-source): the sha256 of the listing of the tag's tree
+# (every file with its mode and sha256, every directory; #55) and its number
+# of lines (2097 files, 73 directories). To regenerate it from a clone
+# (scripts/source-listing.sh), see docs/development/index.md.
+listing 146dfb68d661f4b3e3862596964d684200226e8c965295f5b424acce093c6c70 2170

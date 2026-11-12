@@ -25,7 +25,7 @@ ACTIONLINT_VERSION := v1.7.12
 ACTIONLINT := bin/actionlint-$(ACTIONLINT_VERSION)/actionlint
 
 .PHONY: build test test-unit lint vuln tidy secrets secrets-test links links-test workflows workflows-test \
-	images image-test image-pins image-pins-test
+	images image-test image-pins image-pins-test image-scripts-test
 
 ## build: the keepia-mail binary in bin/
 build:
@@ -129,3 +129,8 @@ image-pins:
 ## image-pins-test: tests of the image pin check (fixtures, no network)
 image-pins-test:
 	$(GO) test -count=1 ./tools/check-image-pins/
+
+## image-scripts-test: tests of check-source, source-listing.sh and keepia-sogod (no Docker, no network)
+image-scripts-test:
+	sh scripts/check-source-test.sh
+	bash scripts/keepia-sogod-test.sh

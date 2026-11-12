@@ -14,11 +14,15 @@
 # HeinleinSupport/olefy at commit 9c01c571f11da1a41dda33b75e46d45d303270e4
 # (2026-11-05, the newest on master when #44 pinned it), as GitHub's commit
 # archive. Its sha256 was taken from CI's own download (BuildKit's digest
-# mismatch against a placeholder, the same on amd64 and arm64; #44), and
-# check-source ties the archive to that commit's tree.
+# mismatch against a placeholder, the same on amd64 and arm64; #44); the
+# reviews of #53 reproduced it offline from a clone (git archive with
+# gzip -cn; docs/development/index.md). check-source ties the archive to
+# that commit's tree: olefy-source.sha256 is the tree's listing, every file
+# with its mode and sha256 and every directory (#55). Every RUN that needs
+# no download runs with --network=none (#55).
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS source
 ADD --checksum=sha256:ad84687d875a1e4a8687224e9c97907e3711a730fc468482c06172a4ea500b2e https://github.com/HeinleinSupport/olefy/archive/9c01c571f11da1a41dda33b75e46d45d303270e4.tar.gz /tmp/olefy.tar.gz
-RUN --mount=type=bind,source=common/check-source,target=/tmp/check-source --mount=type=bind,source=olefy/olefy-source.sha256,target=/tmp/olefy-source.sha256 \
+RUN --network=none --mount=type=bind,source=common/check-source,target=/tmp/check-source --mount=type=bind,source=olefy/olefy-source.sha256,target=/tmp/olefy-source.sha256 \
     sh /tmp/check-source /tmp/olefy.tar.gz /tmp/olefy-source.sha256 /src/olefy
 
 # The wheels, in their own stage so they never reach a layer of the image.
@@ -28,7 +32,7 @@ ADD --checksum=sha256:4441f7c0ab4cbda27bd4668db3b14f36261d86e5059ce06c0828602cbe
 
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
-RUN groupadd --system --gid 10055 olefy \
+RUN --network=none groupadd --system --gid 10055 olefy \
  && useradd --system --uid 10055 --gid olefy \
       --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin olefy
 
@@ -41,7 +45,7 @@ RUN --mount=type=bind,source=common/keepia-apt-install,target=/tmp/keepia-apt-in
 # Only the two pinned wheels, from the local files: no index and no
 # dependency resolution. pip check fails the build if a requirement of
 # theirs is not met by the Debian packages above.
-RUN --mount=type=bind,from=wheels,source=/wheels,target=/tmp/wheels \
+RUN --network=none --mount=type=bind,from=wheels,source=/wheels,target=/tmp/wheels \
     python3 -m pip install --no-index --no-deps --no-cache-dir --break-system-packages --root-user-action=ignore \
       /tmp/wheels/oletools-0.60.2-py2.py3-none-any.whl /tmp/wheels/pcodedmp-1.2.6-py2.py3-none-any.whl \
  && python3 -m pip check
