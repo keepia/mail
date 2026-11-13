@@ -954,8 +954,10 @@ jobs:
         run: sha256sum -c SHA256SUMS
       # No release of the tag may exist, a draft included (the version job
       # cannot see drafts), so the cleanup below only ever finds this run's
-      # draft. Creating a ref fails when it exists, so a tag pushed since
-      # the version job's check is never reused.
+      # draft. The REST list shows drafts to this job's contents: write
+      # token; a failed call refuses too (#66 D1: `gh release view` failed
+      # open on drafts). Creating a ref fails when it exists, so a tag
+      # pushed since the version job's check is never reused.
       - name: Create the tag
         id: tag
         env:
@@ -966,11 +968,12 @@ jobs:
             echo "::error::not a release version: '$VERSION'"
             exit 1
           fi
-          if out=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>&1); then
-            echo "::error::a release v$VERSION exists (draft: $out); delete it if it is a leftover, then run again"
+          if ! found=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.tag_name == "v'"$VERSION"'") | "\(.id) \(.draft)"'); then
+            echo "::error::could not list the releases to check for v$VERSION"
             exit 1
-          elif [ "$out" != "release not found" ]; then
-            echo "::error::could not check for the release v$VERSION: $out"
+          fi
+          if [ -n "$found" ]; then
+            echo "::error::a release v$VERSION exists (id and draft: $found); delete it if it is a leftover, then run again"
             exit 1
           fi
           if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$GITHUB_SHA" --silent; then
@@ -997,22 +1000,30 @@ jobs:
             --title "Keepia Mail $VERSION" --notes-file notes.md --generate-notes "${start[@]}" ./*
       # Removes the tag this run created, and the draft gh leaves when an
       # upload fails, so the next run can start over; also when the job is
-      # cancelled or times out. A published release and its tag stay.
+      # cancelled or times out. A published release and its tag stay. The
+      # releases are listed through REST as above: a failed call or a
+      # published release deletes nothing; each draft of the tag is deleted
+      # by its id, then the tag.
       - name: Remove the tag after a failed release
         if: (failure() || cancelled()) && steps.tag.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          if out=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>&1); then
-            if [ "$out" != true ]; then
-              echo "::error::release v$VERSION is published although a step failed; check it, the tag stays"
-              exit 1
-            fi
-            gh release delete "v$VERSION" --repo "$GITHUB_REPOSITORY" --yes
-          elif [ "$out" != "release not found" ]; then
-            echo "::error::could not check for release v$VERSION: $out; delete the tag v$VERSION by hand if no release uses it"
+          if ! found=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.tag_name == "v'"$VERSION"'") | "\(.id) \(.draft)"'); then
+            echo "::error::could not list the releases to check for v$VERSION; delete the tag v$VERSION by hand if no release uses it"
             exit 1
+          fi
+          if [ -n "$found" ]; then
+            while read -r id draft; do
+              if [ "$draft" != true ]; then
+                echo "::error::release v$VERSION (id $id) is published although a step failed; check it, the tag stays"
+                exit 1
+              fi
+            done <<<"$found"
+            while read -r id _; do
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$id" --silent
+            done <<<"$found"
           fi
           gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/v$VERSION" --silent
           echo "::notice::removed the tag v$VERSION; fix the failure and run the workflow again"
