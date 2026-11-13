@@ -713,7 +713,19 @@ lives, also under a skipped path.
    `buildkitd-config-inline` and `driver`, so no `append`, `endpoint` or
    `version`): without it the builder runs the floating
    `moby/buildkit:buildx-stable-1`, and in `push` that container holds the
-   GHCR credentials (#71 review B, N6);
+   GHCR credentials (#71 review B, N6). Outside `release.yml` that step
+   has exactly CI's inputs, the pinned image and the mirror (no other
+   `driver-opts` entry such as `network=host`, no other
+   `buildkitd-config-inline`, no explicit `driver`; #66 D3); rule 7 holds
+   `release.yml`'s own. And in every workflow a job builds with the
+   builder that step started (#66 D2): a step that runs `docker buildx
+   create` or `use` (also `docker builder …`, buildx's alias, and the
+   `docker-buildx` plugin binary) or `docker context create`, `import` or
+   `use`, in its own text or `github-script`, and in a job that builds
+   with bake also in a script, make target or local action it runs, is
+   reported; so is `BUILDX_BUILDER`, `DOCKER_CONTEXT` or `DOCKER_HOST` in
+   the workflow, job or step `env`, and outside `release.yml` an `env`
+   that is not a literal mapping;
 7. **the release surface** (#27,
    [`release.go`](../../tools/check-image-pins/release.go)): `release.yml`
    has exactly the planned shape, so the one workflow that can push cannot
@@ -815,7 +827,14 @@ lives, also under a skipped path.
      push rows' digest files, each checked as `sha256:<64 hex>`), one
      `actions/attest` step per subject (the provenance of each image's
      index, the SBOM of each platform manifest, every release asset), and
-     `release`'s tag, release and cleanup steps. Their `if` and
+     `release`'s tag, release and cleanup steps. The tag and cleanup
+     steps list the releases through the REST API, which shows drafts to
+     the job's `contents: write` token: the tag step refuses on any
+     release of the tag and on a failed call; the cleanup deletes nothing
+     on a failed call or a published release, else each draft of the tag
+     by its id, then the tag (#66 D1: `gh release view` looked drafts up
+     through GraphQL and failed open; `TestReleaseTagLines` runs both
+     lines against a stub `gh`). Their `if` and
      `working-directory` are part of the step. So these jobs run no
      third-party action, no `curl | sh`, no `GITHUB_ENV` write and nothing
      from the bundle;
@@ -860,7 +879,8 @@ lives, also under a skipped path.
      build row's package-list line of the verified image; and every
      `docker/setup-buildx-action` has exactly CI's mirror and the pinned
      BuildKit image (A N2, N3; B D1), plus `network=host` in
-     `push-rehearsal` only.
+     `push-rehearsal` only (rule 6 holds every other workflow to exactly
+     CI's inputs, #66 D3).
 
    With the cache off, the tool's modules come fresh from the module proxy
    and are checked against `go.sum`; nothing earlier in an exact job runs
@@ -872,8 +892,13 @@ lives, also under a skipped path.
    is clean), `TestReleaseSurface` (the `fail-27-*`, `fail-75-*` and
    `fail-77-*` cases, each one change
    to the repository's `release.yml` in the tree
-   `testdata/repos/pass-27-release`), `TestReleaseBuildMode`,
-   `TestBuildRefusesPushedTar`, and principle A's unit tests in
+   `testdata/repos/pass-27-release`), `TestBuilderRules` (rule 6's
+   `fail-66-d2-*` and `fail-66-d3-*` cases in the same tree, and no such
+   finding on the repository's `ci.yml` and `release.yml`),
+   `TestReleaseTagLines` (the tag and cleanup lines under `bash -eo
+   pipefail` with a stub `gh` and the system `jq`; no network),
+   `TestReleaseBuildMode`, `TestBuildRefusesPushedTar`, and principle
+   A's unit tests in
    `release_graph_test.go` (the pinned conditions, the measured runs,
    GitHub's rules on small graphs, the grammar and its precedence).
    `make image-pins` checks the real `release.yml` in the repository.

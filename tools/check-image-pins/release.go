@@ -182,16 +182,23 @@ done`
 	// so a tag pushed since the version job's check is never reused. Before
 	// it, no release of that tag may exist, a draft included (the version
 	// job cannot see drafts with contents: read): so any draft the cleanup
-	// step finds is this run's (#72 review B, N1).
+	// step finds is this run's (#72 review B, N1). The releases are listed
+	// through the REST API, which shows drafts to the job's contents: write
+	// token, and the step refuses on any match and on a failed call (#66
+	// D1: gh release view looks drafts up through GraphQL, and cli/cli's
+	// FetchRelease turns an error there into "release not found", so that
+	// check failed open). VERSION is X.Y.Z (checked first) before it goes
+	// into the jq filter.
 	lineCreateTag = `if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
   echo "::error::not a release version: '$VERSION'"
   exit 1
 fi
-if out=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>&1); then
-  echo "::error::a release v$VERSION exists (draft: $out); delete it if it is a leftover, then run again"
+if ! found=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.tag_name == "v'"$VERSION"'") | "\(.id) \(.draft)"'); then
+  echo "::error::could not list the releases to check for v$VERSION"
   exit 1
-elif [ "$out" != "release not found" ]; then
-  echo "::error::could not check for the release v$VERSION: $out"
+fi
+if [ -n "$found" ]; then
+  echo "::error::a release v$VERSION exists (id and draft: $found); delete it if it is a leftover, then run again"
   exit 1
 fi
 if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$GITHUB_SHA" --silent; then
@@ -217,16 +224,25 @@ gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
 	// lineRemoveTag removes the tag this run created, and the draft gh
 	// leaves when an upload fails, so the next run can start over; also
 	// when the job is cancelled or times out. A published release and its
-	// tag stay.
-	lineRemoveTag = `if out=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>&1); then
-  if [ "$out" != true ]; then
-    echo "::error::release v$VERSION is published although a step failed; check it, the tag stays"
-    exit 1
-  fi
-  gh release delete "v$VERSION" --repo "$GITHUB_REPOSITORY" --yes
-elif [ "$out" != "release not found" ]; then
-  echo "::error::could not check for release v$VERSION: $out; delete the tag v$VERSION by hand if no release uses it"
+	// tag stay. It lists the releases through the REST API like
+	// lineCreateTag (#66 D1): on a failed call, or if any release of the
+	// tag is published, it deletes nothing; otherwise it deletes every
+	// draft of the tag by its id, then the tag. It runs only after the tag
+	// step succeeded, so VERSION is X.Y.Z.
+	lineRemoveTag = `if ! found=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.tag_name == "v'"$VERSION"'") | "\(.id) \(.draft)"'); then
+  echo "::error::could not list the releases to check for v$VERSION; delete the tag v$VERSION by hand if no release uses it"
   exit 1
+fi
+if [ -n "$found" ]; then
+  while read -r id draft; do
+    if [ "$draft" != true ]; then
+      echo "::error::release v$VERSION (id $id) is published although a step failed; check it, the tag stays"
+      exit 1
+    fi
+  done <<<"$found"
+  while read -r id _; do
+    gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$id" --silent
+  done <<<"$found"
 fi
 gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/v$VERSION" --silent
 echo "::notice::removed the tag v$VERSION; fix the failure and run the workflow again"`

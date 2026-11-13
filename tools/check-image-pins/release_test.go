@@ -2,11 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/keepia/mail/internal/testwait"
 )
 
 // The release fixture: the repository's own .github/workflows/release.yml
@@ -116,39 +122,66 @@ const (
 	jobEnvStart       = "    env:\n      BAKE_TARGET:"
 )
 
-// releaseViewCheck is the release job's check that no release of the tag
-// exists, a draft included (#72 review B, N1).
-const releaseViewCheck = `          if out=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>&1); then
-            echo "::error::a release v$VERSION exists (draft: $out); delete it if it is a leftover, then run again"
+// releaseListCheck is the release job's check that no release of the tag
+// exists, a draft included (#72 review B, N1), through the REST list (#66
+// D1).
+const releaseListCheck = `          if ! found=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.tag_name == "v'"$VERSION"'") | "\(.id) \(.draft)"'); then
+            echo "::error::could not list the releases to check for v$VERSION"
             exit 1
-          elif [ "$out" != "release not found" ]; then
-            echo "::error::could not check for the release v$VERSION: $out"
+          fi
+          if [ -n "$found" ]; then
+            echo "::error::a release v$VERSION exists (id and draft: $found); delete it if it is a leftover, then run again"
             exit 1
           fi
 `
 
-// buildxWorkflow is a workflow other than release.yml with one pinned
-// setup-buildx step and the given extra inputs.
+// buildxConfig is CI's buildkitd-config-inline input as a workflow
+// writes it (a block scalar).
+const buildxConfig = "          buildkitd-config-inline: |\n            [registry.\"docker.io\"]\n              mirrors = [\"mirror.gcr.io\"]\n"
+
+// buildxWorkflow is a workflow other than release.yml with one
+// setup-buildx step with exactly CI's inputs (#66 D3) and the given
+// extra inputs.
 func buildxWorkflow(extra string) string {
-	return "permissions:\n  contents: read\njobs:\n  x:\n    runs-on: ubuntu-24.04\n    steps:\n" +
-		"      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1\n        with:\n" +
-		"          driver-opts: image=" + buildkitImage + "\n" + extra
+	return buildxWorkflowWith("          driver-opts: image=" + buildkitImage + "\n" + buildxConfig + extra)
 }
+
+// buildxWorkflowWith is that workflow with exactly the given inputs.
+func buildxWorkflowWith(with string) string {
+	return "permissions:\n  contents: read\njobs:\n  x:\n    runs-on: ubuntu-24.04\n    steps:\n" +
+		"      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1\n        with:\n" + with
+}
+
+// otherWorkflow is a workflow other than release.yml with one job x: its
+// env (a YAML block at job level, "" for none) and its steps.
+func otherWorkflow(wfEnv, jobEnv, steps string) string {
+	return wfEnv + "permissions:\n  contents: read\njobs:\n  x:\n    runs-on: ubuntu-24.04\n" + jobEnv + "    steps:\n" + steps
+}
+
+// d3Finding is the start of the D3 finding for other.yml's step 1.
+const d3Finding = "other.yml:4: job x: step 1: docker/setup-buildx-action outside release.yml has exactly CI's inputs"
+
+// d2Runs is the D2 finding's tail for a command a step runs.
+const d2Runs = ": a job uses only the builder docker/setup-buildx-action started; no step creates or selects another builder or Docker context (#66 D2)"
 
 // runStep is a run step inserted before the -verify-pushed step.
 func runStepBefore(job, run string) mutation {
 	return inJob(job, pushedStep, "      - run: "+run+"\n"+pushedStep)
 }
 
-// releaseCases are the red fixtures of rule 7 (test 18), one change each
-// to pass-27-release, with the findings each must give: every fragment
-// in want, and exactly that many findings. The plan point is in the name.
-var releaseCases = []struct {
+// releaseCase is one red fixture: a change to pass-27-release (its
+// release.yml and other files of the tree) with the findings it must
+// give: every fragment in want, and exactly that many findings.
+type releaseCase struct {
 	name   string
 	mutate mutation
 	extra  map[string]string // other files of the tree
 	want   []string
-}{
+}
+
+// releaseCases are the red fixtures of rule 7 (test 18), one change each
+// to pass-27-release. The plan point is in the name.
+var releaseCases = []releaseCase{
 	// P1: the exemption is the exact path.
 	{"fail-27-p1-release-yaml", unchanged, map[string]string{".github/workflows/release.yaml": "permissions:\n  packages: write\njobs: {}\n"},
 		[]string{"release.yaml:1: workflow grants packages: write"}},
@@ -353,15 +386,17 @@ var releaseCases = []struct {
 		nil, []string{"job release: step 4 runs a text that is not one of this job's lines"}},
 	// Review B, N1: the tag step refuses any existing release, a draft
 	// included, so the cleanup only ever finds this run's draft.
-	{"fail-27-4b-tag-no-release-check", inJob("release", releaseViewCheck, ""),
+	{"fail-27-4b-tag-no-release-check", inJob("release", releaseListCheck, ""),
 		nil, []string{"job release: step 3 runs a text that is not one of this job's lines"}},
 	// Review B, N2: setup-buildx takes no other input, in any workflow.
+	// #66 D3: outside release.yml its inputs are also exactly CI's, so
+	// each of these has the D3 finding too.
 	{"fail-27-4b-ci-buildx-append", unchanged, map[string]string{".github/workflows/other.yml": buildxWorkflow("          append: |\n            - endpoint: tcp://192.0.2.1:1234\n              driver-opts: image=moby/buildkit:latest\n")},
-		[]string{"other.yml:4: job x: step 1: docker/setup-buildx-action input append is not allowed"}},
+		[]string{"other.yml:4: job x: step 1: docker/setup-buildx-action input append is not allowed", d3Finding}},
 	{"fail-27-4b-ci-buildx-version-endpoint", unchanged, map[string]string{".github/workflows/other.yml": buildxWorkflow("          version: latest\n          endpoint: tcp://192.0.2.1:1234\n")},
-		[]string{"other.yml:4: job x: step 1: docker/setup-buildx-action input endpoint is not allowed", "other.yml:4: job x: step 1: docker/setup-buildx-action input version is not allowed"}},
+		[]string{"other.yml:4: job x: step 1: docker/setup-buildx-action input endpoint is not allowed", "other.yml:4: job x: step 1: docker/setup-buildx-action input version is not allowed", d3Finding}},
 	{"fail-27-4b-ci-buildx-floating", unchanged, map[string]string{".github/workflows/other.yml": "permissions:\n  contents: read\njobs:\n  x:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1\n"},
-		[]string{"other.yml:4: job x: step 1: docker/setup-buildx-action starts BuildKit from the floating moby/buildkit:buildx-stable-1"}},
+		[]string{"other.yml:4: job x: step 1: docker/setup-buildx-action starts BuildKit from the floating moby/buildkit:buildx-stable-1", d3Finding}},
 	// #75: push by digest under the bare repository, in both push jobs.
 	// The old texts of run 43401448419 are refused.
 	{"fail-75-rehearsal-old-text", inJob("push-rehearsal", rehearsalTagsLine+"        "+pushOutputTrue, pushOutputFalse), nil, []string{
@@ -478,6 +513,83 @@ func formFinding(job string) string {
 	return "job " + job + ": if must be exactly " + pinnedReleaseConds[job] + " (P6, #77): its ancestor " + anc
 }
 
+// builderCases are the red fixtures of #66 D2 and D3, in the tree of
+// pass-27-release: a change to its release.yml (the jobs build and bundle,
+// which rule 7 does not hold to exact steps) or another workflow,
+// other.yml.
+func builderCases() []releaseCase {
+	other := func(wf string) map[string]string { return map[string]string{".github/workflows/other.yml": wf} }
+	run := func(text string) map[string]string { return other(otherWorkflow("", "", "      - run: "+text+"\n")) }
+	cases := []releaseCase{
+		// D2: a step creates or selects another builder or context, in any
+		// workflow.
+		{"fail-66-d2-other-buildx-create", unchanged, run("docker buildx create --use --name other"), []string{"other.yml:4: job x: step 1 runs buildx create" + d2Runs}},
+		{"fail-66-d2-other-buildx-use", unchanged, run("docker buildx use other"), []string{"other.yml:4: job x: step 1 runs buildx use" + d2Runs}},
+		{"fail-66-d2-other-buildx-plugin", unchanged, run("/usr/libexec/docker/cli-plugins/docker-buildx --builder default use other"), []string{"other.yml:4: job x: step 1 runs buildx use" + d2Runs}},
+		{"fail-66-d2-other-builder-alias", unchanged, run("docker builder create --use"), []string{"other.yml:4: job x: step 1 runs docker builder create" + d2Runs}},
+		{"fail-66-d2-other-context-use", unchanged, run("docker context use other"), []string{"other.yml:4: job x: step 1 runs docker context use" + d2Runs}},
+		{"fail-66-d2-other-context-create", unchanged, run("docker context create remote --docker host=tcp://192.0.2.1:2376"), []string{"other.yml:4: job x: step 1 runs docker context create" + d2Runs}},
+		{"fail-66-d2-other-context-import", unchanged, run("docker --log-level warn context import remote remote.tar"), []string{"other.yml:4: job x: step 1 runs docker context import" + d2Runs}},
+		{"fail-66-d2-other-bash-c", unchanged, run(`bash -c "docker buildx use other"`), []string{"other.yml:4: job x: step 1 runs buildx use" + d2Runs}},
+		{"fail-66-d2-other-github-script", unchanged, other(otherWorkflow("", "", "      - uses: actions/github-script@"+sha40+"\n        with:\n          script: await exec.exec('docker', ['context', 'use', 'other'])\n")),
+			[]string{"other.yml:4: job x: step 1 runs docker context use" + d2Runs}},
+		// In release.yml's jobs without exact steps, and in a script the
+		// build job runs.
+		{"fail-66-d2-release-build-buildx-create", inJob("build", "      - name: SBOM\n", "      - run: docker buildx create --use --name other\n      - name: SBOM\n"),
+			nil, []string{"job build: step 14 runs buildx create" + d2Runs}},
+		{"fail-66-d2-release-bundle-context-use", inJob("bundle", "      - uses: actions/upload-artifact", "      - run: docker context use other\n      - uses: actions/upload-artifact"),
+			nil, []string{"job bundle: step 10 runs docker context use" + d2Runs}},
+		{"fail-66-d2-release-build-script", inJob("build", "      - name: SBOM\n", "      - run: sh scripts/builder.sh\n      - name: SBOM\n"),
+			map[string]string{"scripts/builder.sh": "#!/bin/sh\nset -eu\ndocker buildx use other\n"}, []string{"job build: step 14 runs buildx use in scripts/builder.sh" + d2Runs}},
+		{"fail-66-d2-release-bundle-step-env", inJob("bundle", "      - uses: actions/upload-artifact", "      - env:\n          DOCKER_HOST: tcp://192.0.2.1:2375\n        run: echo\n      - uses: actions/upload-artifact"),
+			nil, []string{"job bundle: step 10: env sets DOCKER_HOST"}},
+		// An env the check cannot read, outside release.yml (rule 7 reports
+		// it in release.yml).
+		{"fail-66-d2-other-step-env-expression", unchanged, other(otherWorkflow("", "", "      - env: ${{ fromJSON('{\"DOCKER_HOST\":\"tcp://192.0.2.1:2375\"}') }}\n        run: echo\n")),
+			[]string{"other.yml:4: job x: step 1: env is not a mapping"}},
+		{"fail-66-d2-other-job-env-expression", unchanged, other(otherWorkflow("", "    env: ${{ fromJSON('{}') }}\n", "      - run: echo\n")),
+			[]string{"other.yml:4: job x: job env is not a mapping"}},
+		// D3: outside release.yml, exactly CI's setup-buildx inputs.
+		{"fail-66-d3-network-host", unchanged, other(buildxWorkflowWith("          driver-opts: |\n            image=" + buildkitImage + "\n            network=host\n" + buildxConfig)), []string{d3Finding}},
+		{"fail-66-d3-config-changed", unchanged, other(buildxWorkflowWith("          driver-opts: image=" + buildkitImage + "\n          buildkitd-config-inline: |\n            [registry.\"docker.io\"]\n              mirrors = [\"mirror.example.org\"]\n")), []string{d3Finding}},
+		{"fail-66-d3-config-extra", unchanged, other(buildxWorkflow("            [worker.oci]\n              gc = false\n")), []string{d3Finding}},
+		{"fail-66-d3-config-missing", unchanged, other(buildxWorkflowWith("          driver-opts: image=" + buildkitImage + "\n")), []string{d3Finding}},
+		{"fail-66-d3-driver-explicit", unchanged, other(buildxWorkflow("          driver: docker-container\n")), []string{d3Finding}},
+	}
+	// D2: each of the three keys at each env level is one finding.
+	for _, k := range []string{"BUILDX_BUILDER", "DOCKER_CONTEXT", "DOCKER_HOST"} {
+		cases = append(cases,
+			releaseCase{"fail-66-d2-workflow-env-" + k, unchanged, other(otherWorkflow("env:\n  "+k+": x\n", "", "      - run: echo\n")), []string{"other.yml:1: workflow env sets " + k}},
+			releaseCase{"fail-66-d2-job-env-" + k, unchanged, other(otherWorkflow("", "    env:\n      "+k+": x\n", "      - run: echo\n")), []string{"other.yml:4: job x: job env sets " + k}},
+			releaseCase{"fail-66-d2-step-env-" + k, unchanged, other(otherWorkflow("", "", "      - env:\n          "+k+": x\n        run: echo\n")), []string{"other.yml:4: job x: step 1: env sets " + k}},
+		)
+	}
+	return cases
+}
+
+// TestBuilderRules: #66 D2 and D3, each case one change with exactly its
+// findings; and the repository's own workflows give none of them.
+func TestBuilderRules(t *testing.T) {
+	runReleaseCases(t, builderCases())
+	for _, p := range []string{"../../.github/workflows/ci.yml", releaseWorkflow} {
+		src, err := os.ReadFile(p) //nolint:gosec // the repository's own workflow
+		if err != nil {
+			t.Fatal(err)
+		}
+		findings, _, err := CheckWorkflow(src, p == releaseWorkflow, func(text, workdir string, shell bool) ([]refText, []string) {
+			return referencedTexts("../..", text, workdir, shell)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range findings {
+			if strings.Contains(f.Msg, "#66 D") {
+				t.Errorf("%s: %v", p, f)
+			}
+		}
+	}
+}
+
 // copyTree copies the fixture tree to dir.
 func copyTree(t *testing.T, from, to string) {
 	t.Helper()
@@ -504,10 +616,16 @@ func copyTree(t *testing.T, from, to string) {
 // stated findings, and only those. CHECK_IMAGE_PINS_DUMP=<dir> writes each
 // case's tree there, for the counter-proof against the base commit.
 func TestReleaseSurface(t *testing.T) {
+	runReleaseCases(t, releaseCases)
+}
+
+// runReleaseCases runs each case on its own copy of pass-27-release.
+func runReleaseCases(t *testing.T, cases []releaseCase) {
+	t.Helper()
 	base := releaseFixture(t)
 	dump := os.Getenv("CHECK_IMAGE_PINS_DUMP")
 	seen := map[string]bool{}
-	for _, c := range releaseCases {
+	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if seen[c.name] {
 				t.Fatalf("duplicate case name")
@@ -701,5 +819,183 @@ func TestBuildRefusesPushedTar(t *testing.T) {
 	}
 	if msg := pushedTarProblem(t.TempDir()); msg != "" {
 		t.Fatalf("an empty tree: %q", msg)
+	}
+}
+
+// ghStub stands in for gh on PATH in TestReleaseTagLines (#66 D1). It
+// logs every call to $STUB_LOG and answers:
+//   - `api [--paginate] repos/example/repo/releases?per_page=100 --jq F`
+//     from the page $STUB_PAGE through the call's own filter F (the
+//     system jq; gh prints strings raw), or fails like a server error
+//     when $STUB_FAIL_LIST is set;
+//   - `release view` with gh's "release not found", the answer cli/cli's
+//     FetchRelease gives when the GraphQL draft lookup fails (the
+//     fail-open D1 describes);
+//   - the POST of a ref and the DELETE of a release or a tag, and `release
+//     delete`, with success.
+//
+// Anything else exits 2 with "stub gh:", which the test refuses.
+const ghStub = `#!/bin/sh
+printf '%s\n' "$*" >>"$STUB_LOG"
+if [ "$1" = release ]; then
+  case "$2" in
+  view) echo "release not found" >&2; exit 1 ;;
+  delete) exit 0 ;;
+  esac
+  echo "stub gh: unexpected call: $*" >&2
+  exit 2
+fi
+if [ "$1" != api ]; then
+  echo "stub gh: unexpected call: $*" >&2
+  exit 2
+fi
+shift
+method=GET
+filter=
+path=
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --method|-X) method=$2; shift 2 ;;
+  --jq|-q) filter=$2; shift 2 ;;
+  -f|-F) shift 2 ;;
+  --paginate|--silent) shift ;;
+  -*) echo "stub gh: unknown option $1" >&2; exit 2 ;;
+  *) path=$1; shift ;;
+  esac
+done
+case "$method $path" in
+"GET repos/example/repo/releases?per_page=100")
+  if [ -n "${STUB_FAIL_LIST:-}" ]; then
+    echo "HTTP 502: Bad Gateway" >&2
+    exit 1
+  fi
+  exec jq -r "$filter" "$STUB_PAGE" ;;
+"POST repos/example/repo/git/refs" | "DELETE repos/example/repo/releases/"* | "DELETE repos/example/repo/git/refs/tags/"*)
+  exit 0 ;;
+esac
+echo "stub gh: unexpected call: $method $path" >&2
+exit 2
+`
+
+// lineCreateTag5bce151 is lineCreateTag before #66 D1 (5bce151): it asks
+// gh release view, which answers "release not found" when its GraphQL
+// draft lookup fails, so it creates the tag although a draft exists.
+const lineCreateTag5bce151 = `if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+  echo "::error::not a release version: '$VERSION'"
+  exit 1
+fi
+if out=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>&1); then
+  echo "::error::a release v$VERSION exists (draft: $out); delete it if it is a leftover, then run again"
+  exit 1
+elif [ "$out" != "release not found" ]; then
+  echo "::error::could not check for the release v$VERSION: $out"
+  exit 1
+fi
+if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$GITHUB_SHA" --silent; then
+  echo "::error::could not create the tag v$VERSION on $GITHUB_SHA; does it exist?"
+  exit 1
+fi`
+
+// TestReleaseTagLines runs the release job's tag and cleanup lines (rule
+// 7 holds release.yml to exactly these constants) as GitHub runs a bash
+// step, `bash --noprofile --norc -eo pipefail`, with ghStub first on PATH
+// and no network: on a listed release of the tag, a draft included, and
+// on a failed list call, the tag step refuses before it creates the tag,
+// and the cleanup deletes only drafts, never past a published release
+// (#66 D1). The last case is the regression proof: under the stub, the
+// line of 5bce151 creates the tag although a draft is listed.
+func TestReleaseTagLines(t *testing.T) {
+	for _, tool := range []string{"bash", "sh", "jq"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Fatalf("the test runs the step with %s: %v", tool, err)
+		}
+	}
+	const (
+		sha    = "0123456789abcdef0123456789abcdef01234567"
+		post   = "api --method POST repos/example/repo/git/refs -f ref=refs/tags/v0.2.0 -f sha=" + sha + " --silent"
+		delTag = "api --method DELETE repos/example/repo/git/refs/tags/v0.2.0 --silent"
+		// The page: releases of other tags (near misses of v0.2.0
+		// included), a draft and a published release of v0.2.0.
+		others    = `{"id":101,"tag_name":"v0.1.0","draft":false},{"id":102,"tag_name":"v0.2.0-rc.1","draft":true},{"id":103,"tag_name":"v0.12.0","draft":false},{"id":104,"tag_name":"0.2.0","draft":true}`
+		draft     = `{"id":202,"tag_name":"v0.2.0","draft":true}`
+		draft2    = `{"id":204,"tag_name":"v0.2.0","draft":true}`
+		published = `{"id":303,"tag_name":"v0.2.0","draft":false}`
+	)
+	delRelease := func(id string) string { return "api --method DELETE repos/example/repo/releases/" + id + " --silent" }
+	page := func(rs ...string) string { return "[" + strings.Join(rs, ",") + "]" }
+	cases := []struct {
+		name, line, page string
+		failList         bool
+		code             int
+		calls            []string // the calls that change something, in order
+	}{
+		{"create: a draft of the tag", lineCreateTag, page(others, draft), false, 1, nil},
+		{"create: a published release of the tag", lineCreateTag, page(others, published), false, 1, nil},
+		{"create: the list call fails", lineCreateTag, page(), true, 1, nil},
+		{"create: only other tags", lineCreateTag, page(others), false, 0, []string{post}},
+		{"create: no release", lineCreateTag, page(), false, 0, []string{post}},
+		{"remove: a draft", lineRemoveTag, page(others, draft), false, 0, []string{delRelease("202"), delTag}},
+		{"remove: two drafts", lineRemoveTag, page(draft, others, draft2), false, 0, []string{delRelease("202"), delRelease("204"), delTag}},
+		{"remove: a published release", lineRemoveTag, page(others, published), false, 1, nil},
+		{"remove: a draft and a published release", lineRemoveTag, page(draft, published), false, 1, nil},
+		{"remove: the list call fails", lineRemoveTag, page(), true, 1, nil},
+		{"remove: none", lineRemoveTag, page(others), false, 0, []string{delTag}},
+		{"regression: 5bce151's create line, a draft of the tag", lineCreateTag5bce151, page(others, draft), false, 0, []string{post}},
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(ghStub), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			step, pageFile, log := filepath.Join(dir, "step.sh"), filepath.Join(dir, "page.json"), filepath.Join(dir, "calls")
+			for p, s := range map[string]string{step: c.line + "\n", pageFile: c.page, log: ""} {
+				if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), testwait.Limit(t))
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "bash", "--noprofile", "--norc", "-eo", "pipefail", step)
+			cmd.Env = []string{
+				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"VERSION=0.2.0", "GITHUB_REPOSITORY=example/repo", "GITHUB_SHA=" + sha,
+				"STUB_LOG=" + log, "STUB_PAGE=" + pageFile,
+			}
+			if c.failList {
+				cmd.Env = append(cmd.Env, "STUB_FAIL_LIST=1")
+			}
+			out, err := cmd.CombinedOutput()
+			code := 0
+			if err != nil {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) {
+					t.Fatal(err)
+				}
+				code = exit.ExitCode()
+			}
+			b, err := os.ReadFile(log) //nolint:gosec // the test's own file
+			if err != nil {
+				t.Fatal(err)
+			}
+			var calls []string
+			for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+				if strings.Contains(l, "--method ") || strings.HasPrefix(l, "release delete") {
+					calls = append(calls, l)
+				}
+			}
+			switch {
+			case code != c.code || !slices.Equal(calls, c.calls):
+				t.Errorf("exit %d with the calls %q, want %d with %q", code, calls, c.code, c.calls)
+			case strings.Contains(string(out), "stub gh:"):
+				t.Errorf("a call the stub does not know")
+			case code != 0 && !strings.Contains(string(out), "::error::"):
+				t.Errorf("exit %d without an ::error:: line", code)
+			}
+			if t.Failed() {
+				t.Logf("output:\n%s\ncalls:\n%s", out, b)
+			}
+		})
 	}
 }
