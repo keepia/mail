@@ -22,8 +22,9 @@ import (
 //   - P2: a job that is not in the policy and a job of the policy that is
 //     missing; permissions other than the policy's, top-level other than
 //     {}; a job-level `uses:` (a reusable workflow).
-//   - P3, P4, P5, P9: in push, push-rehearsal, index and latest, every
-//     step is exactly the policy's step at that position (push-rehearsal
+//   - P3, P4, P5, P9: in push, push-arm64, push-rehearsal, index and
+//     latest, every step is exactly the policy's step at that position
+//     (push-arm64 is push for the arm64 rows, after it, #77; push-rehearsal
 //     is push without the login, with the local registry service and a
 //     host-network builder, #75): the same action
 //     with exactly its inputs, or a run step whose trimmed text equals one
@@ -36,7 +37,11 @@ import (
 //     the bake step (by digest under the bare repository, BAKE_SET
 //     exactly the policy's lines, which build mode resolves) and
 //     -publish-index and -move-latest.
-//   - P6: `needs` and `if` of every job other than the policy's.
+//   - P6: `needs` and `if` of every job other than the policy's. The
+//     policy's `if` is generated (releaseCondFor, release_graph.go), and
+//     principle A (#77) evaluates every `if` of the workflow under
+//     GitHub's rules: the form of the jobs after a mode-exclusive job, the
+//     grammar, the job sets of both modes and failure injection.
 //   - P7: continue-on-error anywhere; a job container, services (except
 //     push-rehearsal's exact registry service, #75),
 //     concurrency, defaults or env (env only in the bake jobs, exactly
@@ -49,8 +54,12 @@ import (
 //     cancel-in-progress: false}, which serialises the runs that move
 //     `latest` forward (B6); a `${{ }}` in any run text; a VERSION env
 //     other than ${{ needs.version.outputs.version }}.
-//   - SOURCE_DATE_EPOCH required in build, push and push-rehearsal before
-//     the check step (B1 M3).
+//   - SOURCE_DATE_EPOCH required in build, push, push-arm64 and
+//     push-rehearsal before the check step (B1 M3).
+//   - P9 (#77, principle B): no two rows push to the same package at
+//     once. push runs the build job's images on amd64 only, push-arm64
+//     the same images on arm64 only and needs push; push-rehearsal runs
+//     the build job's strategy (each row pushes to its own runner).
 //   - Everywhere (#71, round 2): every env is a literal mapping, not an
 //     expression; actions/setup-go has cache: false; the release modes,
 //     docker login and docker/login-action appear only in the exact jobs;
@@ -77,7 +86,6 @@ const (
 	versionExpr      = "${{ needs.version.outputs.version }}"
 	releaseDryIf     = "${{ inputs.dry_run }}"
 	releaseRealIf    = "${{ !inputs.dry_run }}"
-	releaseBundleIf  = "${{ !cancelled() && needs.version.result == 'success' && needs.build.result == 'success' && ((inputs.dry_run && needs.push-rehearsal.result == 'success') || (!inputs.dry_run && needs.push.result == 'success' && needs.index.result == 'success')) }}"
 	indexDigestsExpr = "${{ needs.index.outputs.digests }}"
 	matrixRunsOn     = "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}"
 	plainRunsOn      = "ubuntu-24.04"
@@ -390,22 +398,27 @@ var (
 )
 
 // releaseJobOrder lists the jobs of the policy (P2: exactly these).
-var releaseJobOrder = []string{"version", "build", "push-rehearsal", "push", "index", "bundle", "attest", "attest-assets", "release", "latest"}
+var releaseJobOrder = []string{"version", "build", "push-rehearsal", "push", "push-arm64", "index", "bundle", "attest", "attest-assets", "release", "latest"}
 
-var releaseJobs = map[string]releaseJob{
+// releaseJobs is the policy. Each job's cond is generated from its needs
+// and the planned job sets of both modes (releaseCondFor, #77); the order
+// of a job's needs is the order of the terms in its condition (E-3).
+var releaseJobs = withReleaseConds(map[string]releaseJob{
 	"version":        {perms: map[string]string{"contents": "read", "pull-requests": "read"}},
 	"build":          {perms: readOnly, needs: []string{"version"}, bake: true},
-	"push-rehearsal": {perms: readOnly, needs: []string{"version", "build"}, cond: releaseDryIf, bake: true, steps: rehearsalSteps, services: rehearsalServices},
-	"push":           {perms: readPackage, needs: []string{"version", "build"}, cond: releaseRealIf, bake: true, steps: pushSteps},
-	"index": {perms: readPackage, needs: []string{"version", "push"}, cond: releaseRealIf, steps: indexSteps,
+	"push-rehearsal": {perms: readOnly, needs: []string{"version", "build"}, bake: true, steps: rehearsalSteps, services: rehearsalServices},
+	"push":           {perms: readPackage, needs: []string{"version", "build"}, bake: true, steps: pushSteps},
+	// The arm64 rows after every amd64 row (#77, principle B).
+	"push-arm64": {perms: readPackage, needs: []string{"version", "build", "push"}, bake: true, steps: pushSteps},
+	"index": {perms: readPackage, needs: []string{"version", "push", "push-arm64"}, steps: indexSteps,
 		outputs: map[string]any{"digests": "${{ steps.index.outputs.digests }}"}},
-	"bundle":        {perms: readOnly, needs: []string{"version", "build", "push-rehearsal", "push", "index"}, cond: releaseBundleIf},
-	"attest":        {perms: attestPerms, needs: []string{"version", "index", "bundle"}, cond: releaseRealIf, noRepoCode: true, steps: attestSteps},
-	"attest-assets": {perms: attestPerms, needs: []string{"bundle"}, cond: releaseRealIf, noRepoCode: true, steps: attestAssetsSteps},
-	"release": {perms: map[string]string{"contents": "write"}, needs: []string{"version", "bundle", "attest", "attest-assets"}, cond: releaseRealIf,
+	"bundle":        {perms: readOnly, needs: []string{"version", "build", "push-rehearsal", "push", "push-arm64", "index"}},
+	"attest":        {perms: attestPerms, needs: []string{"version", "index", "bundle"}, noRepoCode: true, steps: attestSteps},
+	"attest-assets": {perms: attestPerms, needs: []string{"bundle"}, noRepoCode: true, steps: attestAssetsSteps},
+	"release": {perms: map[string]string{"contents": "write"}, needs: []string{"version", "bundle", "attest", "attest-assets"},
 		noRepoCode: true, steps: releaseJobSteps},
-	"latest": {perms: readPackage, needs: []string{"version", "index", "release"}, cond: releaseRealIf, steps: latestSteps},
-}
+	"latest": {perms: readPackage, needs: []string{"version", "index", "release"}, steps: latestSteps},
+})
 
 // releaseBakeSet are the exact BAKE_SET lines of the bake jobs (revision
 // 2 B, revision 3 B5): the release cache of the row, and for push and
@@ -524,6 +537,9 @@ func checkReleaseWorkflow(top *yaml.Node, add func(int, string, ...any)) {
 		add(top.Line, "release.yml has no jobs mapping")
 		return
 	}
+	// Principle A (#77): the conditions under GitHub's rules. The jobs it
+	// returns have their `if` held by the form rule, not by P6.
+	formJobs := checkReleaseGraph(jobsNode, jobsKey.Line, add)
 	seen := map[string]bool{}
 	var buildJob map[string]any
 	for i := 0; i+1 < len(jobsNode.Content); i += 2 {
@@ -542,26 +558,60 @@ func checkReleaseWorkflow(top *yaml.Node, add func(int, string, ...any)) {
 		if name.Value == "build" {
 			buildJob = job
 		}
-		checkReleaseJob(name.Line, name.Value, policy, job, add)
+		checkReleaseJob(name.Line, name.Value, policy, job, formJobs[name.Value], add)
+		if name.Value == "push-arm64" && !slices.Contains(needsList(job["needs"]), "push") {
+			add(name.Line, "job push-arm64: needs must include push, so every arm64 row starts after every amd64 row has created its package (P9, #77)")
+		}
 	}
 	for _, n := range releaseJobOrder {
 		if !seen[n] {
 			add(jobsKey.Line, "job %s of the release policy is missing", n)
 		}
 	}
-	// push and push-rehearsal run the build job's matrix (P9).
+	// push, push-arm64 and push-rehearsal run the build job's matrix
+	// (P9): push its amd64 rows, push-arm64 its arm64 rows (#77: the two
+	// architectures of a package never push at once), push-rehearsal all.
 	if buildJob != nil {
 		for i := 0; i+1 < len(jobsNode.Content); i += 2 {
 			name := jobsNode.Content[i]
-			if name.Value != "push" && name.Value != "push-rehearsal" {
+			var want any
+			why := "every tested row is pushed"
+			switch name.Value {
+			case "push-rehearsal":
+				want = buildJob["strategy"]
+			case "push":
+				want = strategyWithArch(buildJob["strategy"], "amd64")
+				why = "every tested amd64 row is pushed, and the arm64 rows push only in push-arm64, after it (#77)"
+			case "push-arm64":
+				want = strategyWithArch(buildJob["strategy"], "arm64")
+				why = "every tested arm64 row is pushed, after push (#77)"
+			default:
 				continue
 			}
 			var job map[string]any
-			if jobsNode.Content[i+1].Decode(&job) == nil && !reflect.DeepEqual(job["strategy"], buildJob["strategy"]) {
-				add(name.Line, "job %s: strategy must equal the build job's, so every tested row is pushed (got %v, build has %v)", name.Value, job["strategy"], buildJob["strategy"])
+			if jobsNode.Content[i+1].Decode(&job) == nil && !reflect.DeepEqual(job["strategy"], want) {
+				add(name.Line, "job %s: strategy must be %v, so %s (got %v, build has %v)", name.Value, want, why, job["strategy"], buildJob["strategy"])
 			}
 		}
 	}
+}
+
+// strategyWithArch is the build job's strategy with the matrix arch
+// replaced by arch alone (a copy).
+func strategyWithArch(strategy any, arch string) any {
+	s, ok := asMap(strategy)
+	if !ok {
+		return strategy
+	}
+	out := maps.Clone(s)
+	m, ok := asMap(s["matrix"])
+	if !ok {
+		return out
+	}
+	matrix := maps.Clone(m)
+	matrix["arch"] = []any{arch}
+	out["matrix"] = matrix
+	return out
 }
 
 // checkReleaseOn checks P8's trigger: workflow_dispatch only, with the
@@ -618,8 +668,10 @@ func checkVersionEnv(line int, where string, env any, add func(int, string, ...a
 	}
 }
 
-// checkReleaseJob checks one job against its policy.
-func checkReleaseJob(line int, name string, p releaseJob, job map[string]any, add func(int, string, ...any)) {
+// checkReleaseJob checks one job against its policy. formHeld: the form
+// rule (checkReleaseGraph) holds this job's `if` with the same expected
+// string, so P6 does not compare it again.
+func checkReleaseJob(line int, name string, p releaseJob, job map[string]any, formHeld bool, add func(int, string, ...any)) {
 	for _, k := range sortedKeys(job) {
 		if k == "services" && p.services != nil {
 			if !reflect.DeepEqual(job[k], p.services) {
@@ -646,19 +698,21 @@ func checkReleaseJob(line int, name string, p releaseJob, job map[string]any, ad
 	if got := needsList(job["needs"]); !slices.Equal(got, sortedCopy(p.needs)) {
 		add(line, "job %s: needs must be exactly %v, so a failed or skipped earlier job stops it (P6), got %v", name, p.needs, job["needs"])
 	}
+	// Exactly, not trimmed: whitespace around a ${{ }} makes GitHub read
+	// the value as a string, which is true (#77 review A, B1).
 	cond, _ := job["if"].(string)
-	if _, has := job["if"]; strings.TrimSpace(cond) != p.cond || (p.cond == "" && has) {
+	if _, has := job["if"]; !formHeld && (cond != p.cond || (p.cond == "" && has)) {
 		want := p.cond
 		if want == "" {
 			want = "(none)"
 		}
-		add(line, "job %s: if must be exactly %s (P6), got %v", name, want, job["if"])
+		add(line, "job %s: if must be exactly %s (P6: each job's if gives exactly the planned jobs of both modes under GitHub's rules, #77), got %v", name, want, job["if"])
 	}
 	switch {
 	case p.bake:
 		checkReleaseBakeEnv(line, name, job["env"], add)
 	case job["env"] != nil:
-		add(line, "job %s: env is not allowed: only build, push and push-rehearsal have a job env (P7)", name)
+		add(line, "job %s: env is not allowed: only build, push, push-arm64 and push-rehearsal have a job env (P7)", name)
 	}
 	if p.steps != nil {
 		wantRunsOn := plainRunsOn
@@ -687,7 +741,7 @@ func checkReleaseJob(line int, name string, p releaseJob, job map[string]any, ad
 }
 
 // checkReleaseMatrix requires both architectures in the build job's
-// matrix; push and push-rehearsal must have the same strategy.
+// matrix; push, push-arm64 and push-rehearsal follow it (P9).
 func checkReleaseMatrix(line int, strategy any, add func(int, string, ...any)) {
 	s, _ := asMap(strategy)
 	m, _ := asMap(s["matrix"])
@@ -882,7 +936,7 @@ var releaseModeFlags = []string{"-verify-pushed", "-publish-index", "-move-lates
 
 // checkReleaseModesElsewhere reports, in a job that is not an exact-steps
 // job, a step that runs a release mode of the tool or logs in to a
-// registry (#71 review A, B3): those belong to push, push-rehearsal,
+// registry (#71 review A, B3): those belong to push, push-arm64, push-rehearsal,
 // index and latest only. A mode counts in any spelling (#71 delta
 // reviews A N1, B D2): its name anywhere in the text once quotes and
 // backslashes are gone, so -move-latest=true, --publish-index, "-verify-"pushed
@@ -894,7 +948,7 @@ func checkReleaseModesElsewhere(line int, name string, i int, step map[string]an
 	flat := normalizeShell(run)
 	for _, f := range releaseModeFlags {
 		if strings.Contains(flat, strings.TrimLeft(f, "-")) {
-			add(line, "job %s: step %d runs %s: the release modes run only in push, push-rehearsal, index and latest", name, i+1, f)
+			add(line, "job %s: step %d runs %s: the release modes run only in push, push-arm64, push-rehearsal, index and latest", name, i+1, f)
 		}
 	}
 	login := false
@@ -908,10 +962,10 @@ func checkReleaseModesElsewhere(line int, name string, i int, step map[string]an
 		}
 	}
 	if login {
-		add(line, "job %s: step %d runs docker login: only push, index and latest log in to GHCR", name, i+1)
+		add(line, "job %s: step %d runs docker login: only push, push-arm64, index and latest log in to GHCR", name, i+1)
 	}
 	if uses, _ := step["uses"].(string); strings.HasPrefix(strings.ToLower(uses), "docker/login-action@") {
-		add(line, "job %s: step %d uses docker/login-action: only push, index and latest log in to GHCR", name, i+1)
+		add(line, "job %s: step %d uses docker/login-action: only push, push-arm64, index and latest log in to GHCR", name, i+1)
 	}
 }
 

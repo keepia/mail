@@ -16,7 +16,7 @@ import (
 //   - the build job (tested, loaded): cache-to type=gha,mode=max with the
 //     row's release-<target>-<arch> scope, no cache-from, no output and no
 //     attest;
-//   - the push and push-rehearsal jobs: cache-from type=gha with that
+//   - the push, push-arm64 and push-rehearsal jobs: cache-from type=gha with that
 //     scope, no cache-to, exactly the two outputs
 //     type=image,push-by-digest=true,name-canonical=true,push=true and
 //     type=oci,dest=pushed.tar, and exactly the attestation
@@ -147,7 +147,7 @@ func checkReleaseTarget(bad func(string, ...any), name string, t bakeTarget, pol
 		exact("cache-to", t.CacheTo, gha(true))
 		return
 	}
-	// push and push-rehearsal: every layer from the build job's cache.
+	// push, push-arm64 and push-rehearsal: every layer from the build job's cache.
 	exact("cache-from", t.CacheFrom, gha(false))
 	exact("cache-to", t.CacheTo, nil)
 	if len(t.Output) > 0 && t.Output[0]["push-by-digest"] != "true" {

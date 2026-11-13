@@ -180,15 +180,36 @@ package setting.
    source table (10 of 10), the bundle listing and the notes head. A dry
    run holds no write token and publishes nothing. The version must equal
    the milestone title (the version check above).
+   - **The post-run job check (#77), after every run, before anything
+     else.** A skipped job reports success, so the run's conclusion is no
+     evidence of which jobs ran (run 43420238830 concluded "success" with
+     four release jobs skipped). The coordinator reads the jobs of the
+     **latest attempt** only, `GET
+     repos/keepia/mail/actions/runs/<id>/attempts/<run_attempt>/jobs?per_page=100`
+     (REST; the default page holds 30 jobs, and a dry run lists 29): that
+     list holds the jobs carried over from earlier attempts
+     too; earlier attempts are context, not gates. Every expected job
+     must have concluded `success` and every other job `skipped`:
+     - **dry run:** `version`, 10 × `build`, 10 × `push-rehearsal`,
+       `bundle`; skipped: `push`, `push-arm64`, `index`, `attest`,
+       `attest-assets`, `release`, `latest`;
+     - **real run:** `version`, 10 × `build`, 5 × `push` (amd64),
+       5 × `push-arm64`, `index`, `bundle`, `attest`, `attest-assets`,
+       `release`, `latest`; skipped: `push-rehearsal`.
+
+     Any other result means stop and report (step 5), whatever the run's
+     conclusion. The report on the issue quotes the table.
 3. **The real release.**
    - **`v0.1.0` is pre-approved** (maintainer decision 6845990778 on #27):
      the coordinator starts it with no further confirmation once the dry
      run on `main` is green, on the same commit as that dry run, with every
      image built (all ten build and push-rehearsal rows) and the sums and
-     SBOMs complete (10 of 10, the exact asset list, `SHA256SUMS`). If
+     SBOMs complete (10 of 10, the exact asset list, `SHA256SUMS`), and
+     the post-run job check (step 2) matches the dry set exactly. If
      anything differs from what is expected (another version, a missing
-     row or SBOM, a red or skipped job, another commit), the coordinator
-     stops and reports to the maintainer instead.
+     row or SBOM, a red job, a job skipped or run against the post-run
+     job check, another commit), the coordinator stops and reports to
+     the maintainer instead.
    - **Every later real release needs the maintainer's OK.** The
      coordinator asks through AskUserQuestion, with the version, the link
      to the green dry run, the image list, for 0.x the line "X.Y.Z is not
@@ -198,6 +219,14 @@ package setting.
    - The `version` input is used only as the version check allows; 1.0.0
      only with the OK.
 4. **After the release:**
+   - first the post-run job check (step 2) against the real set: every
+     job through `latest` concluded `success`, `push-rehearsal` skipped;
+   - **residual risk (#77, E-5):** rule 7 proves that `attest`,
+     `attest-assets`, `release` and `latest` start in a real run, not
+     that their steps pass. Their steps run for the first time in the
+     first real release (`v0.1.0`), so the report on the issue names each
+     of them with its result. A failure there follows that job's case in
+     step 5, which is the recovery path;
    - check the release page: the notes, and the assets: the bundle
      `keepia-mail-X.Y.Z.tar.gz`, the ten `sbom-<image>-<arch>.spdx.json`,
      `sources.json`, `SOURCES.md`, `notes.md` and `SHA256SUMS`;
@@ -220,9 +249,34 @@ package setting.
    jobs" starts over on the same commit.
    - `version`, `build` or `push-rehearsal` failed: nothing is published.
      Fix the cause on `main` and start a new run.
-   - `push` failed before its bake step: that row pushed nothing; "Re-run
-     failed jobs".
-   - **`push` failed at `-verify-pushed` with a mismatch (the pushed
+   - `push` or `push-arm64` failed before its bake step: that row pushed
+     nothing; "Re-run failed jobs". A failed `push` row skips all of
+     `push-arm64`; the re-run runs the failed row, then `push-arm64`.
+   - **`push` or `push-arm64` failed inside its bake step with `denied`**
+     (#77; run 43420238830 had it while two rows of `mail-unbound` pushed
+     as GHCR created the package): that row wrote no digest file, and
+     nothing is tagged, attested or released. The coordinator stops and
+     reports to the maintainer the bake log's `exporting manifest`,
+     `exporting attestation manifest` and `exporting manifest list`
+     digests, and whether the manifest equals the build row's verified
+     image (its "Row summary"). Anything that row left in GHCR is
+     untagged tested content (orphans for the deletion list), not an
+     untested image. Since `push-arm64` runs after `push`, a `denied` is
+     no longer an expected race: the maintainer checks the package's
+     Actions access and decides on "Re-run failed jobs". The rebuild
+     pushes the same image under a new row index (the `mode=max`
+     provenance is new on every build), and `-verify-pushed` checks it in
+     full (run 43420238830, attempt 2). A second `denied` is a permission
+     problem, not a race.
+   - **The run concluded success, but an expected job was skipped** (or
+     an unexpected one ran; the post-run job check, step 2): a condition
+     is wrong in a way rule 7 should have refused. The coordinator stops
+     and reports it as a bug. `X.Y.Z` may be in GHCR without a tag,
+     release or attestation (as for 0.1.0 in run 43420238830); the fix
+     needs a new commit, and its run rebuilds, so `-publish-index` refuses
+     the old `X.Y.Z` (other content): the maintainer deletes those package
+     versions before the next real run.
+   - **`push` or `push-arm64` failed at `-verify-pushed` with a mismatch (the pushed
      config is not the tested one, or `the registry holds other content
      than pushed.tar`).** BuildKit pushed during the bake step, so that row's
      **untested image is in GHCR by digest**, untagged. Nothing is tagged,
@@ -236,8 +290,8 @@ package setting.
      reproducible) and the release restarts with "Re-run all jobs": only
      `build` seeds the cache. No tag exists yet, so `version` gives the
      same version.
-   - **`push` failed at `-verify-pushed` with `the registry read failed`
-     only** (#75): every check of `pushed.tar` passed, so the row's image
+   - **`push` or `push-arm64` failed at `-verify-pushed` with `the
+     registry read failed` only** (#75): every check of `pushed.tar` passed, so the row's image
      is the tested one; only reading it back from GHCR failed (a network
      error, a timeout, an answer buildx does not know). That is a read
      error, not a mismatch: nothing is deleted for it. The coordinator

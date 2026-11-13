@@ -718,14 +718,58 @@ lives, also under a skipped path.
    [`release.go`](../../tools/check-image-pins/release.go)): `release.yml`
    has exactly the planned shape, so the one workflow that can push cannot
    grow a second push path. The policy is data in the tool:
-   - **P2, P6:** exactly the jobs `version`, `build`, `push-rehearsal`,
-     `push`, `index`, `bundle`, `attest`, `attest-assets`, `release` and
-     `latest`, each with exactly its permissions, `needs` and `if`
-     (top-level `permissions: {}`; `packages: write` only in `push`,
-     `index` and `latest`, all with `${{ !inputs.dry_run }}`), and no job
-     `uses:`;
-   - **P3, P4, P5, P9:** in `push`, `push-rehearsal`, `index` and
-     `latest`, every step is exactly the policy's step at its position: an
+   - **P2, P6:** exactly the eleven jobs `version`, `build`,
+     `push-rehearsal`, `push`, `push-arm64`, `index`, `bundle`, `attest`,
+     `attest-assets`, `release` and `latest`, each with exactly its
+     permissions, `needs` and `if` (top-level `permissions: {}`;
+     `packages: write` only in `push`, `push-arm64`, `index` and
+     `latest`, none of which runs in a dry run), and no job `uses:`;
+   - **Principle A, the conditions (#77):** rule 7 reads every job's
+     `needs` and `if` from the workflow and evaluates them under GitHub's
+     rules: an `if` without a status function gets an implicit
+     `success()`, and at job level `success()` is true only if every
+     ancestor (the transitive `needs`) succeeded, so a skipped ancestor
+     makes it false. In a real run `push-rehearsal` is always skipped, so
+     on `1f29fb1` the bare `${{ !inputs.dry_run }}` of `attest`,
+     `attest-assets`, `release` and `latest` skipped them in the real run
+     43420238830, which still concluded "success". So:
+     - **form:** a job with an ancestor that runs in one mode only has
+       exactly the explicit condition `${{ !cancelled() && <mode> &&
+       needs.<j>.result == 'success' && … }}`, one term per direct need
+       in the policy's `needs` order (`bundle`, which runs in both
+       modes, has the dry and the real needs each behind its mode term).
+       The policy generates these conditions (`releaseCondFor`) and
+       `TestReleasePolicyConds` pins them literally. `version` and
+       `build` have no `if`; `push` and `push-rehearsal` keep the bare
+       mode term;
+     - **grammar:** exactly one `${{ }}` around the whole value (or
+       none), with no whitespace around it, Unicode whitespace and a
+       block scalar's (`if: |`) trailing newline included: GitHub reads
+       such a value as a string, which is true, so it is refused, never
+       trimmed, and the simulation counts it as always true;
+       `!`, `&&`, `||`, parentheses, `inputs.dry_run`,
+       `needs.<direct need>.result == 'success'`, `success()`,
+       `failure()`, `cancelled()` and `always()`; anything else
+       (`github.*`, `contains()`, `!=`, a reversed comparison, a need that
+       is not direct, `!needs.<j>.result`) is a finding, never accepted;
+     - **job sets:** every job is simulated in both modes, every job that
+       runs passing. A real run runs exactly `version`, `build`, `push`,
+       `push-arm64`, `index`, `bundle`, `attest`, `attest-assets`,
+       `release` and `latest`; a dry run exactly `version`, `build`,
+       `push-rehearsal` and `bundle`;
+     - **failure injection:** in each mode, each job that runs is made to
+       fail once; exactly the planned set minus its descendants must
+       start (a missing result term, or `always()`, would run a job
+       after a failed need);
+     - a need that names no job and a cycle are findings.
+
+     The model reproduces the two measured runs on `1f29fb1`
+     (`TestReleaseModelMeasuredRuns`). It proves that the jobs start, not
+     that their steps pass: `attest`, `attest-assets`, `release` and
+     `latest` ran for the first time in the first real release;
+   - **P3, P4, P5, P9:** in `push`, `push-arm64`, `push-rehearsal`,
+     `index` and `latest`, every step is exactly the policy's step at
+     its position (`push-arm64` has `push`'s steps): an
      action of the job's list (checkout, setup-go, setup-buildx with CI's
      inputs, the `tested-*`/`digest-*` artifacts, bake-action once in the
      push jobs) at the policy's own commit (`actionPins`, CI's pins), with
@@ -756,6 +800,14 @@ lives, also under a skipped path.
      A bare name is safe only with `push-by-digest=true`: without it,
      BuildKit pushes the name as `:latest`. A script allowlisted for these
      jobs (none) may have no forwarding function;
+   - **P9, principle B (#77): no two rows push to the same package at
+     once.** `push` runs the build job's images on `amd64` only,
+     `push-arm64` the same images on `arm64` only and needs `push`, so
+     every arm64 row starts after every amd64 row has created its
+     package; `push-rehearsal` runs the build job's whole strategy (each
+     row pushes to its own runner's registry). In run 43420238830 two
+     rows of `mail-unbound` pushed while GHCR created the package, and
+     the arm64 row was refused with `denied`;
    - **`attest`, `attest-assets` and `release` have exact steps too**
      (#27 part 4b, #71 review B N2), the same way: the `dist` and `digest-*`
      artifacts, `sha256sum -c SHA256SUMS` in `dist`, `attest`'s subjects
@@ -783,7 +835,7 @@ lives, also under a skipped path.
      cancel-in-progress: false}` (it serialises the runs that move
      `latest`); no `${{ }}` in a `run:` text; every `VERSION` env is
      `${{ needs.version.outputs.version }}`; `SOURCE_DATE_EPOCH` is
-     required before the check step in `build`, `push` and
+     required before the check step in `build`, `push`, `push-arm64` and
      `push-rehearsal`; a command that runs syft (the command word `syft`,
      or a `go run` of a package under `anchore/syft`) is only `go run
      github.com/anchore/syft/cmd/syft@v1.57.1 …` with
@@ -817,15 +869,18 @@ lives, also under a skipped path.
    In other workflows a `release-` cache scope in `BAKE_SET` is reported,
    and so is a `tags`, `output` or `attest` line.
    Its tests are `TestReleaseWorkflow` (the repository's own `release.yml`
-   is clean), `TestReleaseSurface` (the `fail-27-*` and `fail-75-*` cases, each one change
+   is clean), `TestReleaseSurface` (the `fail-27-*`, `fail-75-*` and
+   `fail-77-*` cases, each one change
    to the repository's `release.yml` in the tree
-   `testdata/repos/pass-27-release`), `TestReleaseBuildMode` and
-   `TestBuildRefusesPushedTar`. `make image-pins` checks the real
-   `release.yml` in the repository.
+   `testdata/repos/pass-27-release`), `TestReleaseBuildMode`,
+   `TestBuildRefusesPushedTar`, and principle A's unit tests in
+   `release_graph_test.go` (the pinned conditions, the measured runs,
+   GitHub's rules on small graphs, the grammar and its precedence).
+   `make image-pins` checks the real `release.yml` in the repository.
 
 **The release modes** run in `release.yml`'s write-token jobs, as the
 fixed lines above, and take no argument and no tag name:
-- `-verify-pushed` (`push`, `push-rehearsal`): `pushed.tar` is opened only
+- `-verify-pushed` (`push`, `push-arm64`, `push-rehearsal`): `pushed.tar` is opened only
   as a regular file (Lstat, `O_NOFOLLOW`, fstat); every blob has its
   digest; `index.json` names the push step's `containerimage.digest`; that
   index holds one `linux/<arch>` image manifest and only attestations of
@@ -838,7 +893,8 @@ fixed lines above, and take no argument and no tag name:
   back from that registry, the same check `-publish-index` runs per row:
   the index has its digest and the tar's bytes, holds the tar's
   `linux/<arch>` manifest, and its config is the tested config (anonymous
-  on `localhost` in `push-rehearsal`, with the login in `push`). A failed
+  on `localhost` in `push-rehearsal`, with the login in `push` and
+  `push-arm64`). A failed
   read gets its own finding, `the registry read failed: …`, apart from a
   mismatch (`the registry holds other content than pushed.tar …`); the
   runbook treats the two differently (process.md, "Releases", step 5).
@@ -934,7 +990,8 @@ publishes a release from `main`, started by hand; the runbook is in
 | `version` | both | started on main; the pull requests since the last release, the version (`scripts/version-policy.sh LAST INPUT < prs.tsv`); the tag and release do not exist yet; the images and their tags |
 | `build` | both | each image × amd64/arm64, cold: CI's build row (check, bake, verify, image tests, the saved and checked tar), `packages.txt`, syft v1.57.1 on the tar, `tools/release-sources row`; writes the release cache (`mode=max`) |
 | `push-rehearsal` | dry run | `push` without the login: pushes by digest to its own `registry` service on `127.0.0.1:5000` (pinned, loopback only, host-network builder), so BuildKit's push path runs; nothing leaves the runner |
-| `push` | real run | rebuilds from the release cache and pushes by digest under the bare repository `ghcr.io/keepia/mail[-<name>]` (no tag); `-verify-pushed`: the pushed config is the tested config, read back from GHCR |
+| `push` | real run | the amd64 rows: rebuilds from the release cache and pushes by digest under the bare repository `ghcr.io/keepia/mail[-<name>]` (no tag); `-verify-pushed`: the pushed config is the tested config, read back from GHCR |
+| `push-arm64` | real run | `push` for the arm64 rows, after every amd64 row, so the two architectures of a package never push at once (#77) |
 | `index` | real run | `-publish-index`: `ghcr.io/keepia/mail[-<name>]:X.Y.Z` with both platforms |
 | `bundle` | both | `tools/release-sources release` (10 SBOMs, `sources.json`, `SOURCES.md`), the bundle, the notes head `notes.md`, and `SHA256SUMS`, which names exactly the other files; a dry run pins the placeholder digest `sha256:0…0`, a real run asserts that none is left |
 | `attest` | real run | provenance of each image index, the SBOM of each platform manifest (`actions/attest`, GitHub's attestation API) |
@@ -981,8 +1038,8 @@ Dependabot: bump the three together by hand, to the release that
 `registryImage` in the tool): bump both together by hand.
 
 **The release cache.** `build` writes `release-<image>-<arch>` scopes with
-`mode=max` to the 10 GB Actions cache; `push` and `push-rehearsal` read
-them. SOGo's build stage is the largest. #27 part 4b measured SOGo's
+`mode=max` to the 10 GB Actions cache; `push`, `push-arm64` and
+`push-rehearsal` read them. SOGo's build stage is the largest. #27 part 4b measured SOGo's
 whole build in CI's builder (`docker buildx du` after the build, the
 records a `mode=max` export holds, uncompressed): **1.86 GB on amd64 and
 1.88 GB on arm64**, against a 302 MB (amd64) and 333 MB (arm64) final

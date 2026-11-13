@@ -155,11 +155,14 @@ var releaseCases = []struct {
 	{"fail-27-p1-capital-release", unchanged, map[string]string{".github/workflows/Release.yml": "permissions:\n  packages: write\njobs: {}\n"},
 		[]string{"Release.yml:1: workflow grants packages: write"}},
 	// P2: the exact job set and permissions.
+	// #77: a job outside the policy also runs in both modes (principle A);
+	// a need of a missing job names no job.
 	{"fail-27-p2-extra-job", appendText("\n  push2:\n    runs-on: ubuntu-24.04\n    permissions:\n      packages: write\n    steps:\n      - run: echo\n"),
-		nil, []string{"job push2 is not in the release policy"}},
-	{"fail-27-p2-missing-job", dropJob("attest-assets"), nil, []string{"job attest-assets of the release policy is missing"}},
+		nil, []string{"job push2 is not in the release policy", dryRunGives + "extra push2 (#77)", realRunGives + "extra push2 (#77)"}},
+	{"fail-27-p2-missing-job", dropJob("attest-assets"), nil, []string{"job attest-assets of the release policy is missing",
+		`job release: needs "attest-assets", which is not a job of release.yml (#77)`}},
 	{"fail-27-p2-reusable-job", appendText("\n  x:\n    permissions:\n      packages: write\n    uses: ./.github/workflows/x.yml\n"),
-		nil, []string{"job x is not in the release policy"}},
+		nil, []string{"job x is not in the release policy", dryRunGives + "extra x (#77)", realRunGives + "extra x (#77)"}},
 	{"fail-27-p2-job-uses", inJob("bundle", "    permissions:\n", "    uses: ./.github/workflows/x.yml\n    permissions:\n"),
 		nil, []string{"job bundle: uses is not allowed: a job of release.yml calls no reusable workflow"}},
 	{"fail-27-p2-build-packages-write", inJob("build", "      contents: read\n", "      contents: read\n      packages: write\n"),
@@ -213,9 +216,13 @@ var releaseCases = []struct {
 	{"fail-27-p5-xargs", runStepBefore("push", "xargs make publish"), nil, []string{"job push has 11 steps", "step 9 runs a text that is not one of this job's lines", "step 9 runs xargs: a job with packages: write runs no eval"}},
 	{"fail-27-p5-sh-c", inJob("index", "      - id: index\n", "      - run: sh -c make\n      - id: index\n"), nil, []string{"job index has 7 steps", "step 6 runs a text that is not one of this job's lines", "step 6 runs sh -c: a job with packages: write runs no eval, sh -c, source or xargs (P5)"}},
 	// P6: needs and if exactly.
-	{"fail-27-p6-release-needs", inJob("release", "    needs: [version, bundle, attest, attest-assets]\n", "    needs: [version, bundle, attest-assets]\n"), nil, []string{"job release: needs must be exactly [version bundle attest attest-assets]"}},
-	{"fail-27-p6-push-if", inJob("push", "    if: ${{ !inputs.dry_run }}\n", ""), nil, []string{"job push: if must be exactly ${{ !inputs.dry_run }}"}},
-	{"fail-27-p6-bundle-if", inJob("bundle", "(inputs.dry_run && needs.push-rehearsal.result == 'success') || ", ""), nil, []string{"job bundle: if must be exactly"}},
+	// #77: the condition still reads needs.attest, no longer a direct need.
+	{"fail-27-p6-release-needs", inJob("release", "    needs: [version, bundle, attest, attest-assets]\n", "    needs: [version, bundle, attest-assets]\n"), nil, []string{"job release: needs must be exactly [version bundle attest attest-assets]",
+		"job release: rule 7 cannot evaluate its if (attest is not a direct need"}},
+	// #77: without its if, push runs in a dry run too.
+	{"fail-27-p6-push-if", inJob("push", "    if: ${{ !inputs.dry_run }}\n", ""), nil, []string{"job push: if must be exactly ${{ !inputs.dry_run }}", dryRunGives + "extra push (#77)"}},
+	{"fail-27-p6-bundle-if", inJob("bundle", "(inputs.dry_run && needs.push-rehearsal.result == 'success') || ", ""), nil, []string{"job bundle: if must be exactly " + pinnedReleaseConds["bundle"] + " (P6, #77): its ancestor push-rehearsal is skipped in a real run",
+		dryRunGives + "missing bundle (#77)"}},
 	// P7: no continue-on-error, container, services, env; no repository
 	// code in release, attest and attest-assets.
 	{"fail-27-p7-continue-on-error", inJob("push", pushedStep, pushedStep+"        continue-on-error: true\n"), nil, []string{"job push: step 9 has continue-on-error: a failed step must stop the release (P7)", "job push: step 9 has continue-on-error: a step of this job has no if"}},
@@ -224,7 +231,7 @@ var releaseCases = []struct {
 	{"fail-27-p7-script-in-attest", inJob("attest-assets", "        run: sha256sum -c SHA256SUMS\n", "        run: sh scripts/release-sources.sh\n"), nil,
 		[]string{"job attest-assets: step 2 runs repository or dependency code (scripts/)", "job attest-assets: step 2 runs a text that is not one of this job's lines"}},
 	{"fail-27-p7-workflow-env", inWorkflow("permissions: {}\n", "permissions: {}\nenv:\n  X: y\n"), nil, []string{"release.yml has no workflow env",
-		"job build: workflow env X is not allowed", "job push-rehearsal: workflow env X is not allowed", "job push: workflow env X is not allowed"}},
+		"job build: workflow env X is not allowed", "job push-rehearsal: workflow env X is not allowed", "job push: workflow env X is not allowed", "job push-arm64: workflow env X is not allowed"}},
 	// P8: trigger, inputs, run texts, VERSION.
 	{"fail-27-p8-on-push", inWorkflow("on:\n  workflow_dispatch:\n", "on:\n  push:\n  workflow_dispatch:\n"), nil, []string{"on: must be exactly workflow_dispatch"}},
 	{"fail-27-p8-workflow-call", inWorkflow("on:\n  workflow_dispatch:\n", "on:\n  workflow_call:\n  workflow_dispatch:\n"), nil, []string{"on: must be exactly workflow_dispatch"}},
@@ -248,13 +255,17 @@ var releaseCases = []struct {
 	{"fail-27-epoch-missing-build", inJob("build", "        run: echo \"SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)\" >>\"$GITHUB_ENV\"\n", "        run: echo no epoch\n"),
 		nil, []string{"job build: the step `run: " + lineEpoch + "` is required"}},
 	// Revision 4: latest moves only in a real release, after the release.
-	{"fail-27-latest-dry", inJob("latest", "    if: ${{ !inputs.dry_run }}\n", ""), nil, []string{"job latest: if must be exactly ${{ !inputs.dry_run }}"}},
+	// #77: without its if, latest gets the implicit success() over its
+	// ancestors, push-rehearsal among them, and never runs.
+	{"fail-27-latest-dry", inJob("latest", "    if: "+pinnedReleaseConds["latest"]+"\n", ""), nil, []string{"job latest: if must be exactly " + pinnedReleaseConds["latest"],
+		realRunGives + "missing latest (#77)"}},
 	{"fail-27-latest-elsewhere", inJob("index", "      - id: index\n", "      - env:\n          VERSION: ${{ needs.version.outputs.version }}\n          INDEX_DIGESTS: x\n        run: "+lineMoveLatest+"\n      - id: index\n"),
 		nil, []string{"job index has 7 steps", "step 6 runs a text that is not one of this job's lines"}},
 	{"fail-27-latest-in-rehearsal", runStepBefore("push-rehearsal", lineMoveLatest), nil, []string{"job push-rehearsal has 10 steps", "-move-latest\""}},
 	{"fail-27-other-tag", inJob("latest", "      - env:\n", "      - run: docker buildx imagetools create -t ghcr.io/keepia/mail:0.1 ghcr.io/keepia/mail:0.1.0\n      - env:\n"),
 		nil, []string{"job latest has 6 steps", "step 5 runs a text that is not one of this job's lines", "step 5 runs buildx imagetools create"}},
-	{"fail-27-latest-needs", inJob("latest", "    needs: [version, index, release]\n", "    needs: [version, index]\n"), nil, []string{"job latest: needs must be exactly [version index release]"}},
+	{"fail-27-latest-needs", inJob("latest", "    needs: [version, index, release]\n", "    needs: [version, index]\n"), nil, []string{"job latest: needs must be exactly [version index release]",
+		"job latest: rule 7 cannot evaluate its if (release is not a direct need"}},
 	// Round 2 of #71. Review B, B1: setup-go's cache stays off.
 	{"fail-27-setup-go-cache", inJob("push", "          cache: false\n", ""), nil, []string{"job push: step 2 must be exactly uses actions/setup-go@" + actionPins["actions/setup-go"]}},
 	{"fail-27-setup-go-cache-build", inJob("build", "          cache: false\n", ""), nil, []string{"job build: step 2 uses actions/setup-go without cache: false"}},
@@ -270,10 +281,10 @@ var releaseCases = []struct {
 	{"fail-27-syft-binary", inJob("build", "        run: go run github.com/anchore/syft/cmd/syft@v1.57.1 scan", "        run: syft scan"), nil, []string{"job build: step 14 runs syft other than as"}},
 	// Review A, B3: the release modes and the login only in the exact jobs.
 	{"fail-27-latest-in-bundle", inJob("bundle", "      - uses: actions/upload-artifact", "      - env:\n          VERSION: ${{ needs.version.outputs.version }}\n          INDEX_DIGESTS: ${{ needs.index.outputs.digests }}\n        run: "+lineMoveLatest+"\n      - uses: actions/upload-artifact"),
-		nil, []string{"job bundle: step 10 runs -move-latest: the release modes run only in push, push-rehearsal, index and latest"}},
+		nil, []string{"job bundle: step 10 runs -move-latest: the release modes run only in push, push-arm64, push-rehearsal, index and latest"}},
 	{"fail-27-verify-pushed-in-build", inJob("build", "      - name: SBOM\n", "      - run: "+lineVerifyPushed+"\n      - name: SBOM\n"), nil, []string{"job build: step 14 runs -verify-pushed: the release modes run only in"}},
 	{"fail-27-login-in-bundle", inJob("bundle", "      - uses: actions/upload-artifact", "      - env:\n          TOKEN: ${{ secrets.GITHUB_TOKEN }}\n        run: "+lineLogin+"\n      - uses: actions/upload-artifact"),
-		nil, []string{"job bundle: step 10 runs docker login: only push, index and latest log in to GHCR"}},
+		nil, []string{"job bundle: step 10 runs docker login: only push, push-arm64, index and latest log in to GHCR"}},
 	// Review B, N1: the policy's pin, not any commit of the action.
 	{"fail-27-p9-other-pin", inJob("push", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "actions/checkout@"+sha40), nil, []string{"job push: step 1 uses actions/checkout at " + sha40 + ", not at the policy's pin"}},
 	// Revision 5 (B6): the concurrency that serialises the moves.
@@ -307,7 +318,7 @@ var releaseCases = []struct {
 	{"fail-27-4b-mode-quoted", inJob("build", "      - name: SBOM\n", "      - run: go run ./tools/check-image-pins \"-verify-\"pushed\n      - name: SBOM\n"),
 		nil, []string{"job build: step 14 runs -verify-pushed: the release modes run only in"}},
 	{"fail-27-4b-login-bash-c", inJob("bundle", "      - uses: actions/upload-artifact", "      - run: bash -c 'echo \"$T\" | docker login ghcr.io -u x --password-stdin'\n      - uses: actions/upload-artifact"),
-		nil, []string{"job bundle: step 10 runs docker login: only push, index and latest log in to GHCR"}},
+		nil, []string{"job bundle: step 10 runs docker login: only push, push-arm64, index and latest log in to GHCR"}},
 	// #71 delta review A N2: no other syft, no other container.
 	{"fail-27-4b-docker-run-syft", inJob("build", "      - name: SBOM\n", "      - run: docker run --rm anchore/syft:latest scan \"docker-archive:$RUNNER_TEMP/image.tar\"\n      - name: SBOM\n"),
 		nil, []string{"job build: step 14 runs a container (docker run): in release.yml only the build row's package-list line does"}},
@@ -388,6 +399,83 @@ var releaseCases = []struct {
 	{"fail-75-host-network-index", inJob("index", bridgeDriverOpts, hostDriverOpts), nil, []string{"job index: step 3 must be exactly uses docker/setup-buildx-action@"}},
 	{"fail-75-host-network-build", inJob("build", bridgeDriverOpts, hostDriverOpts), nil, []string{"job build: step 4 uses docker/setup-buildx-action with"}},
 	{"fail-75-rehearsal-bridge", inJob("push-rehearsal", "            network=host\n", ""), nil, []string{"job push-rehearsal: step 3 must be exactly uses docker/setup-buildx-action@"}},
+	// #77, principle A. The regression test: 1f29fb1's four bare
+	// conditions, which its P6 accepted and which skipped attest,
+	// attest-assets, release and latest in run 43420238830.
+	{"fail-77-old-bare-if", all(setIf("attest", releaseRealIf), setIf("attest-assets", releaseRealIf), setIf("release", releaseRealIf), setIf("latest", releaseRealIf)), nil, []string{
+		formFinding("attest"), formFinding("attest-assets"), formFinding("release"), formFinding("latest"),
+		realRunGives + "missing attest, attest-assets, release, latest (#77)"}},
+	{"fail-77-attest-assets-bare", setIf("attest-assets", releaseRealIf), nil, []string{formFinding("attest-assets"), realRunGives + "missing attest-assets, release, latest (#77)"}},
+	// All of index's ancestors run in a real run, so the simulation passes:
+	// the form rule goes beyond it.
+	{"fail-77-index-bare", setIf("index", releaseRealIf), nil, []string{formFinding("index")}},
+	{"fail-77-missing-cancelled", setIf("attest-assets", "${{ !inputs.dry_run && needs.bundle.result == 'success' }}"), nil, []string{formFinding("attest-assets"), realRunGives + "missing attest-assets, release, latest (#77)"}},
+	{"fail-77-always", setIf("release", strings.Replace(pinnedReleaseConds["release"], "!cancelled()", "always()", 1)), nil, []string{formFinding("release")}},
+	{"fail-77-missing-need-result", setIf("release", strings.Replace(pinnedReleaseConds["release"], " && needs.attest.result == 'success'", "", 1)), nil, []string{formFinding("release"),
+		"release.yml: in a real run where attest fails, the conditions give extra release, latest: a job after a failed need must be skipped"}},
+	{"fail-77-mode-mismatch", setIf("attest-assets", "${{ !cancelled() && inputs.dry_run && needs.bundle.result == 'success' }}"), nil, []string{formFinding("attest-assets"),
+		dryRunGives + "extra attest-assets (#77)", realRunGives + "missing attest-assets, release, latest (#77)"}},
+	{"fail-77-non-direct-need", setIf("attest-assets", "${{ !cancelled() && !inputs.dry_run && needs.index.result == 'success' }}"), nil, []string{formFinding("attest-assets"),
+		"job attest-assets: rule 7 cannot evaluate its if (index is not a direct need"}},
+	{"fail-77-unknown-term", setIf("latest", strings.TrimSuffix(pinnedReleaseConds["latest"], " }}")+" && github.ref == 'refs/heads/main' }}"), nil, []string{formFinding("latest"),
+		`job latest: rule 7 cannot evaluate its if (the term "github.ref")`}},
+	// A value GitHub reads as a string is simulated as always true (with
+	// the implicit success()), so its effect on the job sets shows too.
+	{"fail-77-two-wrappers", setIf("attest-assets", "${{ !cancelled() && !inputs.dry_run }} && ${{ needs.bundle.result == 'success' }}"), nil, []string{formFinding("attest-assets"),
+		"job attest-assets: rule 7 cannot evaluate its if (more than one ${{ }}", realRunGives + "missing attest-assets, release, latest (#77)"}},
+	// Review A, B1: whitespace around the wrapper is refused, never
+	// trimmed. A block scalar keeps its trailing newline, and GitHub reads
+	// the value as a string, which is true: push would run in a dry run.
+	{"fail-77-if-block-scalar", inJob("push", "    if: ${{ !inputs.dry_run }}\n", "    if: |\n      ${{ !inputs.dry_run }}\n"), nil, []string{
+		`job push: rule 7 cannot evaluate its if (whitespace around the ${{ }} ("${{ !inputs.dry_run }}\n")`,
+		"job push: if must be exactly ${{ !inputs.dry_run }} (P6", dryRunGives + "extra push (#77)"}},
+	{"fail-77-if-quoted-space", setIf("latest", `"`+pinnedReleaseConds["latest"]+` "`), nil, []string{formFinding("latest"),
+		"job latest: rule 7 cannot evaluate its if (whitespace around the ${{ }}", realRunGives + "missing latest (#77)"}},
+	{"fail-77-if-unicode-space", setIf("attest-assets", pinnedReleaseConds["attest-assets"]+" "), nil, []string{formFinding("attest-assets"),
+		"job attest-assets: rule 7 cannot evaluate its if (whitespace around the ${{ }}", realRunGives + "missing attest-assets, release, latest (#77)"}},
+	// E-3: the policy's needs order is canonical, so a reordered needs with
+	// the terms in that order gives exactly one finding, the form's.
+	{"fail-77-reordered-needs", all(inJob("release", "    needs: [version, bundle, attest, attest-assets]\n", "    needs: [attest-assets, attest, bundle, version]\n"),
+		setIf("release", "${{ !cancelled() && !inputs.dry_run && needs.attest-assets.result == 'success' && needs.attest.result == 'success' && needs.bundle.result == 'success' && needs.version.result == 'success' }}")),
+		nil, []string{formFinding("release")}},
+	// Principle B: the two architectures of a package never push at once.
+	{"fail-77-arm64-parallel", inJob("push-arm64", "    needs: [version, build, push]\n", "    needs: [version, build]\n"), nil, []string{
+		"job push-arm64: needs must be exactly [version build push]", "job push-arm64: rule 7 cannot evaluate its if (push is not a direct need",
+		"job push-arm64: needs must include push, so every arm64 row starts after every amd64 row has created its package (P9, #77)"}},
+	{"fail-77-push-both-arches", inJob("push", "        arch: [amd64]\n", "        arch: [amd64, arm64]\n"), nil, []string{"job push: strategy must be map[fail-fast:false matrix:map[arch:[amd64] image:[keepia postfix unbound olefy sogo]]], so every tested amd64 row is pushed"}},
+	{"fail-77-arm64-other-images", inJob("push-arm64", "image: [keepia, postfix, unbound, olefy, sogo]", "image: [keepia, postfix, unbound, olefy]"), nil, []string{"job push-arm64: strategy must be map[fail-fast:false matrix:map[arch:[arm64] image:[keepia postfix unbound olefy sogo]]], so every tested arm64 row is pushed, after push (#77)"}},
+	{"fail-77-arm64-extra-step", runStepBefore("push-arm64", "echo arm64 only"), nil, []string{"job push-arm64 has 11 steps; the release policy has exactly 10", "(P4): \"echo arm64 only\""}},
+}
+
+// The findings of principle A's job sets (#77).
+const (
+	dryRunGives  = "release.yml: in a dry run the jobs that run must be exactly version, build, push-rehearsal, bundle, but the conditions give "
+	realRunGives = "release.yml: in a real run the jobs that run must be exactly version, build, push, push-arm64, index, bundle, attest, attest-assets, release, latest, but the conditions give "
+)
+
+// all applies the mutations in order.
+func all(ms ...mutation) mutation {
+	return func(t *testing.T, wf string) string {
+		for _, m := range ms {
+			wf = m(t, wf)
+		}
+		return wf
+	}
+}
+
+// setIf replaces a job's pinned condition with cond.
+func setIf(job, cond string) mutation {
+	return inJob(job, "    if: "+pinnedReleaseConds[job]+"\n", "    if: "+cond+"\n")
+}
+
+// formFinding is the start of the form rule's finding for a job: the
+// exact condition and its first mode-exclusive ancestor.
+func formFinding(job string) string {
+	anc := map[string]string{"index": "push is skipped in a dry run", "push-arm64": "push is skipped in a dry run"}[job]
+	if anc == "" {
+		anc = "push-rehearsal is skipped in a real run"
+	}
+	return "job " + job + ": if must be exactly " + pinnedReleaseConds[job] + " (P6, #77): its ancestor " + anc
 }
 
 // copyTree copies the fixture tree to dir.
