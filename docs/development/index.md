@@ -912,10 +912,16 @@ Dependabot: bump the three together by hand, to the release that
 
 **The release cache.** `build` writes `release-<image>-<arch>` scopes with
 `mode=max` to the 10 GB Actions cache; `push` and `push-rehearsal` read
-them. SOGo's build stage is the largest: the PR of #27 part 4b measured it
-(its body has the number). When the cache is full, GitHub evicts the
-oldest entries, CI's first; an evicted `release-` entry makes the push
-row's rebuild differ, and `-verify-pushed` stops the release.
+them. SOGo's build stage is the largest. #27 part 4b measured SOGo's
+whole build in CI's builder (`docker buildx du` after the build, the
+records a `mode=max` export holds, uncompressed): **1.86 GB on amd64 and
+1.88 GB on arm64**, against a 302 MB (amd64) and 333 MB (arm64) final
+image. The cache stores the layers compressed, so the two `release-sogo-*`
+entries take less than about 3.7 GB of the 10 GB, but more than any other
+image. When the cache is full, GitHub evicts the least recently used
+entries, CI's first; that costs CI cache hits only. An evicted `release-`
+entry between `build` and `push` makes the push row's rebuild differ, and
+`-verify-pushed` stops the release (process.md, "Releases").
 
 ## Security checks
 
