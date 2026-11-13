@@ -9,19 +9,25 @@ name: Release
 # back from that registry; #75), writes the SBOMs, the source list, the
 # bundle and the notes, and releases nothing: nothing leaves the runner.
 # A real run (dry_run unticked, as the runbook below
-# allows) pushes every row by digest (push), publishes the image
+# allows) pushes every row by digest, the amd64 rows first (push) and the
+# arm64 rows after them (push-arm64), so the two architectures of a
+# package never push at once (#77), publishes the image
 # indexes ghcr.io/keepia/mail[-<name>]:X.Y.Z (index), attests them and the
 # release assets, creates the tag vX.Y.Z and the GitHub release, and moves
 # `latest` last, forward only (latest). X.Y.Z never changes.
 #
 # tools/check-image-pins rule 7 holds this file to exactly this shape: the
 # jobs, their permissions, `needs` and `if`, the exact steps of push,
-# push-rehearsal, index, latest, attest, attest-assets and release, the
-# action pins, the concurrency group and the trigger
-# (docs/development/index.md, "The image pin check"). A dry run holds no
-# write token; only push, index and latest hold packages: write, only
-# attest and attest-assets hold id-token and attestations, only release
-# holds contents: write.
+# push-arm64, push-rehearsal, index, latest, attest, attest-assets and
+# release, the action pins, the concurrency group and the trigger
+# (docs/development/index.md, "The image pin check"). It also evaluates
+# every `if` under GitHub's rules in both modes (#77): a job after a job
+# that runs in one mode only spells out `!cancelled()`, its mode and each
+# need's result, because a bare `if` gets an implicit success() over every
+# ancestor, and a skipped one makes it false. A dry run holds no
+# write token; only push, push-arm64, index and latest hold packages:
+# write, only attest and attest-assets hold id-token and attestations,
+# only release holds contents: write.
 #
 # Runbook (docs/development/process.md, "Releases", has the full text):
 # - Dry run first. v0.1.0 is pre-approved after a green dry run on main on
@@ -31,6 +37,18 @@ name: Release
 #   keeps at most one pending run per group: a third dispatch while one is
 #   pending cancels the pending one, which has done nothing. Start it again
 #   once the running one has finished; that "cancelled" is no failure.
+# - After every run, the coordinator reads the latest attempt's job list
+#   (REST attempts/<run_attempt>/jobs): every planned job concluded
+#   success and every other one skipped, whatever the run's conclusion (a
+#   skipped job reports success).
+# - The run concluded success, but a planned job was skipped: a condition
+#   is wrong in a way rule 7 should have refused. Stop and report it as a
+#   bug; X.Y.Z may be in GHCR without a tag, release or attestation.
+# - A push or push-arm64 row failed inside its bake step with `denied`:
+#   that row wrote no digest file, nothing is tagged, attested or
+#   released. Stop and report the bake log's manifest digests; the
+#   maintainer checks the package's Actions access and decides on "Re-run
+#   failed jobs".
 # - A push row failed at its -verify-pushed step with a mismatch (the
 #   pushed config is not the tested one, or the registry holds other
 #   content than pushed.tar): its untested image is in GHCR by digest,
@@ -42,9 +60,13 @@ name: Release
 #   (every check of pushed.tar passed, only the read back from GHCR did
 #   not): a read error, not a mismatch. Nothing is deleted; the
 #   coordinator stops and reports (process.md, "Releases", step 5).
-# - push failed before its bake step, index, attest or attest-assets
-#   failed: fix the cause, then "Re-run failed jobs". -publish-index keeps
-#   an X.Y.Z of the same content and refuses any other.
+# - push or push-arm64 failed before its bake step, index, attest or
+#   attest-assets failed: fix the cause, then "Re-run failed jobs".
+#   -publish-index keeps an X.Y.Z of the same content and refuses any
+#   other.
+# - attest, attest-assets, release and latest have never run before the
+#   first real release (v0.1.0): rule 7 proves that they start, not that
+#   their steps pass. Their failure cases here are the recovery path.
 # - release failed: its last step removes the tag and draft this run
 #   created; "Re-run failed jobs".
 # - latest failed: the release is published; `latest` may still point at
@@ -214,7 +236,7 @@ jobs:
   # build, verify, the image tests on the verified ID, the saved and checked
   # tar, its package list, syft's scan of that tar, and the row's SBOM and
   # source list (tools/release-sources row). It writes the release cache
-  # (mode=max) that push and push-rehearsal rebuild from.
+  # (mode=max) that push, push-arm64 and push-rehearsal rebuild from.
   build:
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 60
@@ -406,6 +428,11 @@ jobs:
   # reads pkg:docker/ghcr.io/keepia/mail[-<name>]@latest?platform=…: that
   # is BuildKit's name for an untagged repository, it moves no tag, and
   # the subject's digest is the binding part.
+  #
+  # push runs the amd64 rows; push-arm64 runs the arm64 rows after every
+  # amd64 row has finished, so each package exists before its second row
+  # pushes. Two rows that push to a package GHCR is still creating can be
+  # refused with `denied` (run 43420238830, #77).
   push:
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 60
@@ -418,7 +445,73 @@ jobs:
       fail-fast: false
       matrix:
         image: [keepia, postfix, unbound, olefy, sogo]
-        arch: [amd64, arm64]
+        arch: [amd64]
+    env:
+      BAKE_TARGET: ${{ matrix.image }}
+      PLATFORM: linux/${{ matrix.arch }}
+      VERSION: ${{ needs.version.outputs.version }}
+      BAKE_SET: |
+        ${{ matrix.image }}.cache-from=type=gha,scope=release-${{ matrix.image }}-${{ matrix.arch }}
+        ${{ matrix.image }}.tags=ghcr.io/keepia/${{ matrix.image == 'keepia' && 'mail' || format('mail-{0}', matrix.image) }}
+        ${{ matrix.image }}.output=type=image,push-by-digest=true,name-canonical=true,push=true
+        ${{ matrix.image }}.output=type=oci,dest=pushed.tar
+        ${{ matrix.image }}.attest=type=provenance,mode=max
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tested-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/tested
+      - name: Commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - name: Rebuild from the release cache and push by digest
+        id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          set: ${{ env.BAKE_SET }}
+      - id: pushed
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-pushed
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digest/
+          if-no-files-found: error
+
+  # push for the arm64 rows, step for step, after every amd64 row (#77).
+  push-arm64:
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    needs: [version, build, push]
+    if: ${{ !cancelled() && !inputs.dry_run && needs.version.result == 'success' && needs.build.result == 'success' && needs.push.result == 'success' }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [keepia, postfix, unbound, olefy, sogo]
+        arch: [arm64]
     env:
       BAKE_TARGET: ${{ matrix.image }}
       PLATFORM: linux/${{ matrix.arch }}
@@ -477,8 +570,8 @@ jobs:
   index:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: [version, push]
-    if: ${{ !inputs.dry_run }}
+    needs: [version, push, push-arm64]
+    if: ${{ !cancelled() && !inputs.dry_run && needs.version.result == 'success' && needs.push.result == 'success' && needs.push-arm64.result == 'success' }}
     permissions:
       contents: read
       packages: write
@@ -520,8 +613,8 @@ jobs:
   bundle:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: [version, build, push-rehearsal, push, index]
-    if: ${{ !cancelled() && needs.version.result == 'success' && needs.build.result == 'success' && ((inputs.dry_run && needs.push-rehearsal.result == 'success') || (!inputs.dry_run && needs.push.result == 'success' && needs.index.result == 'success')) }}
+    needs: [version, build, push-rehearsal, push, push-arm64, index]
+    if: ${{ !cancelled() && needs.version.result == 'success' && needs.build.result == 'success' && ((inputs.dry_run && needs.push-rehearsal.result == 'success') || (!inputs.dry_run && needs.push.result == 'success' && needs.push-arm64.result == 'success' && needs.index.result == 'success')) }}
     permissions:
       contents: read
     steps:
@@ -686,7 +779,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: [version, index, bundle]
-    if: ${{ !inputs.dry_run }}
+    if: ${{ !cancelled() && !inputs.dry_run && needs.version.result == 'success' && needs.index.result == 'success' && needs.bundle.result == 'success' }}
     permissions:
       id-token: write
       attestations: write
@@ -825,7 +918,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: bundle
-    if: ${{ !inputs.dry_run }}
+    if: ${{ !cancelled() && !inputs.dry_run && needs.bundle.result == 'success' }}
     permissions:
       id-token: write
       attestations: write
@@ -847,7 +940,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [version, bundle, attest, attest-assets]
-    if: ${{ !inputs.dry_run }}
+    if: ${{ !cancelled() && !inputs.dry_run && needs.version.result == 'success' && needs.bundle.result == 'success' && needs.attest.result == 'success' && needs.attest-assets.result == 'success' }}
     permissions:
       contents: write
     steps:
@@ -930,7 +1023,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: [version, index, release]
-    if: ${{ !inputs.dry_run }}
+    if: ${{ !cancelled() && !inputs.dry_run && needs.version.result == 'success' && needs.index.result == 'success' && needs.release.result == 'success' }}
     permissions:
       contents: read
       packages: write
