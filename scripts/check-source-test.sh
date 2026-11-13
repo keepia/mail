@@ -194,6 +194,41 @@ else
 	echo "ok   relative-manifest-path: exit 0"
 fi
 
+# Relative operands that start with "-" are paths, not options or stdin
+# (#66). expect_operands <case> <cwd> <want exit> <want output> ARCHIVE
+# MANIFEST DIR: runs check-source in $tmp/<cwd>, with stdin from /dev/null
+# (an ARCHIVE "-" read as stdin fails instead of waiting) and OLDPWD at the
+# checked genuine tree (a DIR "-" taken by cd as "cd -" checks that tree).
+expect_operands() {
+	name=$1 cwd=$tmp/$2 want=$3 msg=$4
+	shift 4
+	mkdir -p "$cwd"
+	rc=0
+	out=$(cd "$cwd" && OLDPWD=$tmp/out-genuine-listing "$shell" "$check" "$@" </dev/null 2>&1) || rc=$?
+	if [ "$rc" != "$want" ] || ! printf '%s\n' "$out" | grep -qF -- "$msg"; then
+		echo "FAIL $name: exit $rc, want $want with '$msg':" >&2
+		printf '%s\n' "$out" | tail -n 20 >&2
+		fail=1
+	else
+		echo "ok   $name: exit $rc"
+	fi
+}
+mkdir "$tmp/dash-manifest" "$tmp/dash-archive"
+cp "$tmp/manifest-listing" "$tmp/dash-manifest/-fx"
+cp "$tmp/genuine.tar.gz" "$tmp/dash-archive/-"
+# grep would read "-fx" as -f x.
+expect_operands dash-manifest dash-manifest 0 "10 entries match the pinned tree" \
+	"$tmp/genuine.tar.gz" -fx out
+# tar would read "-" as stdin.
+expect_operands dash-archive dash-archive 0 "10 entries match the pinned tree" \
+	- "$tmp/manifest-listing" out
+# cd would read "-" as "cd -" and check the genuine tree, not this one.
+expect_operands dash-dir dash-dir 1 "differ from the pinned tree" \
+	"$tmp/extra-file.tar.gz" "$tmp/manifest-listing" -
+# An empty DIR would become "./", the caller's directory.
+expect_operands empty-dir empty-dir 2 "usage: check-source" \
+	"$tmp/genuine.tar.gz" "$tmp/manifest-listing" ""
+
 # Setuid, setgid, sticky and group or world write bits in the archive do not
 # reach the disk, whatever the caller's umask: the tree is the pinned one.
 # expect_modes <case> <path under top> <archive mode>: with the caller's
@@ -202,11 +237,20 @@ fi
 # GNU tar keeps the archive's modes by default only for root; for any
 # other user it applies the umask and drops setuid and setgid by itself,
 # so without more, a check-source that lost --no-same-permissions would
-# still pass here as non-root, as CI runs it (#59). TAR_OPTIONS (which tar
-# reads before its command line) turns --same-permissions on for every
+# still pass here as non-root, as CI runs it (#59). TAR_OPTIONS (which GNU
+# tar reads before its command line) turns --same-permissions on for every
 # user: check-source's own --no-same-permissions overrides it, and a
 # check-source without it unpacks the archive's 6777 or 1777, as root
-# would.
+# would. TAR_OPTIONS is GNU tar's: another tar ignores it, and these cases
+# would prove nothing, so without GNU tar the suite fails (#66).
+require_gnu_tar() {
+	if tar --version 2>/dev/null | grep -qF 'GNU tar'; then
+		return 0
+	fi
+	version=$(tar --version 2>&1 | head -n 1) || true
+	echo "FAIL mode cases: need GNU tar, tar --version says: $version" >&2
+	return 1
+}
 expect_modes() {
 	name=$1 p=$2 mode=$3
 	stage "$name"
@@ -223,8 +267,24 @@ expect_modes() {
 		echo "ok   $name: $p archived as $mode, unpacked as 755 (exit 0)"
 	fi
 }
+require_gnu_tar || fail=1
 expect_modes setuid-setgid-world-writable-file configure 6777
 expect_modes sticky-world-writable-directory src 1777
+
+# The guard itself, with a tar first on PATH that is not GNU tar. A
+# subshell: neither its PATH nor its failure reaches the rest of the suite.
+mkdir "$tmp/fake-tar"
+printf '#!/bin/sh\necho "bsdtar 3.7.2 - libarchive 3.7.2"\n' >"$tmp/fake-tar/tar"
+chmod 755 "$tmp/fake-tar/tar"
+rc=0
+out=$(PATH=$tmp/fake-tar:$PATH && require_gnu_tar 2>&1) || rc=$?
+if [ "$rc" != 1 ] || ! printf '%s\n' "$out" | grep -qF "FAIL mode cases: need GNU tar, tar --version says: bsdtar 3.7.2"; then
+	echo "FAIL gnu-tar-guard: with bsdtar, exit $rc, want 1 with 'need GNU tar':" >&2
+	printf '%s\n' "$out" >&2
+	fail=1
+else
+	echo "ok   gnu-tar-guard: bsdtar fails the mode cases (exit 1)"
+fi
 
 # check-source removes its temporary directory, on success and on failure.
 mkdir "$tmp/tmpdir"
