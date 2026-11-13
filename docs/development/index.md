@@ -440,6 +440,34 @@ writes each row's SBOM and source list and the release's `sources.json`
 and `SOURCES.md`. The `compose` job starts the bundle with the verified
 images in its own project (test 15b).
 
+Every SBOM package that is neither a Debian package nor a Go module
+(syft's `python` and `npm` packages, #73) must be part of a component of
+its row, or the row fails. Such a package needs at least one location, each
+an absolute path; then the first rule that holds covers it:
+
+1. a Debian package of the SBOM owns it: syft's `ownership-by-file-overlap`
+   relationship from that deb, and every location in the deb's file list
+   (by path, not content: nothing but `keepia-apt-install` writes under
+   `/usr/lib/python3`);
+2. it is a pinned wheel: name (PEP 503) and version of a PyPI-wheel `ADD`,
+   installed from that file (`direct_url.json` is a `file:///` URL with
+   the `ADD`'s file name);
+3. the vendored path table (`vendored` in `tools/release-sources/main.go`,
+   reviewed like `addLicences`) names it: today SOGo's npm packages under
+   `/usr/lib/<triplet>/GNUstep/SOGo/WebServerResources/`, part of the SOGo
+   archive. A new `COPY` or `RUN` that writes under a table prefix needs
+   the table's evidence checked again (the installed tree is identical to
+   the archive's), and so does a move of the SOGo pin, together with the
+   CKEditor paragraph of `SOURCES.md`.
+
+`sources.json` and `SOURCES.md` list these packages with the component they
+are part of. The rules read syft's `locations`, deb file lists,
+`artifactRelationships` and `directUrlOrigin` at the pinned v1.57.1, and
+fail closed if one disappears: a syft bump re-runs all rows locally first.
+The fixtures in `tools/release-sources/testdata` are real syft output of
+the olefy and sogo images, trimmed with the jq filter quoted in
+`fixture_test.go`.
+
 ### The image pin check
 
 [`tools/check-image-pins`](../../tools/check-image-pins/main.go) walks the

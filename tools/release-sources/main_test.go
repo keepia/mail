@@ -327,10 +327,17 @@ func TestRelease(t *testing.T) {
 			t.Fatal(f)
 		}
 		md := string(files["SOURCES.md"])
-		for _, w := range []string{"Mechanical snail", "https://stackoverflow.com/a/20260030/4405656", "| `ghcr.io/keepia/mail-postfix:0.1.0` | `MIT AND BSD-3-Clause` |", "[glibc](https://snapshot.debian.org/package/glibc/2.41-12%2Bdeb13u4/)", "GPL-3.0-only"} {
+		for _, w := range []string{"Mechanical snail", "https://stackoverflow.com/a/20260030/4405656", "| `ghcr.io/keepia/mail-postfix:0.1.0` | `MIT AND BSD-3-Clause` |", "[glibc](https://snapshot.debian.org/package/glibc/2.41-12%2Bdeb13u4/)", "GPL-3.0-only",
+			"## Python and npm packages in the SBOMs\n\nThese packages are part of a component listed above, which links to their source.\n\nNone.\n"} {
 			if !strings.Contains(md, w) {
 				t.Errorf("SOURCES.md lacks %q", w)
 			}
+		}
+		if strings.Contains(md, "ckeditor") {
+			t.Error("SOURCES.md has the CKEditor paragraph without sogo")
+		}
+		if !strings.Contains(string(files["sources.json"]), "\"attributed\": []") {
+			t.Errorf("sources.json has no empty attributed list:\n%s", files["sources.json"])
 		}
 		if string(files["licences.txt"]) != "mail-postfix MIT AND BSD-3-Clause\nmail-unbound MIT AND BSD-3-Clause\n" {
 			t.Errorf("licences.txt %q", files["licences.txt"])
