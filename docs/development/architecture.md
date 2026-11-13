@@ -958,7 +958,10 @@ the groupware listeners to the same test.
   host-address check covers the internal networks and skips
   edge-public). Test 9 also runs the subnet line above, read from this
   section, with no active profile, and compares its output with the
-  subnets it checks.
+  subnets it checks. That line is CI input: test 9 accepts only its exact
+  form, with a jq filter of letters, digits, spaces and `. [ ] | ( ) _ -`
+  that calls no jq function but `select`, and fails on any other line
+  without running it.
 - **Logs:** containers log to stdout. The `journald` log driver is required,
   with the host's journald retention at 30 days, which the operator sets
   (logs are kept at most 30 days, #2 scope; [coordinator decision T7][cd]).
