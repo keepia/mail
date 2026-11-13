@@ -38,12 +38,13 @@ name: Release
 #   pending cancels the pending one, which has done nothing. Start it again
 #   once the running one has finished; that "cancelled" is no failure.
 # - After every run, the coordinator reads the latest attempt's job list
-#   (REST attempts/<run_attempt>/jobs): every planned job concluded
-#   success and every other one skipped, whatever the run's conclusion (a
-#   skipped job reports success).
-# - The run concluded success, but a planned job was skipped: a condition
-#   is wrong in a way rule 7 should have refused. Stop and report it as a
-#   bug; X.Y.Z may be in GHCR without a tag, release or attestation.
+#   (REST attempts/<run_attempt>/jobs?per_page=100): every planned job
+#   concluded success and every other one skipped, whatever the run's
+#   conclusion (a skipped job reports success).
+# - The run concluded success, but a planned job was skipped, or an
+#   unexpected job ran: a condition is wrong in a way rule 7 should have
+#   refused. Stop and report it as a bug; X.Y.Z may be in GHCR without a
+#   tag, release or attestation.
 # - A push or push-arm64 row failed inside its bake step with `denied`:
 #   that row wrote no digest file, nothing is tagged, attested or
 #   released. Stop and report the bake log's manifest digests; the

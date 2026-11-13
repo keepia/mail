@@ -419,8 +419,20 @@ var releaseCases = []struct {
 		"job attest-assets: rule 7 cannot evaluate its if (index is not a direct need"}},
 	{"fail-77-unknown-term", setIf("latest", strings.TrimSuffix(pinnedReleaseConds["latest"], " }}")+" && github.ref == 'refs/heads/main' }}"), nil, []string{formFinding("latest"),
 		`job latest: rule 7 cannot evaluate its if (the term "github.ref")`}},
+	// A value GitHub reads as a string is simulated as always true (with
+	// the implicit success()), so its effect on the job sets shows too.
 	{"fail-77-two-wrappers", setIf("attest-assets", "${{ !cancelled() && !inputs.dry_run }} && ${{ needs.bundle.result == 'success' }}"), nil, []string{formFinding("attest-assets"),
-		"job attest-assets: rule 7 cannot evaluate its if (more than one ${{ }}"}},
+		"job attest-assets: rule 7 cannot evaluate its if (more than one ${{ }}", realRunGives + "missing attest-assets, release, latest (#77)"}},
+	// Review A, B1: whitespace around the wrapper is refused, never
+	// trimmed. A block scalar keeps its trailing newline, and GitHub reads
+	// the value as a string, which is true: push would run in a dry run.
+	{"fail-77-if-block-scalar", inJob("push", "    if: ${{ !inputs.dry_run }}\n", "    if: |\n      ${{ !inputs.dry_run }}\n"), nil, []string{
+		`job push: rule 7 cannot evaluate its if (whitespace around the ${{ }} ("${{ !inputs.dry_run }}\n")`,
+		"job push: if must be exactly ${{ !inputs.dry_run }} (P6", dryRunGives + "extra push (#77)"}},
+	{"fail-77-if-quoted-space", setIf("latest", `"`+pinnedReleaseConds["latest"]+` "`), nil, []string{formFinding("latest"),
+		"job latest: rule 7 cannot evaluate its if (whitespace around the ${{ }}", realRunGives + "missing latest (#77)"}},
+	{"fail-77-if-unicode-space", setIf("attest-assets", pinnedReleaseConds["attest-assets"]+" "), nil, []string{formFinding("attest-assets"),
+		"job attest-assets: rule 7 cannot evaluate its if (whitespace around the ${{ }}", realRunGives + "missing attest-assets, release, latest (#77)"}},
 	// E-3: the policy's needs order is canonical, so a reordered needs with
 	// the terms in that order gives exactly one finding, the form's.
 	{"fail-77-reordered-needs", all(inJob("release", "    needs: [version, bundle, attest, attest-assets]\n", "    needs: [attest-assets, attest, bundle, version]\n"),

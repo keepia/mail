@@ -743,7 +743,11 @@ lives, also under a skipped path.
        `build` have no `if`; `push` and `push-rehearsal` keep the bare
        mode term;
      - **grammar:** exactly one `${{ }}` around the whole value (or
-       none), `!`, `&&`, `||`, parentheses, `inputs.dry_run`,
+       none), with no whitespace around it, Unicode whitespace and a
+       block scalar's (`if: |`) trailing newline included: GitHub reads
+       such a value as a string, which is true, so it is refused, never
+       trimmed, and the simulation counts it as always true;
+       `!`, `&&`, `||`, parentheses, `inputs.dry_run`,
        `needs.<direct need>.result == 'success'`, `success()`,
        `failure()`, `cancelled()` and `always()`; anything else
        (`github.*`, `contains()`, `!=`, a reversed comparison, a need that

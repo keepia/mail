@@ -698,8 +698,10 @@ func checkReleaseJob(line int, name string, p releaseJob, job map[string]any, fo
 	if got := needsList(job["needs"]); !slices.Equal(got, sortedCopy(p.needs)) {
 		add(line, "job %s: needs must be exactly %v, so a failed or skipped earlier job stops it (P6), got %v", name, p.needs, job["needs"])
 	}
+	// Exactly, not trimmed: whitespace around a ${{ }} makes GitHub read
+	// the value as a string, which is true (#77 review A, B1).
 	cond, _ := job["if"].(string)
-	if _, has := job["if"]; !formHeld && (strings.TrimSpace(cond) != p.cond || (p.cond == "" && has)) {
+	if _, has := job["if"]; !formHeld && (cond != p.cond || (p.cond == "" && has)) {
 		want := p.cond
 		if want == "" {
 			want = "(none)"

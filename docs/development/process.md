@@ -185,8 +185,9 @@ package setting.
      evidence of which jobs ran (run 43420238830 concluded "success" with
      four release jobs skipped). The coordinator reads the jobs of the
      **latest attempt** only, `GET
-     repos/keepia/mail/actions/runs/<id>/attempts/<run_attempt>/jobs`
-     (REST): that list holds the jobs carried over from earlier attempts
+     repos/keepia/mail/actions/runs/<id>/attempts/<run_attempt>/jobs?per_page=100`
+     (REST; the default page holds 30 jobs, and a dry run lists 29): that
+     list holds the jobs carried over from earlier attempts
      too; earlier attempts are context, not gates. Every expected job
      must have concluded `success` and every other job `skipped`:
      - **dry run:** `version`, 10 × `build`, 10 × `push-rehearsal`,

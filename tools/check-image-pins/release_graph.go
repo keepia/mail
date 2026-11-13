@@ -313,22 +313,38 @@ var (
 	condStatusFns   = map[string]bool{"success": true, "failure": true, "cancelled": true, "always": true}
 )
 
+// stringCondError is a refused `if` that GitHub reads as a non-empty
+// string: it is reported, and the simulation evaluates it as a condition
+// that is always true (with the implicit success(), as any `if` without
+// a status function), so its effect on the job sets shows too.
+type stringCondError string
+
+func (e stringCondError) Error() string { return string(e) }
+
 // unwrapReleaseCond accepts exactly one `${{ }}` around the whole value,
 // or none (E-4): GitHub reads `${{ a }} && ${{ b }}` as a non-empty
-// string, which is true.
+// string, which is true. The same holds for whitespace around the
+// wrapper (#77 review A, B1): a block scalar (`if: |`) keeps a trailing
+// newline, a quoted value keeps its spaces, and GitHub then reads the
+// value as a non-empty string, which is true. So a value with `${{` is
+// refused unless it equals its strings.TrimSpace (Unicode whitespace
+// included), never trimmed.
 func unwrapReleaseCond(s string) (string, error) {
+	if strings.Contains(s, "${{") && s != strings.TrimSpace(s) {
+		return "", stringCondError(fmt.Sprintf("whitespace around the ${{ }} (%q): GitHub reads such a value as a string, which is true", s))
+	}
 	s = strings.TrimSpace(s)
 	if strings.HasPrefix(s, "${{") {
 		if !strings.HasSuffix(s, "}}") {
-			return "", errors.New("text after the closing }}: the ${{ }} must wrap the whole value")
+			return "", stringCondError("text after the closing }}: the ${{ }} must wrap the whole value; GitHub reads such a value as a string, which is true")
 		}
 		inner := s[len("${{") : len(s)-len("}}")]
 		if strings.Contains(inner, "${{") || strings.Contains(inner, "}}") {
-			return "", errors.New("more than one ${{ }}: GitHub reads such a value as a string, which is true")
+			return "", stringCondError("more than one ${{ }}: GitHub reads such a value as a string, which is true")
 		}
 		s = inner
 	} else if strings.Contains(s, "${{") {
-		return "", errors.New("text outside the ${{ }}: GitHub reads such a value as a string, which is true")
+		return "", stringCondError("text outside the ${{ }}: GitHub reads such a value as a string, which is true")
 	}
 	if strings.TrimSpace(s) == "" {
 		return "", errors.New("an empty condition")
@@ -547,6 +563,8 @@ func (r releaseRun) eval(job string, n *condNode) bool {
 		return r.dry
 	case "need":
 		return r.result[n.name] == "success"
+	case "true": // a value GitHub reads as a non-empty string
+		return true
 	}
 	switch n.name {
 	case "success":
@@ -644,6 +662,11 @@ func checkReleaseGraph(jobsNode *yaml.Node, line int, add func(int, string, ...a
 		c, err := parseReleaseCond(v, g.needs[j])
 		if err != nil {
 			add(g.line[j], "job %s: rule 7 cannot evaluate its if (%v): it reads only ${{ }} around the whole value, !, &&, ||, parentheses, inputs.dry_run, needs.<direct need>.result == 'success' and success(), failure(), cancelled() and always(), and refuses a condition it cannot evaluate (#77)", j, err)
+			var asString stringCondError
+			if errors.As(err, &asString) {
+				conds[j] = releaseCond{root: &condNode{op: "true"}}
+				continue
+			}
 			grammarOK = false
 			continue
 		}
@@ -664,7 +687,8 @@ func checkReleaseGraph(jobsNode *yaml.Node, line int, add func(int, string, ...a
 		formJobs[j] = true
 		want := releaseExplicitCond(releaseJobMode(j), p.needs)
 		got, isString := g.cond[j].(string)
-		if !isString || strings.TrimSpace(got) != want {
+		// Exactly, not trimmed (#77 review A, B1).
+		if !isString || got != want {
 			other := "real"
 			if releaseJobMode(anc) == modeReal {
 				other = "dry"

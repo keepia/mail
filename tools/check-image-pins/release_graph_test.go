@@ -180,7 +180,9 @@ func TestReleaseCondParser(t *testing.T) {
 	accepted := []string{
 		"${{ inputs.dry_run }}",
 		"!inputs.dry_run",
-		"  ${{ !cancelled() && needs.push-arm64.result == 'success' }}  ",
+		// Without a wrapper the whole value is the expression.
+		"  !inputs.dry_run\n",
+		"${{ !cancelled() && needs.push-arm64.result == 'success' }}",
 		"${{ (inputs.dry_run || !inputs.dry_run) && !(needs.x.result == 'success') }}",
 		"${{ success() || failure() || always() }}",
 	}
@@ -208,6 +210,19 @@ func TestReleaseCondParser(t *testing.T) {
 		"${{ }}":                                                      "an empty condition",
 		"${{ cancelled }}":                                            "cancelled without ()",
 		"${{ inputs.dry_run && }}":                                    "the condition ends early",
+	}
+	// #77 review A, B1: whitespace around the wrapper (a block scalar's
+	// trailing newline, a quoted space, Unicode spaces) makes GitHub read
+	// the value as a string, which is true.
+	for _, s := range []string{
+		"  ${{ !cancelled() && needs.push-arm64.result == 'success' }}  ",
+		"${{ inputs.dry_run }}\n",
+		"${{ inputs.dry_run }} ",
+		"\t${{ inputs.dry_run }}",
+		" ${{ inputs.dry_run }}",
+		"${{ inputs.dry_run }} ",
+	} {
+		refused[s] = "whitespace around the ${{ }}"
 	}
 	for s, want := range refused {
 		_, err := parseReleaseCond(s, direct)
