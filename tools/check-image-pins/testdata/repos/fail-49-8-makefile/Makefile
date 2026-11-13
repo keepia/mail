@@ -1,7 +1,7 @@
 # #49 point 8 (review A note 5, review B finding 5): Makefile forms that
 # reroute `$(GO) run ./tools/check-image-pins -bake-local` itself or hide
-# lines from the Makefile rule. GO ?= go and a literal *.mk include stay
-# allowed.
+# lines from the Makefile rule. The allowlisted line for the go tool (line
+# 5) and a literal *.mk include stay allowed.
 GO ?= go
 SHELL := ./evil-sh
 .SHELLFLAGS := -ec

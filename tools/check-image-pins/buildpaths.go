@@ -294,13 +294,12 @@ func isBuildAction(uses string) bool {
 // And it reports what reroutes `$(GO) run ./tools/check-image-pins
 // -bake-local` itself or hides lines from this rule (#49 point 8): SHELL
 // or .SHELLFLAGS set; GOFLAGS, GOENV or GOWORK set or exported (CI fixes
-// them in the check steps' prefix); GO set to anything but exactly `go`
-// (the whole value, a trailing comment aside; any `define GO`, `GO +=`
-// or `GO !=`, also after override or export, #51 item 4); an
+// them in the check steps' prefix); any text that sets GO outside the
+// allowlisted lines of checkMakeGo (#51 item 4); an
 // include of a file that is not a literal *.mk path the walk reads; and a
 // variable name that is computed (`export PA$(E)TH`).
 func CheckMakefile(src []byte) []Finding {
-	var out []Finding
+	out := checkMakeGo(src)
 	for _, l := range makeLogicalLines(src) {
 		n := normalizeShell(l.text)
 		if strings.Contains(n, "buildx") {
@@ -327,6 +326,52 @@ func CheckMakefile(src []byte) []Finding {
 	return out
 }
 
+// makeGoText finds, in a Makefile's raw text, everything that can assign
+// or define GO: `GO` before an assignment operator (blanks and
+// backslash-newlines between them, as make joins continuation lines),
+// and `define GO` (also `override define GO`, `undefine GO`).
+// makeGoLine is the allowlist: the whole physical line is one of
+// `GO ?= go`, `GO := go`, `GO = go`, `override GO := go` and
+// `export GO := go`, blanks around the operator free, with an optional
+// ` # <comment>` and no backslash anywhere.
+var (
+	makeGoText = regexp.MustCompile(`\bGO\b(?:[ \t]|\\\r?\n)*(?:::?:?|\?|\+|!)?=|define(?:[ \t]|\\\r?\n)+GO\b`)
+	makeGoLine = regexp.MustCompile(`^(?:GO[ \t]*[?:]?=|(?:override|export)[ \t]+GO[ \t]*:=)[ \t]*go(?: # [^\\]*)?$`)
+)
+
+// checkMakeGo applies the GO rule (#51 item 4) to a Makefile's raw text,
+// before any quoting, comment or continuation handling: make images runs
+// `$(GO) run ./tools/check-image-pins -bake-local`, so GO must be `go`.
+// After three rounds of parser holes (#49 point 8, the 51-4 plan, PR #91
+// review A), the rule is an allowlist that fails closed instead of a
+// model of make's syntax: every match of makeGoText is a finding unless
+// it lies on a makeGoLine. This over-reports, by design: a recipe's
+// `GO=go cmd`, a `$(eval GO := go)` and a comment that mentions a GO
+// assignment are reported too. Comments get no exemption: make expands
+// `$(eval …)` in a tab-led `#` line (a recipe, whose `#` is the
+// shell's), and .RECIPEPREFIX can make any line a recipe. An
+// allowlisted line after a line that ends in a backslash is a
+// continuation and is reported as well.
+func checkMakeGo(src []byte) []Finding {
+	text := string(src)
+	lines := strings.Split(text, "\n")
+	continued := func(i int) bool { return i > 0 && strings.HasSuffix(strings.TrimSuffix(lines[i-1], "\r"), `\`) }
+	var out []Finding
+	reported := map[int]bool{}
+	for _, m := range makeGoText.FindAllStringIndex(text, -1) {
+		i := strings.Count(text[:m[0]], "\n")
+		if reported[i] {
+			continue
+		}
+		if !continued(i) && makeGoLine.MatchString(lines[i]) {
+			continue
+		}
+		reported[i] = true
+		out = append(out, Finding{i + 1, "a Makefile may set GO only in a line that is exactly `GO ?= go`, `GO := go`, `GO = go`, `override GO := go` or `export GO := go` (an optional ` # comment` without a backslash); any other text that sets or defines GO is reported (got " + strconv.Quote(lines[i]) + "): `make images` runs `$(GO) run ./tools/check-image-pins`"})
+	}
+	return out
+}
+
 // makeDockerEnv and makeSetEnv find the passEnv variables in a Makefile
 // line: any DOCKER_CONFIG, DOCKER_HOST or DOCKER_CONTEXT; PATH or HOME
 // before an assignment operator (`PATH :=`, `images: PATH +=`,
@@ -340,8 +385,6 @@ var (
 var (
 	makeShell    = regexp.MustCompile(`(?:^|[^\w.])(SHELL|\.SHELLFLAGS)\s*(?::{1,3}|[?+!])?=|\b(?:export|unexport|override|define)\b[^=#]*?(?:^|[^\w.])(SHELL|\.SHELLFLAGS)\b`)
 	makeGoEnv    = regexp.MustCompile(`\b(GOFLAGS|GOENV|GOWORK)\s*(?::{1,3}|[?+!])?=|\b(?:export|unexport|override|define)\b[^=#]*?\b(GOFLAGS|GOENV|GOWORK)\b`)
-	makeGoVar    = regexp.MustCompile(`\bGO\s*(:{1,3}|[?+!])?=([^)]*)`)
-	makeGoDefine = regexp.MustCompile(`\bdefine\s+GO\b`)
 	makeInclude  = regexp.MustCompile(`^\s*(?:-|s)?include\s+(.*)$`)
 	makeVarName  = regexp.MustCompile(`([^\s=:?+!;#]+)\s*(?::{1,3}|[?+!])?=`)
 	makeDirectve = regexp.MustCompile(`\b(?:export|unexport|override|define|undefine)\s+([^=#]*)`)
@@ -355,30 +398,6 @@ func makeToolInputs(raw string) string {
 	}
 	if m := makeGoEnv.FindStringSubmatch(raw); m != nil {
 		return "a Makefile may not set or export " + m[1] + m[2] + ": it changes how `go run` builds `check-image-pins` itself"
-	}
-	// GO is compared as its whole value (#51 item 4): only the first word
-	// let `GO := go -C ./evil` through. A make comment is cut off first,
-	// but not in a recipe line (a tab first), where `#` is the shell's and
-	// may be quoted (`echo "#"; GO=x make images`). The value ends at a
-	// `)`, which closes `$(eval GO := …)`; in a plain assignment, text
-	// after a bare `)` would be a shell syntax error in every recipe that
-	// runs $(GO). += and != never give exactly `go`, and a define body is
-	// not read.
-	code := raw
-	if !strings.HasPrefix(raw, "\t") {
-		code, _, _ = strings.Cut(raw, "#")
-	}
-	if makeGoDefine.MatchString(code) {
-		return "a Makefile may not set GO with define (its body is not read): set it only to `go` (`GO ?= go`); `make images` runs `$(GO) run ./tools/check-image-pins`"
-	}
-	if m := makeGoVar.FindStringSubmatch(code); m != nil {
-		v := strings.TrimSpace(m[2])
-		switch {
-		case m[1] == "+" || m[1] == "!":
-			return "a Makefile may set GO only to `go`, never with " + m[1] + "= (got " + strconv.Quote(v) + "): `make images` runs `$(GO) run ./tools/check-image-pins`"
-		case v != "go":
-			return "a Makefile may set GO only to `go` (got " + strconv.Quote(v) + "): `make images` runs `$(GO) run ./tools/check-image-pins`"
-		}
 	}
 	if m := makeInclude.FindStringSubmatch(raw); m != nil {
 		for _, f := range strings.Fields(m[1]) {
@@ -395,8 +414,10 @@ func makeToolInputs(raw string) string {
 	for _, m := range makeDirectve.FindAllStringSubmatch(noShellVars, -1) {
 		names = append(names, strings.Fields(m[1])...)
 	}
+	// A name with `)` or `}` ends a function call with a literal
+	// argument, as in `$(eval $(firstword GO) := x)` (#91 round 2).
 	for _, n := range names {
-		if strings.Contains(n, "$") {
+		if strings.ContainsAny(n, "$)}") {
 			return "a Makefile may not compute a variable name (" + strconv.Quote(n) + "): the check cannot see which variable it sets"
 		}
 	}

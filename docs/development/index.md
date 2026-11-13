@@ -252,11 +252,12 @@ profile each (architecture section 7); with
 needs Docker Engine 28 or later (the gateway mode `isolated`): Engine 27
 refuses to create the networks, and 26 or older creates them without the
 isolation, silently. [Architecture section 7](architecture.md#7-docker)
-has the check, meaningful only while the template is running (its
-networks exist; before the first start and after `docker compose down`
-it prints nothing, which is no all-clear): the host must have no
-address in the internal subnets (`edge-public`, which is not internal,
-keeps its gateway address on the host).
+has the check: the host must have no address in the internal subnets
+(`edge-public`, which is not internal, keeps its gateway address on the
+host). Its version line works at any time; the other two lines are
+meaningful only while the template is running (its networks exist).
+Before the first start and after `docker compose down` its last line
+prints nothing on any Engine, which is no all-clear.
 
 ```sh
 cp .env.example .env              # then set KEEPIA_POSTGRES_PASSWORD and the edge addresses
@@ -721,12 +722,24 @@ lives, also under a skipped path.
        and make passes its own value of an environment variable to a
        recipe even without `export`. It also sets no `SHELL` or
        `.SHELLFLAGS`, sets or exports no `GOFLAGS`, `GOENV` or `GOWORK`,
-       and sets `GO` only to `go` (`make images` runs `$(GO) run
-       ./tools/check-image-pins`): the whole value counts, a trailing
-       comment aside, so `GO := go -C ./evil` is reported, and so is any
-       `define GO`, `GO +=` or `GO !=` (#51); it includes only literal
-       `*.mk` files the check reads; and it computes no variable name
-       (`export PA$(E)TH`).
+       and sets `GO` only on a line that is exactly `GO ?= go`,
+       `GO := go`, `GO = go`, `override GO := go` or `export GO := go`
+       (`make images` runs `$(GO) run ./tools/check-image-pins`; blanks
+       around the operator may vary, an optional trailing ` # comment`
+       may follow if the line has no backslash, and the line before may
+       not end in `\`). This rule reads the raw file text, before any
+       quoting, comment or continuation handling, and does not model
+       make's syntax (#51; three review rounds found holes in a parser):
+       any other text that assigns or defines `GO`, that is `GO` before
+       `=`, `:=`, `::=`, `:::=`, `?=`, `+=` or `!=` (also across a `\`
+       continuation) or `define GO`, is reported wherever it stands, in
+       a recipe, a `$(eval …)`, a target-specific variable, `MAKEFLAGS`
+       or a comment. It over-reports on purpose: a recipe's
+       `GO=go $(MAKE) x` and a comment that quotes `GO = go` are reported
+       too, and are written differently. It includes only literal `*.mk`
+       files the check reads; and it computes no variable name (`export
+       PA$(E)TH`, or a name built by a function call such as
+       `$(eval $(firstword GO) := …)`).
    - Any `*.hcl` other than the root's `docker-bake.hcl` and
      `docker-bake.override.hcl` is reported, unless it is on the tool's
      `hclAllowlist`, which is empty. A JSON bake file is reported;

@@ -62,8 +62,8 @@ func TestImageUses49(t *testing.T) {
 }
 
 // TestCheckMakefile49: the Makefile forms of point 8 are reported; the
-// repository's own forms are not. GO is compared as its whole value, not
-// its first word, and any define, += or != of it is reported (#51 item 4).
+// repository's own forms are not. The GO rule of #51 item 4 has its own
+// table, TestCheckMakefileGO51.
 func TestCheckMakefile49(t *testing.T) {
 	cases := map[string]bool{
 		"SHELL := ./evil-sh":                   true,
@@ -78,24 +78,6 @@ func TestCheckMakefile49(t *testing.T) {
 		"override GOWORK := ./go.work":         true,
 		"GO := ./evil/go":                      true,
 		"GO := /usr/local/go/bin/go":           true,
-		"GO := go -C ./evil":                   true,
-		"override GO = go -C x":                true,
-		"export GO := go -C x":                 true,
-		"images: GO = go -C x":                 true,
-		"GO += -C x":                           true,
-		"GO += go":                             true,
-		"GO != echo go":                        true,
-		"define GO\ngo -C ./evil\nendef":       true,
-		"define GO\ngo\nendef":                 true,
-		"override define GO =\ngo\nendef":      true,
-		"images-go:\n\t$(eval GO := go -C x)":  true,
-		"\techo \"#\"; GO=./evil make images":  true,
-		"# GO ?= go and an include stay":       false,
-		"images-go:\n\t$(eval GO := go)":       false,
-		"GO = go # the go tool":                false,
-		"override GO = go":                     false,
-		"export GO := go":                      false,
-		"define GOPROXY_NOTE\ntext\nendef":     false,
 		"export PA$(E)TH := x":                 true,
 		"$(eval PA$(E)TH := x)":                true,
 		"export PA$(E)TH":                      true,
