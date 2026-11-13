@@ -22,16 +22,22 @@ type fakeRegistry struct {
 	refs    map[string][]byte
 	configs map[string][]byte
 	errs    map[string]error
-	calls   []string
-	creates [][]string
+	// notFoundOnce answers "not found" for a ref once, then normally.
+	notFoundOnce map[string]bool
+	calls        []string
+	creates      [][]string
 }
 
 func newFakeRegistry(t *testing.T) *fakeRegistry {
-	return &fakeRegistry{t: t, refs: map[string][]byte{}, configs: map[string][]byte{}, errs: map[string]error{}}
+	return &fakeRegistry{t: t, refs: map[string][]byte{}, configs: map[string][]byte{}, errs: map[string]error{}, notFoundOnce: map[string]bool{}}
 }
 
 func (f *fakeRegistry) raw(ref string) ([]byte, error) {
 	f.calls = append(f.calls, "raw "+ref)
+	if f.notFoundOnce[ref] {
+		delete(f.notFoundOnce, ref)
+		return nil, fmt.Errorf("%w: ERROR: %s: not found", errNotFound, ref)
+	}
 	if err, ok := f.errs[ref]; ok {
 		return nil, err
 	}
@@ -233,6 +239,14 @@ func TestPublishIndex(t *testing.T) {
 			s.reg.refs[testRepo+"@"+s.amd.Index] = []byte(`{"other":1}`)
 			writeRecords(t, s.dir, s.amd, s.arm)
 		}, "has the content of"},
+		// Review B, N4: one "not found" is not enough; the second
+		// inspection finds the existing X.Y.Z (of other content here).
+		{"not found once, then found", func(t *testing.T, s *setup) {
+			other := pushRow(t, s.reg, testRepo, "amd64", "c", "0.1.0")
+			publishedIndex(t, s.reg, testRepo, "0.1.0", other, s.arm)
+			s.reg.notFoundOnce[testRepo+":0.1.0"] = true
+			writeRecords(t, s.dir, s.amd, s.arm)
+		}, "not found, then found on the second inspection"},
 		{"registry error on the tag", func(t *testing.T, s *setup) {
 			s.reg.errs[testRepo+":0.1.0"] = errors.New("connection reset")
 			writeRecords(t, s.dir, s.amd, s.arm)
@@ -401,6 +415,28 @@ func TestMoveLatest(t *testing.T) {
 	})
 }
 
+// TestInspectError: only buildx's exact "ERROR: <ref>: not found" for the
+// ref asked for is a missing ref (review B, N4).
+func TestInspectError(t *testing.T) {
+	const ref = testRepo + ":0.1.0"
+	base := errors.New("exit status 1")
+	for _, c := range []struct {
+		ref, stderr string
+		notFound    bool
+	}{
+		{ref, "ERROR: " + ref + ": not found\n", true},
+		{ref, "ERROR: ghcr.io/keepia/mail-other:0.1.0: not found", false},
+		{ref, "error getting credentials - err: exec: \"docker-credential-x\": executable file not found in $PATH", false},
+		{ref, "WARNING: x\nERROR: " + ref + ": not found", false},
+		{"", "ERROR: : not found", false},
+	} {
+		err := inspectError(c.ref, []string{"buildx"}, base, c.stderr)
+		if errors.Is(err, errNotFound) != c.notFound {
+			t.Errorf("%q: %v, want not found = %v", c.stderr, err, c.notFound)
+		}
+	}
+}
+
 // TestHighestTagNumeric: the comparison is numeric, field by field.
 func TestHighestTagNumeric(t *testing.T) {
 	out := []byte(strings.Join([]string{
@@ -438,7 +474,7 @@ func TestLsRemoteCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := string(rec)
-	for _, w := range []string{"args:ls-remote --tags -- " + releaseRepoURL + "\n", "files:\n", "GIT_CONFIG_NOSYSTEM=1\n", "GIT_CONFIG_GLOBAL=/dev/null\n", "GIT_TERMINAL_PROMPT=0\n"} {
+	for _, w := range []string{"args:ls-remote --tags -- " + releaseRepoURL + "\n", "files:\n", "GIT_CONFIG_NOSYSTEM=1\n", "GIT_CONFIG_GLOBAL=/dev/null\n", "GIT_TERMINAL_PROMPT=0\n", "GIT_CEILING_DIRECTORIES=" + filepath.Clean(os.TempDir()) + "\n"} {
 		if !strings.Contains(r, w) {
 			t.Errorf("record lacks %q:\n%s", w, r)
 		}

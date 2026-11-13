@@ -27,11 +27,17 @@ import (
 //
 // The local ID is the manifest digest with Docker's containerd image
 // store, and the config digest with the classic store; the metadata has
-// both (containerimage.digest, containerimage.config.digest). Verify
-// requires the config digest (#27, B1 (b)): it is the tested config a
-// release push is compared with, and a save must hold exactly that
-// config. (The docker driver on the containerd store, which reports no
-// config digest, is not used: CI builds with setup-buildx's builder.)
+// containerimage.digest, and containerimage.config.digest only when the
+// load exports in "docker image format": that is the docker-container
+// driver's --load into a daemon with the classic store (CI's runners,
+// Docker 28 with overlay2). Into a daemon with the containerd image store
+// the load exports in "oci image format" and the metadata has no config
+// digest (measured in #71 review A, N1, Docker 29.9.2); so does the docker
+// driver on that store. Verify requires the config digest (#27, B1 (b)):
+// it is the tested config a release push is compared with, and a save
+// must hold exactly that config. If the runners move to the containerd
+// store, -verify-built fails closed, in CI and in the release, until this
+// is reworked.
 //
 // Verify only proves the store's state at the moment it runs (#46, B
 // N1). So what a job tests and saves never goes by tag after it:

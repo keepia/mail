@@ -68,6 +68,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
       - run: sh scripts/ci-docker-mirror.sh
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
@@ -98,16 +99,34 @@ jobs:
         env:
           BAKE_METADATA: ${{ steps.build.outputs.metadata }}
         run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built -save "$RUNNER_TEMP/image.tar"
-      - name: SBOM
-        env:
-          SYFT_CHECK_FOR_APP_UPDATE: "false"
-        run: go run github.com/anchore/syft/cmd/syft@v1.57.1 scan "docker-archive:$RUNNER_TEMP/image.tar" -o "spdx-json=$RUNNER_TEMP/syft.spdx.json" -o "syft-json=$RUNNER_TEMP/syft.json"
       - name: Build metadata
         env:
           BAKE_METADATA: ${{ steps.build.outputs.metadata }}
         run: |
           mkdir -p "$RUNNER_TEMP/tested"
           printf '%s\n' "$BAKE_METADATA" >"$RUNNER_TEMP/tested/metadata.json"
+      # The package list of a Debian-based image, read from the verified
+      # image ID (the distroless Keepia image has none).
+      - id: verify2
+        if: matrix.image != 'keepia'
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - name: Package list
+        if: matrix.image != 'keepia'
+        env:
+          VERIFIED_IMAGE: ${{ steps.verify2.outputs.image }}
+        run: docker run --rm --entrypoint cat "$VERIFIED_IMAGE" /usr/share/keepia/packages.txt >"$RUNNER_TEMP/tested/packages.txt"
+      - name: SBOM
+        env:
+          SYFT_CHECK_FOR_APP_UPDATE: "false"
+        run: go run github.com/anchore/syft/cmd/syft@v1.57.1 scan "docker-archive:$RUNNER_TEMP/image.tar" -o "spdx-json=$RUNNER_TEMP/syft.spdx.json" -o "syft-json=$RUNNER_TEMP/syft.json"
+      - name: SBOM and source list of the row
+        run: |
+          packages=
+          if [ -f "$RUNNER_TEMP/tested/packages.txt" ]; then packages=-packages=$RUNNER_TEMP/tested/packages.txt; fi
+          GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/release-sources row -target "$BAKE_TARGET" -platform "$PLATFORM" -version "$VERSION" -commit "$GITHUB_SHA" \
+            -metadata "$RUNNER_TEMP/tested/metadata.json" -syft "$RUNNER_TEMP/syft.json" -spdx "$RUNNER_TEMP/syft.spdx.json" ${packages:+"$packages"} -out "$RUNNER_TEMP/tested"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tested-${{ matrix.image }}-${{ matrix.arch }}
@@ -141,6 +160,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           buildkitd-config-inline: |
@@ -198,6 +218,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           buildkitd-config-inline: |
@@ -247,6 +268,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           buildkitd-config-inline: |
@@ -359,6 +381,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           buildkitd-config-inline: |

@@ -204,6 +204,27 @@ var releaseCases = []struct {
 	{"fail-27-other-tag", inJob("latest", "      - env:\n", "      - run: docker buildx imagetools create -t ghcr.io/keepia/mail:0.1 ghcr.io/keepia/mail:0.1.0\n      - env:\n"),
 		nil, []string{"job latest has 6 steps", "step 5 runs a text that is not one of this job's lines", "step 5 runs buildx imagetools create"}},
 	{"fail-27-latest-needs", inJob("latest", "    needs: [version, index, release]\n", "    needs: [version, index]\n"), nil, []string{"job latest: needs must be exactly [version index release]"}},
+	// Round 2 of #71. Review B, B1: setup-go's cache stays off.
+	{"fail-27-setup-go-cache", inJob("push", "          cache: false\n", ""), nil, []string{"job push: step 2 must be exactly uses actions/setup-go@" + actionPins["actions/setup-go"]}},
+	{"fail-27-setup-go-cache-build", inJob("build", "          cache: false\n", ""), nil, []string{"job build: step 2 uses actions/setup-go without cache: false"}},
+	// Review A, B1: an env given as one expression.
+	{"fail-27-p4-env-expression", inJob("push", "      - name: Commit time\n", "      - name: Commit time\n        env: ${{ fromJSON('{\"BASH_ENV\":\"scripts/image-test.sh\"}') }}\n"),
+		nil, []string{"job push: step 5: env is not a mapping", "job push: step 5 must be exactly run: " + lineEpoch}},
+	{"fail-27-p7-env-expression", inJob("release", "        working-directory: dist\n        run: sha256sum -c SHA256SUMS\n", "        working-directory: dist\n        env: ${{ fromJSON('{\"BASH_ENV\":\"x\"}') }}\n        run: sha256sum -c SHA256SUMS\n"),
+		nil, []string{"job release: step 2: env is not a mapping"}},
+	{"fail-27-bake-env-expression", inJob("build", "    env:\n      BAKE_TARGET: ${{ matrix.image }}\n      PLATFORM: linux/${{ matrix.arch }}\n      VERSION: ${{ needs.version.outputs.version }}\n", "    env: ${{ fromJSON('{}') }}\n    x-env:\n      BAKE_TARGET: ${{ matrix.image }}\n      PLATFORM: linux/${{ matrix.arch }}\n      VERSION: ${{ needs.version.outputs.version }}\n"),
+		nil, []string{"job build: the job env is not a mapping (${{ fromJSON('{}') }})", "job build: the job env is not a mapping\n", "job build: key x-env is not in the release policy"}},
+	// Review A, B2: the syft rule matches a command that runs syft.
+	{"fail-27-syft-version", inJob("build", "syft@v1.57.1 scan", "syft@latest scan"), nil, []string{"job build: step 14 runs syft other than as"}},
+	{"fail-27-syft-binary", inJob("build", "        run: go run github.com/anchore/syft/cmd/syft@v1.57.1 scan", "        run: syft scan"), nil, []string{"job build: step 14 runs syft other than as"}},
+	// Review A, B3: the release modes and the login only in the exact jobs.
+	{"fail-27-latest-in-bundle", inJob("bundle", "      - uses: actions/upload-artifact", "      - env:\n          VERSION: ${{ needs.version.outputs.version }}\n          INDEX_DIGESTS: ${{ needs.index.outputs.digests }}\n        run: "+lineMoveLatest+"\n      - uses: actions/upload-artifact"),
+		nil, []string{"job bundle: step 3 runs -move-latest: the release modes run only in push, push-rehearsal, index and latest"}},
+	{"fail-27-verify-pushed-in-build", inJob("build", "      - name: SBOM\n", "      - run: "+lineVerifyPushed+"\n      - name: SBOM\n"), nil, []string{"job build: step 14 runs -verify-pushed: the release modes run only in"}},
+	{"fail-27-login-in-bundle", inJob("bundle", "      - uses: actions/upload-artifact", "      - env:\n          TOKEN: ${{ secrets.GITHUB_TOKEN }}\n        run: "+lineLogin+"\n      - uses: actions/upload-artifact"),
+		nil, []string{"job bundle: step 3 runs docker login: only push, index and latest log in to GHCR"}},
+	// Review B, N1: the policy's pin, not any commit of the action.
+	{"fail-27-p9-other-pin", inJob("push", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "actions/checkout@"+sha40), nil, []string{"job push: step 1 uses actions/checkout at " + sha40 + ", not at the policy's pin"}},
 	// Revision 5 (B6): the concurrency that serialises the moves.
 	{"fail-27-concurrency-missing", inWorkflow("concurrency:\n  group: release\n  cancel-in-progress: false\n", ""), nil, []string{"the workflow-level concurrency must be exactly {group: release, cancel-in-progress: false}"}},
 	{"fail-27-concurrency-cancel", inWorkflow("  cancel-in-progress: false\n", "  cancel-in-progress: true\n"), nil, []string{"the workflow-level concurrency must be exactly"}},

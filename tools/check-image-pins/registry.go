@@ -101,7 +101,9 @@ func newDockerRegistry() (*dockerRegistry, error) {
 	return &dockerRegistry{bin: bin, env: cleanEnv(nil)}, nil
 }
 
-func (d *dockerRegistry) docker(args ...string) ([]byte, error) {
+// docker runs the docker CLI. ref, when set, is the reference an inspect
+// asks for: only buildx's exact answer for a missing ref is errNotFound.
+func (d *dockerRegistry) docker(ref string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), registryTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, d.bin, args...) //nolint:gosec // the docker CLI resolved once; the argv is built here from constants and checked digests
@@ -110,25 +112,34 @@ func (d *dockerRegistry) docker(args ...string) ([]byte, error) {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if strings.Contains(msg, "not found") {
-			return nil, fmt.Errorf("%w: %s", errNotFound, msg)
-		}
-		return nil, fmt.Errorf("docker %s: %w: %s", strings.Join(args, " "), err, msg)
+		return nil, inspectError(ref, args, err, stderr.String())
 	}
 	return out, nil
 }
 
+// inspectError classifies a failed docker call. Only buildx's whole
+// stderr "ERROR: <ref>: not found" for the ref asked for counts as
+// errNotFound (#71 review B, N4); any other error that mentions "not
+// found" (a credential helper's "executable file not found", for
+// example) is an error, so it is never read as a missing tag.
+func inspectError(ref string, args []string, err error, stderr string) error {
+	msg := strings.TrimSpace(stderr)
+	if ref != "" && msg == "ERROR: "+ref+": not found" {
+		return fmt.Errorf("%w: %s", errNotFound, msg)
+	}
+	return fmt.Errorf("docker %s: %w: %s", strings.Join(args, " "), err, msg)
+}
+
 func (d *dockerRegistry) raw(ref string) ([]byte, error) {
-	return d.docker("buildx", "imagetools", "inspect", "--raw", ref)
+	return d.docker(ref, "buildx", "imagetools", "inspect", "--raw", ref)
 }
 
 func (d *dockerRegistry) config(ref string) ([]byte, error) {
-	return d.docker("buildx", "imagetools", "inspect", "--format", "{{json .Image}}", ref)
+	return d.docker("", "buildx", "imagetools", "inspect", "--format", "{{json .Image}}", ref)
 }
 
 func (d *dockerRegistry) create(args []string) error {
-	_, err := d.docker(append([]string{"buildx", "imagetools", "create"}, args...)...)
+	_, err := d.docker("", append([]string{"buildx", "imagetools", "create"}, args...)...)
 	return err
 }
 
@@ -346,6 +357,16 @@ func publishIndex(version, digestDir string, deps publishDeps) (map[string]strin
 		raw, digest, err := rawDigest(deps.reg, tag, "")
 		switch {
 		case errors.Is(err, errNotFound):
+			// Absent only if a second inspection says so too (#71 review
+			// B, N4): one wrong answer cannot lead to an overwrite.
+			if _, _, err2 := rawDigest(deps.reg, tag, ""); !errors.Is(err2, errNotFound) {
+				second := "found"
+				if err2 != nil {
+					second = err2.Error()
+				}
+				findings = append(findings, fmt.Sprintf("%s: not found, then %s on the second inspection; refused: X.Y.Z is never overwritten", tag, second))
+				continue
+			}
 			p.args = append([]string{"-t", tag, "--annotation", "index:" + versionKey + "=" + version}, sources...)
 		case err != nil:
 			findings = append(findings, fmt.Sprintf("%s: %v; refused: it may exist, and X.Y.Z is never overwritten", tag, err))
@@ -464,7 +485,9 @@ func gitCommand(ctx context.Context, git, dir string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, git, "ls-remote", "--tags", "--", releaseRepoURL) //nolint:gosec // git resolved once; the URL is a constant
 	cmd.Dir = dir
 	// No HOME either: git's HTTP transport would read ~/.netrc.
-	env := []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0"}
+	// GIT_CEILING_DIRECTORIES: git does not search above the temp directory
+	// for a repository whose config would apply (#71 review B, N5).
+	env := []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0", "GIT_CEILING_DIRECTORIES=" + filepath.Dir(dir)}
 	if v, ok := os.LookupEnv("PATH"); ok {
 		env = append(env, "PATH="+v)
 	}

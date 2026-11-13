@@ -46,6 +46,11 @@ import (
 //     other than ${{ needs.version.outputs.version }}.
 //   - SOURCE_DATE_EPOCH required in build, push and push-rehearsal before
 //     the check step (B1 M3).
+//   - Everywhere (#71, round 2): every env is a literal mapping, not an
+//     expression; actions/setup-go has cache: false; the release modes,
+//     docker login and docker/login-action appear only in the exact jobs;
+//     the exact jobs' actions are at the policy's own commits
+//     (actionPins).
 //
 // The rule runs on release.yml in repository mode (make image-pins);
 // main's workflows hold no release.yml until #27 part 4b, so it reports
@@ -105,14 +110,31 @@ type stepSpec struct {
 
 func (s stepSpec) String() string {
 	if s.uses != "" {
-		return fmt.Sprintf("uses %s@<sha> with %v", s.uses, s.with)
+		return fmt.Sprintf("uses %s@%s with %v", s.uses, actionPins[s.uses], s.with)
 	}
 	return fmt.Sprintf("run: %s (env %v, id %q)", s.run, s.env, s.id)
 }
 
+// actionPins are the exact commits of the actions the exact jobs may use
+// (#71 review B, N1): another commit of the same action, from a fork's
+// network for example, is refused. They are CI's pins (ci.yml); a
+// Dependabot bump of release.yml needs the same bump here.
+var actionPins = map[string]string{
+	"actions/checkout":           "3d3c42e5aac5ba805825da76410c181273ba90b1", // v7.0.1
+	"actions/setup-go":           "b7ad1dad31e06c5925ef5d2fc7ad053ef454303e", // v7.0.0
+	"docker/setup-buildx-action": "f87e5991a6d7451dcb8d9637bfbc97413f497069", // v4.4.1
+	"actions/download-artifact":  "9000827ccba6bdab643e8b6fd33ac0654aef8333", // v8.0.2
+	"actions/upload-artifact":    "cf430e030ddbb5b0abf93d22962f4752f3646cd9", // v7.0.2
+	"docker/bake-action":         "59cb1203cd42bcefd40a1b6d73b589e48c86040e", // v7.5.0
+}
+
 var (
-	stepCheckout  = stepSpec{uses: "actions/checkout", with: map[string]any{"persist-credentials": false}}
-	stepSetupGo   = stepSpec{uses: "actions/setup-go", with: map[string]any{"go-version-file": "go.mod"}}
+	stepCheckout = stepSpec{uses: "actions/checkout", with: map[string]any{"persist-credentials": false}}
+	// setup-go's cache is off (#71 review B, B1): it would restore main's
+	// GOMODCACHE and GOCACHE, which any job on main can write, into the
+	// jobs that run check-image-pins after docker login. Without it the
+	// tool's modules come fresh from the proxy, checked against go.sum.
+	stepSetupGo   = stepSpec{uses: "actions/setup-go", with: map[string]any{"go-version-file": "go.mod", "cache": false}}
 	stepSetupBake = stepSpec{uses: "docker/setup-buildx-action", with: map[string]any{
 		"buildkitd-config-inline": "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]",
 	}}
@@ -234,7 +256,7 @@ var (
 	codeCommand     = regexp.MustCompile(`(?:^|[^\w./-])(node|nodejs|npm|npx|pnpm|yarn|corepack|python[\d.]*|pip[\d.]*|pipx|ruby|perl|deno|bun|go|make|gmake)(?:$|[^\w-])`)
 	codePath        = regexp.MustCompile(`(?:^|[^\w-])((?:scripts|tools|cmd|internal|images|deploy|node_modules)/)`)
 	relativeCommand = regexp.MustCompile("(?:^|[;&|(`{]|\\$\\()\\s*\\.{1,2}/")
-	pinnedUses      = regexp.MustCompile(`^([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)@[0-9a-f]{40}$`)
+	pinnedUses      = regexp.MustCompile(`^([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)@([0-9a-f]{40})$`)
 )
 
 // checkReleaseWorkflow applies rule 7 to release.yml's single document.
@@ -359,7 +381,10 @@ func checkReleaseOn(line int, on any, add func(int, string, ...any)) {
 }
 
 // checkVersionEnv reports a VERSION env (any level) that is not exactly
-// the version job's output (P8).
+// the version job's output (P8). An env that is not a mapping is reported
+// by its caller at every level (the workflow env at all, a job env outside
+// the bake jobs at all, a bake job's env and a step env as "not a
+// mapping"), so it cannot hide a VERSION here.
 func checkVersionEnv(line int, where string, env any, add func(int, string, ...any)) {
 	m, _ := asMap(env)
 	if v, ok := m["VERSION"]; ok && v != versionExpr {
@@ -468,7 +493,11 @@ func sortedCopy(s []string) []string {
 // checkReleaseBakeEnv checks a bake job's env: exactly BAKE_TARGET,
 // PLATFORM, VERSION and BAKE_SET, with exactly the policy's lines.
 func checkReleaseBakeEnv(line int, name string, v any, add func(int, string, ...any)) {
-	env, _ := asMap(v)
+	env, ok := asMap(v)
+	if !ok {
+		add(line, "job %s: the job env is not a mapping (%v): it must be exactly BAKE_TARGET, PLATFORM, VERSION and BAKE_SET", name, v)
+		return
+	}
 	for _, k := range sortedKeys(env) {
 		if _, ok := releaseBakeEnv[k]; !ok && k != "BAKE_SET" {
 			add(line, "job %s: env %s is not in the release policy (BAKE_TARGET, PLATFORM, VERSION, BAKE_SET)", name, k)
@@ -534,6 +563,14 @@ func checkReleaseSteps(line int, name string, p releaseJob, steps []any, add fun
 		if _, ok := step["continue-on-error"]; ok {
 			add(line, "job %s: step %d has continue-on-error: a failed step must stop the release (P7)", name, i+1)
 		}
+		// An env given as one expression (`env: ${{ fromJSON(…) }}`) would
+		// set any variable, BASH_ENV included, past every env rule below,
+		// which read env as a mapping (#71 review A, B1).
+		if e, has := step["env"]; has {
+			if _, ok := asMap(e); !ok {
+				add(line, "job %s: step %d: env is not a mapping (%v): every env of release.yml is a literal mapping (P4, P7)", name, i+1, e)
+			}
+		}
 		run, _ := step["run"].(string)
 		if strings.Contains(run, "${{") {
 			add(line, "job %s: step %d has ${{ }} in its run text: inputs, outputs and tokens reach a step only through env (P8)", name, i+1)
@@ -550,9 +587,17 @@ func checkReleaseSteps(line int, name string, p releaseJob, steps []any, add fun
 		if p.noRepoCode {
 			checkNoRepoCode(line, name, i, step, add)
 		}
-		if strings.Contains(strings.ToLower(run), "syft") && (!strings.HasPrefix(strings.TrimSpace(run), syftRun) ||
+		if runsSyft(run) && (!strings.HasPrefix(strings.TrimSpace(run), syftRun) || strings.Count(run, "anchore/syft") != 1 ||
 			!reflect.DeepEqual(asAnyMap(step["env"]), map[string]any{"SYFT_CHECK_FOR_APP_UPDATE": "false"})) {
 			add(line, "job %s: step %d runs syft other than as `%s…` with exactly the env SYFT_CHECK_FOR_APP_UPDATE: \"false\" (a literal version through the Go module proxy, no update check; plan revision 2 D.7)", name, i+1, syftRun)
+		}
+		if p.steps == nil {
+			checkReleaseModesElsewhere(line, name, i, step, add)
+		}
+		if uses, _ := step["uses"].(string); p.steps == nil && strings.HasPrefix(uses, "actions/setup-go@") {
+			if w, _ := asMap(step["with"]); w["cache"] != false {
+				add(line, "job %s: step %d uses actions/setup-go without cache: false: it would restore a Go cache that other jobs on main write (#71 review B, B1)", name, i+1)
+			}
 		}
 	}
 	if p.bake && (epochAt < 0 || checkAt < 0 || epochAt > checkAt) {
@@ -560,6 +605,59 @@ func checkReleaseSteps(line int, name string, p releaseJob, steps []any, add fun
 	}
 	if p.steps != nil {
 		checkExactSteps(line, name, p.steps, steps, add)
+	}
+}
+
+// runsSyft reports whether a run text runs syft: a command whose word is
+// syft (any path), or a `go run` (or `go install`) of a package under
+// anchore/syft. A word that only names syft (release-sources' -syft
+// FILE) does not count (#71 review A, B2).
+func runsSyft(text string) bool {
+	for _, words := range shellCommands(text) {
+		words = dropRedirects(words)
+		i := commandStart(words)
+		if i >= len(words) {
+			continue
+		}
+		if path0(words[i]) == "syft" {
+			return true
+		}
+		if path0(words[i]) == "go" && i+1 < len(words) && (words[i+1] == "run" || words[i+1] == "install") {
+			for _, a := range words[i+2:] {
+				if strings.Contains(a, "anchore/syft") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// releaseModeFlags are the tool modes only the exact jobs run.
+var releaseModeFlags = []string{"-verify-pushed", "-publish-index", "-move-latest"}
+
+// checkReleaseModesElsewhere reports, in a job that is not an exact-steps
+// job, a step that runs a release mode of the tool or logs in to a
+// registry (#71 review A, B3): those belong to push, push-rehearsal,
+// index and latest only.
+func checkReleaseModesElsewhere(line int, name string, i int, step map[string]any, add func(int, string, ...any)) {
+	run, _ := step["run"].(string)
+	for _, words := range shellCommands(run) {
+		for _, w := range words {
+			for _, f := range releaseModeFlags {
+				if strings.TrimLeft(w, "-") == strings.TrimLeft(f, "-") {
+					add(line, "job %s: step %d runs %s: the release modes run only in push, push-rehearsal, index and latest", name, i+1, f)
+				}
+			}
+		}
+		if j := commandStart(words); j < len(words) && engines[strings.ToLower(path0(words[j]))] {
+			if sub, _ := subcommand(words[j+1:]); sub == "login" {
+				add(line, "job %s: step %d runs docker login: only push, index and latest log in to GHCR", name, i+1)
+			}
+		}
+	}
+	if uses, _ := step["uses"].(string); strings.HasPrefix(strings.ToLower(uses), "docker/login-action@") {
+		add(line, "job %s: step %d uses docker/login-action: only push, index and latest log in to GHCR", name, i+1)
 	}
 }
 
@@ -586,6 +684,8 @@ func checkNoRepoCode(line int, name string, i int, step map[string]any, add func
 			add(line, "%s: working-directory has an expression", where)
 		}
 	}
+	// An env that is not a mapping is reported for every step by
+	// checkReleaseSteps; here only its keys are checked.
 	env, _ := asMap(step["env"])
 	for _, k := range sortedKeys(env) {
 		if !releaseJobEnv[k] {
@@ -644,8 +744,12 @@ func checkExactSteps(line int, name string, want []stepSpec, steps []any, add fu
 			ownProblem[i] = true
 		case hasUses:
 			m := pinnedUses.FindStringSubmatch(uses)
-			if m == nil || !actions[m[1]] {
+			switch {
+			case m == nil || !actions[m[1]]:
 				add(line, "job %s: step %d uses %s, which is not one of this job's actions (P9: %s, each pinned to a commit)", name, i+1, uses, strings.Join(sortedBool(actions), ", "))
+				ownProblem[i] = true
+			case m[2] != actionPins[m[1]]:
+				add(line, "job %s: step %d uses %s at %s, not at the policy's pin %s (P9)", name, i+1, m[1], m[2], actionPins[m[1]])
 				ownProblem[i] = true
 			}
 		case hasRun:
@@ -693,13 +797,13 @@ func stepDiff(want stepSpec, step map[string]any) string {
 	}
 	if want.uses != "" {
 		m := pinnedUses.FindStringSubmatch(fmt.Sprint(step["uses"]))
-		if m == nil || m[1] != want.uses {
+		if m == nil || m[1] != want.uses || m[2] != actionPins[want.uses] {
 			return fmt.Sprintf("uses %v", step["uses"])
 		}
 		if !sameInputs(step["with"], want.with) {
 			return fmt.Sprintf("with %v", step["with"])
 		}
-		if step["env"] != nil {
+		if _, has := step["env"]; has {
 			return "an action step has no env"
 		}
 		return ""
@@ -707,11 +811,17 @@ func stepDiff(want stepSpec, step map[string]any) string {
 	if strings.TrimSpace(fmt.Sprint(step["run"])) != want.run {
 		return fmt.Sprintf("run %q", step["run"])
 	}
-	if step["with"] != nil {
+	if _, has := step["with"]; has {
 		return "a run step has no with"
 	}
-	if !reflect.DeepEqual(nilIfEmpty(asAnyMap(step["env"])), nilIfEmpty(want.env)) {
-		return fmt.Sprintf("env %v", step["env"])
+	// The env key itself, not its decoded mapping: an env given as one
+	// expression is not "no env" (#71 review A, B1).
+	env, has := step["env"]
+	switch m, ok := asMap(env); {
+	case len(want.env) == 0 && has:
+		return fmt.Sprintf("env %v, want none", env)
+	case len(want.env) > 0 && (!ok || !reflect.DeepEqual(m, want.env)):
+		return fmt.Sprintf("env %v", env)
 	}
 	return ""
 }

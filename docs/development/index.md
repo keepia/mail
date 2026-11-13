@@ -682,7 +682,8 @@ lives, also under a skipped path.
      `latest`, every step is exactly the policy's step at its position: an
      action of the job's list (checkout, setup-go, setup-buildx with CI's
      inputs, the `tested-*`/`digest-*` artifacts, bake-action once in the
-     push jobs), with exactly its inputs, or a run step whose trimmed text
+     push jobs) at the policy's own commit (`actionPins`, CI's pins), with
+     exactly its inputs, or a run step whose trimmed text
      equals one fixed line (`SOURCE_DATE_EPOCH`, the GHCR login, `-build`,
      `-verify-pushed`, `-publish-index`, `-move-latest`) with exactly its
      env and no `if`, `shell`, `working-directory` or `continue-on-error`.
@@ -711,9 +712,22 @@ lives, also under a skipped path.
      `latest`); no `${{ }}` in a `run:` text; every `VERSION` env is
      `${{ needs.version.outputs.version }}`; `SOURCE_DATE_EPOCH` is
      required before the check step in `build`, `push` and
-     `push-rehearsal`; syft runs only as `go run
+     `push-rehearsal`; a command that runs syft (the command word `syft`,
+     or a `go run` of a package under `anchore/syft`) is only `go run
      github.com/anchore/syft/cmd/syft@v1.57.1 …` with
-     `SYFT_CHECK_FOR_APP_UPDATE: "false"`.
+     `SYFT_CHECK_FOR_APP_UPDATE: "false"`;
+   - **Everywhere in `release.yml`:** every `env` is a literal mapping (an
+     `env: ${{ fromJSON(…) }}` would set any variable, `BASH_ENV`
+     included, past the rules above); `actions/setup-go` has `cache:
+     false`, so no job restores a Go module or build cache that another
+     job on `main` wrote (#71 review B: such a cache runs its code inside
+     `check-image-pins`, after `docker login`); `-verify-pushed`,
+     `-publish-index`, `-move-latest`, `docker login` and
+     `docker/login-action` appear only in the exact jobs.
+
+   With the cache off, the tool's modules come fresh from the module proxy
+   and are checked against `go.sum`; nothing earlier in an exact job runs
+   code that could change them, so no `go mod verify` line is needed.
 
    In other workflows a `release-` cache scope in `BAKE_SET` is reported.
    Its tests are `TestReleaseSurface` (the `fail-27-*` cases, each one
