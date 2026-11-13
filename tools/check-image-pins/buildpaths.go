@@ -294,7 +294,9 @@ func isBuildAction(uses string) bool {
 // And it reports what reroutes `$(GO) run ./tools/check-image-pins
 // -bake-local` itself or hides lines from this rule (#49 point 8): SHELL
 // or .SHELLFLAGS set; GOFLAGS, GOENV or GOWORK set or exported (CI fixes
-// them in the check steps' prefix); GO set to anything but `go`; an
+// them in the check steps' prefix); GO set to anything but exactly `go`
+// (the whole value, a trailing comment aside; any `define GO`, `GO +=`
+// or `GO !=`, also after override or export, #51 item 4); an
 // include of a file that is not a literal *.mk path the walk reads; and a
 // variable name that is computed (`export PA$(E)TH`).
 func CheckMakefile(src []byte) []Finding {
@@ -338,7 +340,8 @@ var (
 var (
 	makeShell    = regexp.MustCompile(`(?:^|[^\w.])(SHELL|\.SHELLFLAGS)\s*(?::{1,3}|[?+!])?=|\b(?:export|unexport|override|define)\b[^=#]*?(?:^|[^\w.])(SHELL|\.SHELLFLAGS)\b`)
 	makeGoEnv    = regexp.MustCompile(`\b(GOFLAGS|GOENV|GOWORK)\s*(?::{1,3}|[?+!])?=|\b(?:export|unexport|override|define)\b[^=#]*?\b(GOFLAGS|GOENV|GOWORK)\b`)
-	makeGoVar    = regexp.MustCompile(`\bGO\s*(?::{1,3}|[?+!])?=\s*([^\s)]*)`)
+	makeGoVar    = regexp.MustCompile(`\bGO\s*(:{1,3}|[?+!])?=([^)]*)`)
+	makeGoDefine = regexp.MustCompile(`\bdefine\s+GO\b`)
 	makeInclude  = regexp.MustCompile(`^\s*(?:-|s)?include\s+(.*)$`)
 	makeVarName  = regexp.MustCompile(`([^\s=:?+!;#]+)\s*(?::{1,3}|[?+!])?=`)
 	makeDirectve = regexp.MustCompile(`\b(?:export|unexport|override|define|undefine)\s+([^=#]*)`)
@@ -353,8 +356,29 @@ func makeToolInputs(raw string) string {
 	if m := makeGoEnv.FindStringSubmatch(raw); m != nil {
 		return "a Makefile may not set or export " + m[1] + m[2] + ": it changes how `go run` builds `check-image-pins` itself"
 	}
-	if m := makeGoVar.FindStringSubmatch(raw); m != nil && m[1] != "go" {
-		return "a Makefile may set GO only to `go` (got " + strconv.Quote(m[1]) + "): `make images` runs `$(GO) run ./tools/check-image-pins`"
+	// GO is compared as its whole value (#51 item 4): only the first word
+	// let `GO := go -C ./evil` through. A make comment is cut off first,
+	// but not in a recipe line (a tab first), where `#` is the shell's and
+	// may be quoted (`echo "#"; GO=x make images`). The value ends at a
+	// `)`, which closes `$(eval GO := …)`; in a plain assignment, text
+	// after a bare `)` would be a shell syntax error in every recipe that
+	// runs $(GO). += and != never give exactly `go`, and a define body is
+	// not read.
+	code := raw
+	if !strings.HasPrefix(raw, "\t") {
+		code, _, _ = strings.Cut(raw, "#")
+	}
+	if makeGoDefine.MatchString(code) {
+		return "a Makefile may not set GO with define (its body is not read): set it only to `go` (`GO ?= go`); `make images` runs `$(GO) run ./tools/check-image-pins`"
+	}
+	if m := makeGoVar.FindStringSubmatch(code); m != nil {
+		v := strings.TrimSpace(m[2])
+		switch {
+		case m[1] == "+" || m[1] == "!":
+			return "a Makefile may set GO only to `go`, never with " + m[1] + "= (got " + strconv.Quote(v) + "): `make images` runs `$(GO) run ./tools/check-image-pins`"
+		case v != "go":
+			return "a Makefile may set GO only to `go` (got " + strconv.Quote(v) + "): `make images` runs `$(GO) run ./tools/check-image-pins`"
+		}
 	}
 	if m := makeInclude.FindStringSubmatch(raw); m != nil {
 		for _, f := range strings.Fields(m[1]) {

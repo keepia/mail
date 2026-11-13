@@ -396,7 +396,7 @@ func verifyPushed(in pushedInput) (pushedRecord, []string) {
 	got, err := checkRowInRegistry(in.reg, repo, arch, pushed.Digest, manifestDigest, tested.ConfigDigest)
 	var readErr *registryReadError
 	if errors.As(err, &readErr) {
-		return rec, []string{fmt.Sprintf("%s: %v. pushed.tar passed every check (it is the tested image), so this is a read error, not a content mismatch: the coordinator stops and reports, and no package version is deleted for it (runbook)", registryReadPrefix, err)}
+		return rec, []string{fmt.Sprintf("%s: %v. pushed.tar passed every check, so pushed.tar is the tested image; what the registry holds for this row is unknown, because the read failed. This is a read error, not a content mismatch: the coordinator stops and reports, and no package version is deleted for it (runbook)", registryReadPrefix, err)}
 	}
 	if err == nil && !bytes.Equal(got, raw) {
 		err = errors.New("its index bytes differ from pushed.tar's")
@@ -419,20 +419,24 @@ func digestFile(dir, target, platform string) string {
 // runVerifyPushed is verify-pushed mode.
 func runVerifyPushed(stdout io.Writer) int {
 	r := &report{out: stdout}
+	// notStarted reports a failure before any comparison, with its own
+	// summary line (#51 item 18).
+	notStarted := func(path, msg string) int {
+		r.add(path, 0, msg)
+		fmt.Fprintf(stdout, "check-image-pins: verify-pushed could not start: %s: %s; nothing was compared.\n", path, strings.Join(strings.Fields(msg), " "))
+		return 1
+	}
 	temp := os.Getenv("RUNNER_TEMP")
 	if temp == "" {
-		r.add("RUNNER_TEMP", 0, "empty: verify-pushed runs in a release.yml push job")
-		return 1
+		return notStarted("RUNNER_TEMP", "empty: verify-pushed runs in a release.yml push job")
 	}
 	tested, err := os.ReadFile(filepath.Join(temp, "tested", "metadata.json")) //nolint:gosec // the runner's temp directory, the tested-* artifact
 	if err != nil {
-		r.add("tested metadata", 0, err.Error())
-		return 1
+		return notStarted("tested metadata", err.Error())
 	}
 	reg, err := pushedRegistry()
 	if err != nil {
-		r.add("verify-pushed", 0, err.Error())
-		return 1
+		return notStarted("registry client", err.Error())
 	}
 	in := pushedInput{
 		meta: []byte(os.Getenv("BAKE_METADATA")), tested: tested,

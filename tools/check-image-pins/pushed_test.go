@@ -234,7 +234,7 @@ func TestVerifyPushedRegistryRead(t *testing.T) {
 		{"index bytes differ", func(reg *fakeRegistry) { reg.refs[testRepo+"@"+img.index] = other.indexJSON }, mismatch + img.index + ": " + testRepo + "@" + img.index + " has the content of " + other.index},
 		{"platform manifest differs", func(reg *fakeRegistry) { reg.refs[testRepo+"@"+img.manifest] = other.blobs[other.manifest] }, mismatch + img.index + ": " + testRepo + "@" + img.manifest + " has the content of " + other.manifest},
 		{"platform manifest missing", func(reg *fakeRegistry) { delete(reg.refs, testRepo+"@"+img.manifest) }, registryReadPrefix + ": " + testRepo + "@" + img.manifest},
-		{"registry error", func(reg *fakeRegistry) { reg.errs[testRepo+"@"+img.index] = errors.New("unauthorized") }, registryReadPrefix + ": " + testRepo + "@" + img.index + ": unauthorized. pushed.tar passed every check (it is the tested image), so this is a read error, not a content mismatch"},
+		{"registry error", func(reg *fakeRegistry) { reg.errs[testRepo+"@"+img.index] = errors.New("unauthorized") }, registryReadPrefix + ": " + testRepo + "@" + img.index + ": unauthorized. pushed.tar passed every check, so pushed.tar is the tested image; what the registry holds for this row is unknown, because the read failed. This is a read error, not a content mismatch"},
 		{"another repository holds it", func(reg *fakeRegistry) {
 			moved := map[string][]byte{}
 			for k, v := range reg.refs {
@@ -387,11 +387,93 @@ func TestRunVerifyPushedReadError(t *testing.T) {
 	if code := run([]string{"-verify-pushed"}, &stdout, &stderr); code != 1 {
 		t.Fatalf("exit %d, want 1:\n%s%s", code, stdout.String(), stderr.String())
 	}
-	if s := stdout.String(); !strings.Contains(s, "connection refused. pushed.tar passed every check") || !strings.Contains(s, "a read error, not a mismatch.") || strings.Contains(s, "is not the tested image") {
+	// #51 item 17: pushed.tar is the tested image, and what the registry
+	// holds is unknown; the old text claimed more ("it is the tested
+	// image", read as the registry's content).
+	s := stdout.String()
+	for _, want := range []string{
+		"connection refused. pushed.tar passed every check, so pushed.tar is the tested image;",
+		"what the registry holds for this row is unknown, because the read failed.",
+		"a read error, not a mismatch.",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("output lacks %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "is not the tested image") || strings.Contains(s, "(it is the tested image)") {
 		t.Fatalf("output:\n%s", s)
 	}
 	if _, err := os.Stat(filepath.Join(temp, "digest")); !os.IsNotExist(err) {
 		t.Fatalf("a digest directory after a failed read: %v", err)
+	}
+}
+
+// TestRunVerifyPushedMismatch (#51 item 19): other content in the
+// registry after every tar check passed exits 1 with the mismatch
+// summary, not the read-error one, and writes no digest file.
+func TestRunVerifyPushedMismatch(t *testing.T) {
+	img := newOCIImage(t, "amd64", "a", nil)
+	other := newOCIImage(t, "amd64", "b", nil)
+	temp := verifyPushedEnv(t, img)
+	const repo = "localhost:5000/keepia/mail-postfix"
+	reg := regOf(t, repo, img)
+	reg.refs[repo+"@"+img.index] = other.indexJSON
+	useRegistry(t, reg)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"-verify-pushed"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("exit %d, want 1:\n%s%s", code, stdout.String(), stderr.String())
+	}
+	s := stdout.String()
+	if !strings.Contains(s, "the registry holds other content than pushed.tar for "+repo+"@"+img.index) ||
+		!strings.Contains(s, "check-image-pins: 1 finding(s): the pushed image is not the tested image.\n") ||
+		strings.Contains(s, "read error") {
+		t.Fatalf("output:\n%s", s)
+	}
+	if _, err := os.Stat(filepath.Join(temp, "digest")); !os.IsNotExist(err) {
+		t.Fatalf("a digest directory after a mismatch: %v", err)
+	}
+}
+
+// TestRunVerifyPushedCannotStart (#51 item 18): each failure before the
+// comparison (no RUNNER_TEMP, no tested metadata, no registry client)
+// exits 1 with one summary line saying that nothing was compared.
+func TestRunVerifyPushedCannotStart(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, temp string)
+		want  string
+	}{
+		{"no RUNNER_TEMP", func(t *testing.T, _ string) { t.Setenv("RUNNER_TEMP", "") }, "RUNNER_TEMP: empty: verify-pushed runs in a release.yml push job"},
+		{"no tested metadata", func(t *testing.T, temp string) {
+			if err := os.Remove(filepath.Join(temp, "tested", "metadata.json")); err != nil {
+				t.Fatal(err)
+			}
+		}, "tested metadata: open "},
+		{"no registry client", func(t *testing.T, _ string) {
+			old := pushedRegistry
+			pushedRegistry = func() (registry, error) { return nil, errors.New("cannot find the docker CLI") }
+			t.Cleanup(func() { pushedRegistry = old })
+		}, "registry client: cannot find the docker CLI"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			img := newOCIImage(t, "amd64", "a", nil)
+			temp := verifyPushedEnv(t, img)
+			useRegistry(t, regOf(t, "localhost:5000/keepia/mail-postfix", img))
+			c.setup(t, temp)
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"-verify-pushed"}, &stdout, &stderr); code != 1 {
+				t.Fatalf("exit %d, want 1:\n%s%s", code, stdout.String(), stderr.String())
+			}
+			s := stdout.String()
+			summary := "check-image-pins: verify-pushed could not start: " + c.want
+			if !strings.Contains(s, summary) || !strings.HasSuffix(s, "; nothing was compared.\n") || strings.Count(s, "check-image-pins: ") != 1 {
+				t.Fatalf("output lacks one summary %q … \"; nothing was compared.\":\n%s", summary, s)
+			}
+			if _, err := os.Stat(filepath.Join(temp, "digest")); !os.IsNotExist(err) {
+				t.Fatalf("a digest directory: %v", err)
+			}
+		})
 	}
 }
 
