@@ -716,16 +716,22 @@ lives, also under a skipped path.
          `bake-action` outside the allowed step);
        - a job that calls a remote reusable workflow.
      - **Makefile rules: a fast filter, not a proof** (see "Known limits
-       of the Makefile rules" under the threat model). In a Makefile or
-       `*.mk` file the check reports `buildx` and `BUILDX_` anywhere
+       of the Makefile rules" under the threat model). In a Makefile
+       (`Makefile`, `makefile` or `GNUmakefile` in any directory; the
+       check matches these names in any letter case) or `*.mk` file the
+       check reports `buildx` and `BUILDX_` anywhere
        (after quotes are removed) and any other build command; setting
        or exporting `PATH` or `HOME`, and naming `DOCKER_CONFIG`,
        `DOCKER_HOST` or `DOCKER_CONTEXT` (local mode passes these to
        docker, and make passes its own value of an environment variable
        to a recipe even without `export`); setting `SHELL` or
        `.SHELLFLAGS`; setting or exporting `GOFLAGS`, `GOENV` or
-       `GOWORK`; an include that is not a literal `*.mk` path the walk
-       reads; and a variable name it sees as computed (`export
+       `GOWORK`; an include whose path is not literal (a `$`, a
+       backquote or a glob character), does not end in `.mk`, or lies
+       in a skipped directory, under `../` or at an absolute path (the
+       check does not verify that the file exists or that the walk read
+       it; generated includes are a known limit); and a variable name it
+       sees as computed (`export
        PA$(E)TH`, or a name built by a function call such as
        `$(eval $(firstword GO) := …)`).
 
@@ -1071,8 +1077,8 @@ Every mode checks all images before it creates anything.
   rule 7 resolves nothing there and allows only its fixed lines.
 - Known limits of the Makefile rules (#51, PR #91; maintainer decision
   6865260080). check-image-pins does not prove that a Makefile is safe:
-  its Makefile rules are a fast filter that fails closed on the forms it
-  knows. Not caught, among others (`TestMakefileKnownLimits` pins these):
+  its Makefile rules are a fast filter that fails closed on the forms
+  they know. Not caught, among others (`TestMakefileKnownLimits` pins these):
   - a variable name computed with `$` plus a blank, a tab or a
     backslash-newline (`$ ` is the empty one-character variable):
     `G$ O := ./evil`, `PA$ TH := …`, `SHE$ LL := …`. They get past the
@@ -1083,8 +1089,9 @@ Every mode checks all images before it creates anything.
   - a name quoted for a sub-make in a recipe:
     `$(MAKE) images G''O=./evil`, `MAKEFLAGS=G''O=./evil $(MAKE) …`.
 
-  Review owns Makefile changes: `Makefile` and `*.mk` are in the
-  `paths:` of `.claude/rules/docker.md`, so every change to them gets
+  Review owns Makefile changes: `Makefile`, `makefile`, `GNUmakefile`
+  (in any directory) and `*.mk` are in the `paths:` of
+  `.claude/rules/docker.md`, so every change to them gets
   `second-review`. No CI or release image build goes through make: they
   build only through `docker/bake-action` after `-build`, and
   `make images` runs only on developers' machines.
