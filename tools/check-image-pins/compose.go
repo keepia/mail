@@ -76,7 +76,8 @@ func root(doc *yaml.Node) *yaml.Node {
 // composeBuildKeys (so x-bake, additional_contexts, dockerfile_inline and
 // any new key are reported), and its args may not set BUILDKIT_SYNTAX. A
 // URL context, extends and a top-level include are reported: they can
-// pull images or sources this check does not see.
+// pull images or sources this check does not see. So is a service's
+// pull_policy, with any value (#66 item 9b).
 //
 // It also returns the Dockerfile of every build with a valid local context
 // (relative to the Compose file's directory), so the caller checks it with
@@ -135,6 +136,12 @@ func CheckCompose(src []byte) ([]Finding, []string, error) {
 func checkService(line int, name string, svc map[string]any, add func(int, string, ...any)) string {
 	if _, ok := svc["extends"]; ok {
 		add(line, "service %s: extends is not read by this check", name)
+	}
+	// Any pull_policy, whatever its value (#66 item 9b): a plain `up`
+	// without --pull never honours it, and `always` would pull an own
+	// image by tag over the verified one.
+	if p, ok := svc["pull_policy"]; ok {
+		add(line, "service %s: pull_policy (%v) is not allowed: the template is started only with --pull never, and the key could pull an image this check has not verified", name, p)
 	}
 	image, hasImage := svc["image"]
 	imageStr, isStr := image.(string)

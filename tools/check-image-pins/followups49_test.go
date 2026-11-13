@@ -62,7 +62,8 @@ func TestImageUses49(t *testing.T) {
 }
 
 // TestCheckMakefile49: the Makefile forms of point 8 are reported; the
-// repository's own forms are not.
+// repository's own forms are not. The GO rule of #51 item 4 has its own
+// table, TestCheckMakefileGO51.
 func TestCheckMakefile49(t *testing.T) {
 	cases := map[string]bool{
 		"SHELL := ./evil-sh":                   true,

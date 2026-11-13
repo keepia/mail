@@ -252,9 +252,12 @@ profile each (architecture section 7); with
 needs Docker Engine 28 or later (the gateway mode `isolated`): Engine 27
 refuses to create the networks, and 26 or older creates them without the
 isolation, silently. [Architecture section 7](architecture.md#7-docker)
-has the check to run after the first start: the host must have no
-address in the internal subnets (`edge-public`, which is not internal,
-keeps its gateway address on the host).
+has the check: the host must have no address in the internal subnets
+(`edge-public`, which is not internal, keeps its gateway address on the
+host). Its version line works at any time; the other two lines are
+meaningful only while the template is running (its networks exist).
+Before the first start and after `docker compose down` its last line
+prints nothing on any Engine, which is no all-clear.
 
 ```sh
 cp .env.example .env              # then set KEEPIA_POSTGRES_PASSWORD and the edge addresses
@@ -448,6 +451,17 @@ writes each row's SBOM and source list and the release's `sources.json`
 and `SOURCES.md`. The `compose` job starts the bundle with the verified
 images in its own project (test 15b).
 
+**R1, no network in RUN.** Every row also checks its Dockerfile: every
+RUN of an image Dockerfile carries `--network=none`, except two forms.
+One is the `keepia-apt-install` form:
+`RUN --mount=type=bind,source=common/keepia-apt-install,target=/tmp/keepia-apt-install [--mount=type=secret,id=ca,…] sh /tmp/keepia-apt-install <package>...`.
+The other is the root Dockerfile's single `go mod download` RUN in its Go
+build stage, whose modules `go.sum` pins and `go mod verify` checks; the
+`go build` after it has `--network=none` as well (#66). That RUN's text is
+the constant `goModDownload` in `tools/release-sources/main.go`, so an
+edit to the RUN updates the constant in the same PR: the test of the real
+Dockerfile in `go test ./tools/release-sources/` fails otherwise.
+
 Every SBOM package that is neither a Debian package nor a Go module
 (syft's `python` and `npm` packages, #73) must be part of a component of
 its row, or the row fails. Such a package needs at least one location, each
@@ -474,7 +488,10 @@ are part of. The rules read syft's `locations`, deb file lists,
 fail closed if one disappears: a syft bump re-runs all rows locally first.
 The fixtures in `tools/release-sources/testdata` are real syft output of
 the olefy and sogo images, trimmed with the jq filter quoted in
-`fixture_test.go`.
+`fixture_test.go`. They are regenerated the same way (build,
+`-verify-built -save`, syft, the filter) on a syft bump, and also when one
+of olefy's pinned wheels or the SOGo pin moves, because the packages,
+versions and paths they hold change with it (#51).
 
 ### The image pin check
 
@@ -508,7 +525,11 @@ lives, also under a skipped path.
    `build` may use only `context`, `dockerfile`, `args`, `target` and
    `labels` (so `x-bake`, `additional_contexts`, `dockerfile_inline`,
    `cache_from` and any new key are reported), and `args` may not set
-   `BUILDKIT_SYNTAX`; a URL context, `extends` and `include` are reported;
+   `BUILDKIT_SYNTAX`; a URL context, `extends` and `include` are reported.
+   So is a service's `pull_policy`, whatever its value (#66 item 9b): the
+   template is started only with `--pull never`, but a plain `up` without
+   it would honour the key, and `always` would pull an own image by tag
+   over the verified one;
 5. the bake definition **exactly as each build resolves it**, never its HCL
    lines. In every resolved target:
    - only these keys may appear: `context`, `dockerfile`, `args`,
@@ -694,17 +715,42 @@ lives, also under a skipped path.
          `docker/*` actions except the setup, login and metadata ones,
          `bake-action` outside the allowed step);
        - a job that calls a remote reusable workflow.
-     - A Makefile or `*.mk` file holds no `buildx` and no `BUILDX_` at all
-       (after quotes are removed), and no other build command. It does not
-       set or export `PATH` or `HOME`, and names no `DOCKER_CONFIG`,
-       `DOCKER_HOST` or `DOCKER_CONTEXT`: local mode passes these to docker,
-       and make passes its own value of an environment variable to a
-       recipe even without `export`. It also sets no `SHELL` or
-       `.SHELLFLAGS`, sets or exports no `GOFLAGS`, `GOENV` or `GOWORK`,
-       and sets `GO` only to `go` (`make images` runs `$(GO) run
-       ./tools/check-image-pins`); it includes only literal `*.mk` files
-       the check reads; and it computes no variable name (`export
-       PA$(E)TH`).
+     - **Makefile rules: a fast filter, not a proof** (see "Known limits
+       of the Makefile rules" under the threat model). In a Makefile
+       (`Makefile`, `makefile` or `GNUmakefile` in any directory; the
+       check matches these names in any letter case) or `*.mk` file the
+       check reports `buildx` and `BUILDX_` anywhere
+       (after quotes are removed) and any other build command; setting
+       or exporting `PATH` or `HOME`, and naming `DOCKER_CONFIG`,
+       `DOCKER_HOST` or `DOCKER_CONTEXT` (local mode passes these to
+       docker, and make passes its own value of an environment variable
+       to a recipe even without `export`); setting `SHELL` or
+       `.SHELLFLAGS`; setting or exporting `GOFLAGS`, `GOENV` or
+       `GOWORK`; an include whose path is not literal (a `$`, a
+       backquote or a glob character), does not end in `.mk`, or lies
+       in a skipped directory, under `../` or at an absolute path (the
+       check does not verify that the file exists or that the walk read
+       it; generated includes are a known limit); and a variable name it
+       sees as computed (`export
+       PA$(E)TH`, or a name built by a function call such as
+       `$(eval $(firstword GO) := …)`).
+
+       `GO` may be set only on a line that is exactly `GO ?= go`,
+       `GO := go`, `GO = go`, `override GO := go` or `export GO := go`
+       (`make images` runs `$(GO) run ./tools/check-image-pins`; blanks
+       around the operator may vary; no comment; the line before may not
+       end in `\`). For `GO` the check reads the raw file text, before
+       any quoting, comment or continuation handling, and does not model
+       make's syntax (#51; three review rounds found holes in a parser):
+       any other text that assigns or defines `GO`, that is `GO` before
+       `=`, `:=`, `::=`, `:::=`, `?=`, `+=` or `!=` (also across a `\`
+       continuation) or `define GO`, is reported wherever it stands, in
+       a recipe, a `$(eval …)`, a target-specific variable, `MAKEFLAGS`,
+       a comment, or an allowlisted line with a comment (under
+       `.RECIPEPREFIX` such a line is a recipe, and make expands
+       `GO = go # $(eval GO := ./evil)`). It over-reports on purpose: a
+       recipe's `GO=go $(MAKE) x` and a comment that quotes `GO = go` are
+       reported too, and are written differently.
    - Any `*.hcl` other than the root's `docker-bake.hcl` and
      `docker-bake.override.hcl` is reported, unless it is on the tool's
      `hclAllowlist`, which is empty. A JSON bake file is reported;
@@ -969,9 +1015,21 @@ Every mode checks all images before it creates anything.
   config, with that config's layers. The check and verify steps build the
   tool with `GOENV=off GOFLAGS=-mod=readonly GOWORK=off`, and the build
   job may not write `GITHUB_ENV` or `GITHUB_PATH` otherwise, so an earlier
-  step cannot reroute the tool's own build; locally the Makefile may not
-  set `SHELL`, `GO` or the Go variables the tool is built with.
-- Known limits of following what a step runs (#51):
+  step cannot reroute the tool's own build. Locally the Makefile rules
+  filter `SHELL`, `GO` and the Go variables the tool is built with; they
+  are not a proof (known limits below).
+- Known limits of following what a step runs (#51). They apply in every
+  workflow except `release.yml`'s jobs with exact steps (today: `ci.yml`,
+  and `release.yml`'s `version`, `build` and `bundle`). There a limit can
+  change which image a test runs or hide a build path, but not what is
+  pushed: only the exact jobs hold `packages: write` (rules 6 and 7), the
+  push jobs rebuild through bake, and `-verify-pushed` compares the pushed
+  config with the build job's tested config. A hidden build is refused at
+  verify-built (the local ID is not the bake digest) or never tested,
+  because the test runs the verified ID; workflow edits get
+  `second-review`. Reviewers look for these forms.
+
+  Not followed (fail open):
   - a command given as literal words to a function that runs its
     arguments (`retry make publish` with `retry() { "$@"; }`): the words
     are read only as words of the text;
@@ -982,13 +1040,61 @@ Every mode checks all images before it creates anything.
     `bash <&3`) is not read;
   - `xargs` and other words on PATH that run their arguments as a
     command (`xargs make publish`, `stdbuf`) hide those arguments;
-  - a copy of the arguments made at the top level and used inside a
-    function that is called with no arguments
-    (`args=("$@"); run() { main "${args[@]}"; }; run`) is not followed;
-  - reading `make` takes in the whole Makefile, which over-reports.
+  - a program that runs commands itself: `go run ./tools/<x>`,
+    `npm run <script>`, a `shell: python` step with `subprocess`. The check
+    follows `run` text, github-script, local actions and the scripts and
+    make targets they name, nothing else (51-1);
+  - a build or push written in another program (a Go composite literal
+    such as `[]string{"build"}`, a Rust builder), and `oras push` or
+    `regctl image copy`, which rule 7 refuses in the push jobs (51-2);
+  - a copy of the arguments run by a function that is called with no
+    arguments, whether the copy is made at the top level
+    (`args=("$@"); run() { main "${args[@]}"; }; run`) or in another
+    function (`parse_args() { CMD=("$@"); }; parse_args "$@"; run`)
+    (51-8);
+  - a `for c in "$@"` (or `for c;`) loop variable passed to a forwarding
+    function (51-9);
+  - `printf -v c '%s ' "$@"`, scalar copy chains (`b=$a`,
+    `b="${a[*]}"`), `${a[0]}` after `mapfile`, and a top-level
+    `cmd="$*"` used in a function called with `"$@"` (51-10);
+  - a test by tag through a wrapper (a Makefile target or script) whose
+    name does not contain `image-test` (51-11). Rules 6 and 7 do not
+    cover this one; only review does. A test by tag after verify still
+    tests the verified image unless something re-tags in between.
+
+  Over-reports (fail closed):
+  - reading `make` takes in the whole Makefile and its includes: every
+    recipe counts, whichever target runs, and file names in comments are
+    followed (51-5; no job that bakes runs `make` today);
+  - `&&` inside `[[ … ]]` splits the test, so
+    `[[ $out == a && $out == b ]] || fail` is reported as running `$out`
+    (51-7);
+  - the contents of `$(( ))` are read as commands, and data-only
+    arguments to a forwarding function (`quietly ls "$HOME"`) are
+    reported (51-12).
 
   In `release.yml`'s jobs with `packages: write` these limits do not apply:
   rule 7 resolves nothing there and allows only its fixed lines.
+- Known limits of the Makefile rules (#51, PR #91; maintainer decision
+  6865260080). check-image-pins does not prove that a Makefile is safe:
+  its Makefile rules are a fast filter that fails closed on the forms
+  they know. Not caught, among others (`TestMakefileKnownLimits` pins these):
+  - a variable name computed with `$` plus a blank, a tab or a
+    backslash-newline (`$ ` is the empty one-character variable):
+    `G$ O := ./evil`, `PA$ TH := …`, `SHE$ LL := …`. They get past the
+    `GO`, `PATH` and `SHELL` rules alike;
+  - a generated or remade include: `include gen.mk` with a rule that
+    makes `gen.mk` from a file no rule reads. Make remakes it and then
+    reads it;
+  - a name quoted for a sub-make in a recipe:
+    `$(MAKE) images G''O=./evil`, `MAKEFLAGS=G''O=./evil $(MAKE) …`.
+
+  Review owns Makefile changes: `Makefile`, `makefile`, `GNUmakefile`
+  (in any directory) and `*.mk` are in the `paths:` of
+  `.claude/rules/docker.md`, so every change to them gets
+  `second-review`. No CI or release image build goes through make: they
+  build only through `docker/bake-action` after `-build`, and
+  `make images` runs only on developers' machines.
 - Rule 7 checks `release.yml` on pull requests. A `workflow_dispatch` on a
   branch runs that branch's `release.yml`, which the branch can change; that
   residual risk is for review (#27, N10).

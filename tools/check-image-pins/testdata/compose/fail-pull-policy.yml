@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:18@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    pull_policy: always
+  memcached:
+    image: memcached:1.6@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    pull_policy: never
+  keepia:
+    image: ${KEEPIA_IMAGE:-${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail:${KEEPIA_VERSION:-dev}}
+    build: .
+    pull_policy: build
+  postfix:
+    image: ${KEEPIA_REGISTRY:-ghcr.io/keepia}/mail-postfix:${KEEPIA_VERSION:-dev}
+    build: images/postfix
+# want-lines: 2 5 8

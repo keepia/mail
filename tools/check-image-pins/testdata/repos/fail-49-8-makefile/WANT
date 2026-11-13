@@ -4,4 +4,4 @@ Makefile:8: a Makefile may include only literal *.mk files the check reads (got 
 Makefile:10: a Makefile may not set or export GOFLAGS
 Makefile:11: a Makefile may not set or export GOWORK
 Makefile:13: a Makefile may not compute a variable name ("PA$(E)TH")
-Makefile:19: a Makefile may set GO only to `go` (got "./evil/go")
+Makefile:19: a Makefile may set GO only in a line that is exactly `GO ?= go`
