@@ -298,6 +298,10 @@ func isBuildAction(uses string) bool {
 // allowlisted lines of checkMakeGo (#51 item 4); an
 // include of a file that is not a literal *.mk path the walk reads; and a
 // variable name that is computed (`export PA$(E)TH`).
+//
+// These rules are a fast filter that fails closed on the forms they
+// know, not a proof that a Makefile is safe (see checkMakeGo and
+// TestMakefileKnownLimits for what they do not catch).
 func CheckMakefile(src []byte) []Finding {
 	out := checkMakeGo(src)
 	for _, l := range makeLogicalLines(src) {
@@ -332,11 +336,13 @@ func CheckMakefile(src []byte) []Finding {
 // and `define GO` (also `override define GO`, `undefine GO`).
 // makeGoLine is the allowlist: the whole physical line is one of
 // `GO ?= go`, `GO := go`, `GO = go`, `override GO := go` and
-// `export GO := go`, blanks around the operator free, with an optional
-// ` # <comment>` and no backslash anywhere.
+// `export GO := go`, blanks around the operator free, and nothing else:
+// no comment, because under .RECIPEPREFIX the line can be a recipe whose
+// "comment" make expands (`GO = go # $(eval GO := ./evil)`, PR #91
+// review B delta).
 var (
 	makeGoText = regexp.MustCompile(`\bGO\b(?:[ \t]|\\\r?\n)*(?:::?:?|\?|\+|!)?=|define(?:[ \t]|\\\r?\n)+GO\b`)
-	makeGoLine = regexp.MustCompile(`^(?:GO[ \t]*[?:]?=|(?:override|export)[ \t]+GO[ \t]*:=)[ \t]*go(?: # [^\\]*)?$`)
+	makeGoLine = regexp.MustCompile(`^(?:GO[ \t]*[?:]?=|(?:override|export)[ \t]+GO[ \t]*:=)[ \t]*go$`)
 )
 
 // checkMakeGo applies the GO rule (#51 item 4) to a Makefile's raw text,
@@ -352,6 +358,13 @@ var (
 // shell's), and .RECIPEPREFIX can make any line a recipe. An
 // allowlisted line after a line that ends in a backslash is a
 // continuation and is reported as well.
+//
+// Like every Makefile rule here, this is a fast filter, not a proof
+// (maintainer decision on PR #91, 6865260080): a name built without the
+// text GO (`G$ O := x`, `$ ` being the empty variable), a generated or
+// remade include, and a name quoted for a sub-make (`G""O=x`) are not
+// caught. TestMakefileKnownLimits pins these; review owns Makefile
+// changes (second-review), and no CI image build runs make.
 func checkMakeGo(src []byte) []Finding {
 	text := string(src)
 	lines := strings.Split(text, "\n")
@@ -367,7 +380,7 @@ func checkMakeGo(src []byte) []Finding {
 			continue
 		}
 		reported[i] = true
-		out = append(out, Finding{i + 1, "a Makefile may set GO only in a line that is exactly `GO ?= go`, `GO := go`, `GO = go`, `override GO := go` or `export GO := go` (an optional ` # comment` without a backslash); any other text that sets or defines GO is reported (got " + strconv.Quote(lines[i]) + "): `make images` runs `$(GO) run ./tools/check-image-pins`"})
+		out = append(out, Finding{i + 1, "a Makefile may set GO only in a line that is exactly `GO ?= go`, `GO := go`, `GO = go`, `override GO := go` or `export GO := go` (no comment); any other text that sets or defines GO is reported (got " + strconv.Quote(lines[i]) + "): `make images` runs `$(GO) run ./tools/check-image-pins`"})
 	}
 	return out
 }

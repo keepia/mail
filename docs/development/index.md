@@ -715,31 +715,36 @@ lives, also under a skipped path.
          `docker/*` actions except the setup, login and metadata ones,
          `bake-action` outside the allowed step);
        - a job that calls a remote reusable workflow.
-     - A Makefile or `*.mk` file holds no `buildx` and no `BUILDX_` at all
-       (after quotes are removed), and no other build command. It does not
-       set or export `PATH` or `HOME`, and names no `DOCKER_CONFIG`,
-       `DOCKER_HOST` or `DOCKER_CONTEXT`: local mode passes these to docker,
-       and make passes its own value of an environment variable to a
-       recipe even without `export`. It also sets no `SHELL` or
-       `.SHELLFLAGS`, sets or exports no `GOFLAGS`, `GOENV` or `GOWORK`,
-       and sets `GO` only on a line that is exactly `GO ?= go`,
+     - **Makefile rules: a fast filter, not a proof** (see "Known limits
+       of the Makefile rules" under the threat model). In a Makefile or
+       `*.mk` file the check reports `buildx` and `BUILDX_` anywhere
+       (after quotes are removed) and any other build command; setting
+       or exporting `PATH` or `HOME`, and naming `DOCKER_CONFIG`,
+       `DOCKER_HOST` or `DOCKER_CONTEXT` (local mode passes these to
+       docker, and make passes its own value of an environment variable
+       to a recipe even without `export`); setting `SHELL` or
+       `.SHELLFLAGS`; setting or exporting `GOFLAGS`, `GOENV` or
+       `GOWORK`; an include that is not a literal `*.mk` path the walk
+       reads; and a variable name it sees as computed (`export
+       PA$(E)TH`, or a name built by a function call such as
+       `$(eval $(firstword GO) := …)`).
+
+       `GO` may be set only on a line that is exactly `GO ?= go`,
        `GO := go`, `GO = go`, `override GO := go` or `export GO := go`
        (`make images` runs `$(GO) run ./tools/check-image-pins`; blanks
-       around the operator may vary, an optional trailing ` # comment`
-       may follow if the line has no backslash, and the line before may
-       not end in `\`). This rule reads the raw file text, before any
-       quoting, comment or continuation handling, and does not model
+       around the operator may vary; no comment; the line before may not
+       end in `\`). For `GO` the check reads the raw file text, before
+       any quoting, comment or continuation handling, and does not model
        make's syntax (#51; three review rounds found holes in a parser):
        any other text that assigns or defines `GO`, that is `GO` before
        `=`, `:=`, `::=`, `:::=`, `?=`, `+=` or `!=` (also across a `\`
        continuation) or `define GO`, is reported wherever it stands, in
-       a recipe, a `$(eval …)`, a target-specific variable, `MAKEFLAGS`
-       or a comment. It over-reports on purpose: a recipe's
-       `GO=go $(MAKE) x` and a comment that quotes `GO = go` are reported
-       too, and are written differently. It includes only literal `*.mk`
-       files the check reads; and it computes no variable name (`export
-       PA$(E)TH`, or a name built by a function call such as
-       `$(eval $(firstword GO) := …)`).
+       a recipe, a `$(eval …)`, a target-specific variable, `MAKEFLAGS`,
+       a comment, or an allowlisted line with a comment (under
+       `.RECIPEPREFIX` such a line is a recipe, and make expands
+       `GO = go # $(eval GO := ./evil)`). It over-reports on purpose: a
+       recipe's `GO=go $(MAKE) x` and a comment that quotes `GO = go` are
+       reported too, and are written differently.
    - Any `*.hcl` other than the root's `docker-bake.hcl` and
      `docker-bake.override.hcl` is reported, unless it is on the tool's
      `hclAllowlist`, which is empty. A JSON bake file is reported;
@@ -1004,8 +1009,9 @@ Every mode checks all images before it creates anything.
   config, with that config's layers. The check and verify steps build the
   tool with `GOENV=off GOFLAGS=-mod=readonly GOWORK=off`, and the build
   job may not write `GITHUB_ENV` or `GITHUB_PATH` otherwise, so an earlier
-  step cannot reroute the tool's own build; locally the Makefile may not
-  set `SHELL`, `GO` or the Go variables the tool is built with.
+  step cannot reroute the tool's own build. Locally the Makefile rules
+  filter `SHELL`, `GO` and the Go variables the tool is built with; they
+  are not a proof (known limits below).
 - Known limits of following what a step runs (#51). They apply in every
   workflow except `release.yml`'s jobs with exact steps (today: `ci.yml`,
   and `release.yml`'s `version`, `build` and `bundle`). There a limit can
@@ -1063,6 +1069,25 @@ Every mode checks all images before it creates anything.
 
   In `release.yml`'s jobs with `packages: write` these limits do not apply:
   rule 7 resolves nothing there and allows only its fixed lines.
+- Known limits of the Makefile rules (#51, PR #91; maintainer decision
+  6865260080). check-image-pins does not prove that a Makefile is safe:
+  its Makefile rules are a fast filter that fails closed on the forms it
+  knows. Not caught, among others (`TestMakefileKnownLimits` pins these):
+  - a variable name computed with `$` plus a blank, a tab or a
+    backslash-newline (`$ ` is the empty one-character variable):
+    `G$ O := ./evil`, `PA$ TH := …`, `SHE$ LL := …`. They get past the
+    `GO`, `PATH` and `SHELL` rules alike;
+  - a generated or remade include: `include gen.mk` with a rule that
+    makes `gen.mk` from a file no rule reads. Make remakes it and then
+    reads it;
+  - a name quoted for a sub-make in a recipe:
+    `$(MAKE) images G''O=./evil`, `MAKEFLAGS=G''O=./evil $(MAKE) …`.
+
+  Review owns Makefile changes: `Makefile` and `*.mk` are in the
+  `paths:` of `.claude/rules/docker.md`, so every change to them gets
+  `second-review`. No CI or release image build goes through make: they
+  build only through `docker/bake-action` after `-build`, and
+  `make images` runs only on developers' machines.
 - Rule 7 checks `release.yml` on pull requests. A `workflow_dispatch` on a
   branch runs that branch's `release.yml`, which the branch can change; that
   residual risk is for review (#27, N10).

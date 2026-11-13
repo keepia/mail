@@ -27,8 +27,6 @@ func TestCheckMakefileGO51(t *testing.T) {
 		{"export GO := go", false},
 		{"GO?=go", false},
 		{"GO\t:=\tgo", false},
-		{"GO = go # the go tool", false},
-		{"export GO := go # pinned", false},
 		// Not GO, or GO only read.
 		{"define GOPROXY_NOTE\ntext\nendef", false},
 		{"X_GO = 1", false},
@@ -75,7 +73,12 @@ func TestCheckMakefileGO51(t *testing.T) {
 		{"GO \\\r\n:= ./evil", true},
 		{"FOO = x \\\nGO := go", true},
 		{"define \\\nGO\ngo\nendef", true},
-		// The comment of an allowlisted line: " # " and no backslash.
+		// An allowlisted line takes no comment (review B delta: under
+		// .RECIPEPREFIX the line is a recipe and make expands the
+		// "comment").
+		{"GO = go # $(eval GO := ./evil)", true},
+		{"GO = go # the go tool", true},
+		{"export GO := go # pinned", true},
 		{"GO ?= go #no-space", true},
 		{"GO ?= go # a\\b", true},
 		// Over-reports, accepted: nothing but the allowlist passes.
@@ -141,5 +144,37 @@ func TestComposePullPolicy51(t *testing.T) {
 	}
 	if f, _, err := CheckCompose(tmpl); err != nil || len(f) != 0 {
 		t.Fatalf("docker-compose.yml: findings %v, error %v", f, err)
+	}
+}
+
+// TestMakefileKnownLimits pins what the Makefile rules do NOT catch
+// (maintainer decision on PR #91, 6865260080; the forms of review A
+// delta 5898202338). The rules are a fast filter, not a proof: each of
+// these reroutes `make images` or a sub-make, and review owns Makefile
+// changes (second-review, .claude/rules/docker.md). Each is asserted as
+// not reported today, so a rule that starts catching one changes this
+// test, and the documented limits in docker.md and index.md, on purpose.
+func TestMakefileKnownLimits(t *testing.T) {
+	limits := []struct{ name, src string }{
+		// `$ ` is the empty one-character variable: the name is built
+		// without its text.
+		{"computed GO, blank", "G$ O := ./evil"},
+		{"computed GO, tab", "G$\tO := ./evil"},
+		{"computed GO, continuation", "G$\\\nO := ./evil"},
+		{"computed GO, target-specific", "images: G$ O := ./evil"},
+		{"computed GO, eval", "$(eval G$ O := ./evil)"},
+		{"computed PATH", "PA$ TH := ./evil:$(PATH)"},
+		{"computed SHELL", "SHE$ LL := ./evil-sh"},
+		// A generated or remade include: make builds gen.mk from a file
+		// no Makefile rule reads, then reads it.
+		{"generated include", "include gen.mk\ngen.mk: gen.txt\n\tcp gen.txt $@"},
+		// A name quoted for a sub-make: the shell removes the quotes.
+		{"quoted name for a sub-make", "x:\n\t$(MAKE) -f M6 images G''O=./evil"},
+		{"quoted name in MAKEFLAGS", "y:\n\tMAKEFLAGS=G''O=./evil $(MAKE) -f M6 images"},
+	}
+	for _, c := range limits {
+		if f := CheckMakefile([]byte(c.src + "\n")); len(f) != 0 {
+			t.Errorf("%s: %q is now reported (%v): update this test and the known limits in docker.md and index.md", c.name, c.src, f)
+		}
 	}
 }
