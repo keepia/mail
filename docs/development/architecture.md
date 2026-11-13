@@ -926,8 +926,9 @@ the groupware listeners to the same test.
 
   The check, with the default subnets (`KEEPIA_SUBNET4`/`KEEPIA_SUBNET6`).
   The version line works at any time. The other two are meaningful only
-  after the template has started once, because the networks do not exist
-  before that, on any Engine:
+  while the template is running (its networks exist): before the first
+  start and after `docker compose down` the last line prints nothing on
+  any Engine, which is no all-clear.
 
   ```sh
   docker version --format '{{.Server.Version}}'    # 28.0.0 or later
@@ -943,8 +944,9 @@ the groupware listeners to the same test.
   port 25 go through its gateway. So the host holds `172.29.3.1` and
   `fd7c:3b9e:5a21:3::1` on every Engine, and the pattern leaves network 3
   out. With other subnets, or after a change to the networks, take the
-  internal subnets from the template:
-  `docker compose config --format json | jq -r '.networks[] | select(.internal) | .ipam.config[].subnet'`.
+  internal subnets from the template (`--profile '*'` reads every
+  network, also without `.env` or `COMPOSE_PROFILES`):
+  `docker compose --profile '*' config --format json | jq -r '.networks[] | select(.internal) | .ipam.config[].subnet'`.
 
   On a correct install the last line prints nothing. On Engine 26 or
   older it prints the internal bridges' gateway addresses (for example
@@ -954,7 +956,12 @@ the groupware listeners to the same test.
   `postgres` and `keepia`, never the template, so there is no run-time
   refusal. The CI `compose` job checks all three conditions (test 9; its
   host-address check covers the internal networks and skips
-  edge-public).
+  edge-public). Test 9 also runs the subnet line above, read from this
+  section, with no active profile, and compares its output with the
+  subnets it checks. That line is CI input: test 9 accepts only its exact
+  form, with a jq filter of letters, digits, spaces and `. [ ] | ( ) _ -`
+  that calls no jq function but `select`, and fails on any other line
+  without running it.
 - **Logs:** containers log to stdout. The `journald` log driver is required,
   with the host's journald retention at 30 days, which the operator sets
   (logs are kept at most 30 days, #2 scope; [coordinator decision T7][cd]).

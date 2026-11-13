@@ -340,14 +340,22 @@ address and port), each planned one present, none on 8080/9090 in Dovecot, read 
 helper container in the container's network namespace (test 8); the
 networks, their gateway mode `isolated`, no host address in them, no host
 reach to rspamd, clamd, olefy or memcached while a container on the
-network reaches them, the fixed addresses and the only published port
-(test 9); capabilities, `no-new-privileges`, `pids_limit` and uids (test
-10); a message over LMTP into the named volume `store-mail`, an empty
-`edge-vmail` and no anonymous volume (test 11); the edge's `451 4.3.0`
-and `NO [UNAVAILABLE]` (test 12); and the edge SNAT and DNAT rules (test
-13). It runs every test and names each failure; every helper run is
-bounded by a timeout. It still needs sudo for the NAT rules (test 13) and,
-in CI, to put the edge addresses on loopback.
+network reaches them, the fixed addresses and the only published port,
+and the subnet line of
+[architecture section 7](architecture.md#7-docker), read from there
+(accepted only in its one fixed form, otherwise a failure without running
+it) and run with no active profile, lists exactly the internal subnets
+(test 9); capabilities, `no-new-privileges`, `pids_limit` and uids, and
+`edge-postfix`'s entrypoint and command equal to its image's with the
+edge address check after `tini --` (test 10); a message over LMTP into
+the named volume `store-mail`, an empty `edge-vmail` and no anonymous
+volume (test 11); the edge's `451 4.3.0` and `NO [UNAVAILABLE]` (test
+12); and the edge SNAT and DNAT rules (test 13). At its end it stops the
+running `edge-postfix`, which must exit 0 and not be OOM-killed (test
+14b); the other services keep running for test 7. It runs every test and
+names each failure; every helper run is bounded by a timeout. It still
+needs sudo for the NAT rules (test 13) and, in CI, to put the edge
+addresses on loopback.
 
 ### The docker check
 
