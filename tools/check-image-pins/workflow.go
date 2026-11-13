@@ -61,6 +61,9 @@ func CheckWorkflow(src []byte, release bool, resolve resolver) ([]Finding, []str
 	if topKey != nil && !release {
 		checkPermissions(topKey.Line, "workflow", wf.Permissions, add)
 	}
+	if release {
+		checkReleaseWorkflow(top, add)
+	}
 	jobs, _ := mappingValue(top, "jobs")
 	if jobs == nil || jobs.Kind != yaml.MappingNode {
 		return out, runs, nil
@@ -73,7 +76,7 @@ func CheckWorkflow(src []byte, release bool, resolve resolver) ([]Finding, []str
 			continue
 		}
 		checkJobImages(name.Line, name.Value, job, add)
-		runs = append(runs, checkJobBuilds(name.Line, name.Value, wf.Env, wf.Defaults, job, resolve, add)...)
+		runs = append(runs, checkJobBuilds(name.Line, name.Value, wf.Env, wf.Defaults, job, release, resolve, add)...)
 		if release {
 			continue
 		}

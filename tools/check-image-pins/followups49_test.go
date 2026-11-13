@@ -137,7 +137,9 @@ func TestVerifySavedTar49(t *testing.T) {
 	const name = "ghcr.io/keepia/mail-postfix:dev"
 	a, b := newFakeImage(t, "a"), newFakeImage(t, "b")
 	classic := builtImage{Name: name, Digest: "sha256:" + strings.Repeat("9", 64), ConfigDigest: a.config}
-	containerd := builtImage{Name: name, Digest: a.index}
+	// Verify requires the config digest (#27): the containerd store's
+	// metadata has both digests.
+	containerd := builtImage{Name: name, Digest: a.index, ConfigDigest: a.config}
 	entry := func(img fakeImage, layers ...string) map[string]any {
 		if layers == nil {
 			layers = []string{blobPath(img.layer)}
@@ -186,7 +188,7 @@ func TestVerifySavedTar49(t *testing.T) {
 	}{
 		{"consistent, classic", classic, build([]map[string]any{entry(a)}, []string{a.index}, nil), ""},
 		{"consistent, containerd", containerd, build([]map[string]any{entry(a)}, []string{a.index}, nil), ""},
-		{"compressed layer", builtImage{Name: name, Digest: gz.index}, build([]map[string]any{entry(gz)}, []string{gz.index}, gzFiles), ""},
+		{"compressed layer", builtImage{Name: name, Digest: gz.index, ConfigDigest: gz.config}, build([]map[string]any{entry(gz)}, []string{gz.index}, gzFiles), ""},
 		// Review A 1a: the classic branch never read index.json.
 		{"classic, index names another image", classic, build([]map[string]any{entry(a)}, []string{b.index}, nil), "does not name the config manifest.json names"},
 		// Review A 1b, B gap 2: docker load on the containerd store gives

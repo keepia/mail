@@ -27,8 +27,17 @@ import (
 //
 // The local ID is the manifest digest with Docker's containerd image
 // store, and the config digest with the classic store; the metadata has
-// both (containerimage.digest, containerimage.config.digest), or only
-// the first with the docker driver on the containerd store.
+// containerimage.digest, and containerimage.config.digest only when the
+// load exports in "docker image format": that is the docker-container
+// driver's --load into a daemon with the classic store (CI's runners,
+// Docker 28 with overlay2). Into a daemon with the containerd image store
+// the load exports in "oci image format" and the metadata has no config
+// digest (measured in #71 review A, N1, Docker 29.9.2); so does the docker
+// driver on that store. Verify requires the config digest (#27, B1 (b)):
+// it is the tested config a release push is compared with, and a save
+// must hold exactly that config. If the runners move to the containerd
+// store, -verify-built fails closed, in CI and in the release, until this
+// is reworked.
 //
 // Verify only proves the store's state at the moment it runs (#46, B
 // N1). So what a job tests and saves never goes by tag after it:
@@ -39,7 +48,7 @@ import (
 //     tar it wrote: every blob's content matches its digest, each name
 //     has one entry in manifest.json and one in index.json that agree,
 //     its image is the checked build's output (its config is the build's
-//     config, or its manifest is the build's digest), and its layers are
+//     config digest), and its layers are
 //     that image's (checkTarName, #49 point 6). Only then is the tar
 //     renamed to FILE.
 
@@ -93,6 +102,13 @@ func verifyBuilt(meta []byte, inspect func(string) (string, error)) ([]string, [
 			findings = append(findings, fmt.Sprintf("target %q: the metadata names no image or digest", target))
 			continue
 		}
+		// The tested image is the build's config digest (#27, B1 (b)): the
+		// release compares the pushed config with it, and with the
+		// containerd store the local ID is the manifest digest instead.
+		if !imageID.MatchString(b.ConfigDigest) {
+			findings = append(findings, fmt.Sprintf("target %q: the metadata has no containerimage.config.digest (sha256:<64 hex>), got %q: the tested config cannot be named", target, b.ConfigDigest))
+			continue
+		}
 		images = append(images, b)
 		for _, name := range b.names() {
 			checked++
@@ -128,9 +144,7 @@ const maxTarMeta = 4 << 20
 // blobs/sha256/<hex> file's content has that digest, and every name of
 // every image passes checkTarName: in manifest.json with the checked
 // build's config and that image's layers, and in index.json (when there
-// is one) as one entry that names the same config. With no config digest
-// in the metadata (docker driver, containerd store), the name's
-// index.json entry must be the build's digest.
+// is one) as one entry that names the same config.
 func verifySavedTar(r io.Reader, images []builtImage) []string {
 	var findings []string
 	sums := map[string]string{}  // file name → sha256:<hex> of its content
@@ -226,8 +240,7 @@ func manifestEntries(manifest []tarManifestEntry, name string) []tarManifestEntr
 //     last of index.json;
 //   - the index entry names, through its manifests, the config that
 //     manifest.json names, so both stores load the same image;
-//   - that config is the checked build's (config digest), or the index
-//     entry is the build's digest;
+//   - that config is the checked build's config digest;
 //   - manifest.json's layers are the image's: each layer file's content
 //     is the config's diff_id at that position (an uncompressed layer)
 //     or the layer the index entry's manifest names there. Every file is
@@ -269,8 +282,9 @@ func checkTarName(name string, img builtImage, entries []tarManifestEntry, index
 		}
 	}
 	var findings []string
-	ok := (img.ConfigDigest != "" && config == img.ConfigDigest) || (img.Digest != "" && manifest != nil && digest == img.Digest)
-	if !ok {
+	// The saved image's config is the build's config digest, which verify
+	// requires: the tested config of a release row (#27, B1 (b)).
+	if config != img.ConfigDigest {
 		findings = append(findings, fmt.Sprintf("the saved tar's %s has config %s, which is not the checked build's output (digest %s, config %s): it was replaced after the build", name, config, img.Digest, img.ConfigDigest))
 	}
 	var cfg struct {

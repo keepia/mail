@@ -1,0 +1,397 @@
+# A release.yml of the planned shape (#27, plan revisions 1-5): the
+# policy rule 7 holds release.yml to. The fail-27-* cases of
+# release_test.go each change one thing in this file. Placeholders only.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build, test and rehearse the push, but publish nothing (untick for the real release)
+        type: boolean
+        default: true
+      version:
+        description: The version (X.Y.Z), only as the version check allows
+        type: string
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Started on main
+        run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: version
+        env:
+          INPUT: ${{ inputs.version }}
+        run: sh scripts/version-policy.sh "$INPUT"
+
+  build:
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    needs: version
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [keepia, postfix, unbound, olefy, sogo]
+        arch: [amd64, arm64]
+    env:
+      BAKE_TARGET: ${{ matrix.image }}
+      PLATFORM: linux/${{ matrix.arch }}
+      VERSION: ${{ needs.version.outputs.version }}
+      BAKE_SET: |
+        ${{ matrix.image }}.cache-to=type=gha,mode=max,scope=release-${{ matrix.image }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: sh scripts/ci-docker-mirror.sh
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - name: Commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - name: Build
+        id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+          set: ${{ env.BAKE_SET }}
+      - id: verify
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - name: Smoke, health and reload tests
+        env:
+          IMAGE: ${{ matrix.image }}
+          VERIFIED_IMAGE: ${{ steps.verify.outputs.image }}
+        run: bash scripts/image-test.sh "$IMAGE" "$VERIFIED_IMAGE"
+      - name: Save the image
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built -save "$RUNNER_TEMP/image.tar"
+      - name: Build metadata
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/tested"
+          printf '%s\n' "$BAKE_METADATA" >"$RUNNER_TEMP/tested/metadata.json"
+      # The package list of a Debian-based image, read from the verified
+      # image ID (the distroless Keepia image has none).
+      - id: verify2
+        if: matrix.image != 'keepia'
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - name: Package list
+        if: matrix.image != 'keepia'
+        env:
+          VERIFIED_IMAGE: ${{ steps.verify2.outputs.image }}
+        run: docker run --rm --entrypoint cat "$VERIFIED_IMAGE" /usr/share/keepia/packages.txt >"$RUNNER_TEMP/tested/packages.txt"
+      - name: SBOM
+        env:
+          SYFT_CHECK_FOR_APP_UPDATE: "false"
+        run: go run github.com/anchore/syft/cmd/syft@v1.57.1 scan "docker-archive:$RUNNER_TEMP/image.tar" -o "spdx-json=$RUNNER_TEMP/syft.spdx.json" -o "syft-json=$RUNNER_TEMP/syft.json"
+      - name: SBOM and source list of the row
+        run: |
+          packages=
+          if [ -f "$RUNNER_TEMP/tested/packages.txt" ]; then packages=-packages=$RUNNER_TEMP/tested/packages.txt; fi
+          GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/release-sources row -target "$BAKE_TARGET" -platform "$PLATFORM" -version "$VERSION" -commit "$GITHUB_SHA" \
+            -metadata "$RUNNER_TEMP/tested/metadata.json" -syft "$RUNNER_TEMP/syft.json" -spdx "$RUNNER_TEMP/syft.spdx.json" ${packages:+"$packages"} -out "$RUNNER_TEMP/tested"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tested-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/tested/
+          if-no-files-found: error
+
+  push-rehearsal:
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    needs: [version, build]
+    if: ${{ inputs.dry_run }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [keepia, postfix, unbound, olefy, sogo]
+        arch: [amd64, arm64]
+    env:
+      BAKE_TARGET: ${{ matrix.image }}
+      PLATFORM: linux/${{ matrix.arch }}
+      VERSION: ${{ needs.version.outputs.version }}
+      BAKE_SET: |
+        ${{ matrix.image }}.cache-from=type=gha,scope=release-${{ matrix.image }}-${{ matrix.arch }}
+        ${{ matrix.image }}.output=type=image,push-by-digest=true,name-canonical=true,push=false
+        ${{ matrix.image }}.output=type=oci,dest=pushed.tar
+        ${{ matrix.image }}.attest=type=provenance,mode=max
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tested-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/tested
+      - name: Commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - name: Rebuild from the release cache
+        id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          set: ${{ env.BAKE_SET }}
+      - id: pushed
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-pushed
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digest/
+          if-no-files-found: error
+
+  push:
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    needs: [version, build]
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [keepia, postfix, unbound, olefy, sogo]
+        arch: [amd64, arm64]
+    env:
+      BAKE_TARGET: ${{ matrix.image }}
+      PLATFORM: linux/${{ matrix.arch }}
+      VERSION: ${{ needs.version.outputs.version }}
+      BAKE_SET: |
+        ${{ matrix.image }}.cache-from=type=gha,scope=release-${{ matrix.image }}-${{ matrix.arch }}
+        ${{ matrix.image }}.output=type=image,push-by-digest=true,name-canonical=true,push=true
+        ${{ matrix.image }}.output=type=oci,dest=pushed.tar
+        ${{ matrix.image }}.attest=type=provenance,mode=max
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tested-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/tested
+      - name: Commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - name: Rebuild from the release cache and push by digest
+        id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          set: ${{ env.BAKE_SET }}
+      - id: pushed
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-pushed
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digest/
+          if-no-files-found: error
+
+  index:
+    runs-on: ubuntu-24.04
+    needs: [version, push]
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digests: ${{ steps.index.outputs.digests }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digest-*
+          path: ${{ runner.temp }}/digest
+          merge-multiple: true
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - id: index
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -publish-index
+
+  bundle:
+    runs-on: ubuntu-24.04
+    needs: [version, build, push-rehearsal, push, index]
+    if: ${{ !cancelled() && needs.version.result == 'success' && needs.build.result == 'success' && ((inputs.dry_run && needs.push-rehearsal.result == 'success') || (!inputs.dry_run && needs.push.result == 'success' && needs.index.result == 'success')) }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Bundle
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: sh scripts/release-bundle.sh "$VERSION" dist "$RUNNER_TEMP/digests.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  attest:
+    runs-on: ubuntu-24.04
+    needs: [version, index, bundle]
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail-postfix
+          subject-digest: ${{ fromJSON(needs.index.outputs.digests)['ghcr.io/keepia/mail-postfix'] }}
+
+  attest-assets:
+    runs-on: ubuntu-24.04
+    needs: bundle
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: Checksum
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+
+  release:
+    runs-on: ubuntu-24.04
+    needs: [version, bundle, attest, attest-assets]
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: Checksum
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+      - name: Create the tag and the release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$GITHUB_SHA" --silent
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --title "v$VERSION" --notes-file notes.md ./*
+
+  latest:
+    runs-on: ubuntu-24.04
+    needs: [version, index, release]
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - env:
+          VERSION: ${{ needs.version.outputs.version }}
+          INDEX_DIGESTS: ${{ needs.index.outputs.digests }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -move-latest

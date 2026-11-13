@@ -12,8 +12,15 @@
 //  5. the bake definition, as `docker buildx bake --print` resolves it:
 //     every context is a relative path, and there are no named contexts,
 //     no dockerfile-inline and no BUILDKIT_SYNTAX argument;
-//  6. no workflow except release.yml grants packages: write; in every
-//     workflow, job container and service images are pinned by digest.
+//  6. no workflow except .github/workflows/release.yml (that exact path)
+//     grants packages: write; in every workflow, job container and
+//     service images are pinned by digest;
+//  7. the release surface: release.yml has exactly the release policy's
+//     jobs, permissions, needs, if, actions and run lines (release.go).
+//
+// The release jobs also run three typed modes: -verify-pushed (the pushed
+// image is the tested one, pushed.go), -publish-index and -move-latest
+// (the X.Y.Z and latest tags, registry.go).
 //
 // Every Dockerfile a bake target or a Compose build names is checked with
 // rules 1-3, whatever its name and wherever it lives, so the walk's
@@ -93,7 +100,9 @@ func classify(rel string) kind {
 		// Go sources such as this tool's dockerfile.go.
 		return kindNone
 	case dir == ".github/workflows" && (strings.HasSuffix(lower, ".yml") || strings.HasSuffix(lower, ".yaml")):
-		if lower == "release.yml" || lower == "release.yaml" {
+		// Exactly this path, in this case (#27, P1): a release.yaml or
+		// Release.yml next to it is a workflow like any other.
+		if base == releaseWorkflowName {
 			return kindReleaseWorkflow
 		}
 		return kindWorkflow
@@ -160,8 +169,33 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&lo.httpsProxy, "https-proxy", "", "local mode: the HTTPS_PROXY build argument, http(s)://host[:port]")
 	flags.BoolVar(&lo.dryRun, "dry-run", false, "local mode: check and print the bake command, do not build")
 	localRoot := flags.String("root", ".", "local mode: the repository root")
+	verifyPushedMode := flags.Bool("verify-pushed", false, "release push jobs: the pushed image (pushed.tar, $BAKE_METADATA) is the tested one ($RUNNER_TEMP/tested/metadata.json)")
+	publishIndex := flags.Bool("publish-index", false, "release index job: create and check <image>:$VERSION from the push rows' digest files")
+	moveLatestMode := flags.Bool("move-latest", false, "release latest job: move <image>:latest forward to $VERSION ($INDEX_DIGESTS)")
 	if err := flags.Parse(args); err != nil {
 		return 2
+	}
+	// The release modes take no argument and no other flag (no tag name:
+	// X.Y.Z and latest are fixed in the code).
+	releaseModes := 0
+	for _, m := range []bool{*verifyPushedMode, *publishIndex, *moveLatestMode} {
+		if m {
+			releaseModes++
+		}
+	}
+	if releaseModes > 0 {
+		if releaseModes > 1 || flags.NFlag() != 1 || flags.NArg() > 0 {
+			fmt.Fprintln(stderr, "usage: check-image-pins -verify-pushed | -publish-index | -move-latest (no other flag or argument)")
+			return 2
+		}
+		switch {
+		case *verifyPushedMode:
+			return runVerifyPushed(stdout)
+		case *publishIndex:
+			return runPublishIndex(stdout)
+		default:
+			return runMoveLatest(stdout)
+		}
 	}
 	switch {
 	case *verify:
@@ -379,6 +413,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		r.addAll(p, CheckScriptText(src))
 	}
 
+	// Rule 7, P5: a script a job with packages: write may run (none today).
+	for _, rel := range sortedBool(pushJobScripts) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		src, err := os.ReadFile(p) //nolint:gosec // a fixed path under root
+		if err != nil {
+			r.add(p, 0, err.Error())
+			continue
+		}
+		for _, f := range checkPushJobScript(src) {
+			r.add(p, 0, f)
+		}
+	}
+
 	if len(dfs) == 0 {
 		fmt.Fprintf(stderr, "check-image-pins: no Dockerfile under %s\n", root)
 		return 2
@@ -409,6 +456,9 @@ func runBuild(root, targets, sets string, stdout io.Writer) int {
 	r := &report{out: stdout}
 	label := "bake build (" + strings.Join(names, ",") + ")"
 	findings, refs := checkBuildBake(root, names, setLines)
+	if p := pushedTarProblem(root); p != "" {
+		findings = append(findings, p)
+	}
 	for _, f := range findings {
 		r.add(label, 0, f)
 	}

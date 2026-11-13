@@ -183,7 +183,9 @@ func TestVerifySavedTar(t *testing.T) {
 	const name = "ghcr.io/keepia/mail-postfix:dev"
 	a, b := newFakeImage(t, "a"), newFakeImage(t, "b")
 	classic := builtImage{Name: name, Digest: "sha256:" + strings.Repeat("9", 64), ConfigDigest: a.config}
-	containerd := builtImage{Name: name, Digest: a.index}
+	// Verify requires the config digest (#27): the containerd store's
+	// metadata has both digests.
+	containerd := builtImage{Name: name, Digest: a.index, ConfigDigest: a.config}
 	cases := []struct {
 		name string
 		meta builtImage
@@ -192,7 +194,7 @@ func TestVerifySavedTar(t *testing.T) {
 	}{
 		{"classic store", classic, saveTar(t, name, a, nil, false), ""},
 		{"containerd store", containerd, saveTar(t, name, a, nil, false), ""},
-		{"Docker Hub name", builtImage{Name: "docker.io/library/x:dev", Digest: a.index}, saveTar(t, "docker.io/library/x:dev", a, nil, false), ""},
+		{"Docker Hub name", builtImage{Name: "docker.io/library/x:dev", Digest: a.index, ConfigDigest: a.config}, saveTar(t, "docker.io/library/x:dev", a, nil, false), ""},
 		{"re-tagged, classic", classic, saveTar(t, name, b, nil, false), "which is not the checked build's output"},
 		{"re-tagged, containerd", containerd, saveTar(t, name, b, nil, false), "which is not the checked build's output"},
 		{"index and manifest.json disagree", containerd, saveTar(t, name, b, &a, false), "does not name the config manifest.json names"},
@@ -217,7 +219,7 @@ func TestVerifySave(t *testing.T) {
 	const name = "ghcr.io/keepia/mail-postfix:dev"
 	a, b := newFakeImage(t, "a"), newFakeImage(t, "b")
 	t.Setenv("BAKE_METADATA", string(mustJSON(t, map[string]any{
-		"postfix": map[string]string{"image.name": name, "containerimage.digest": a.index},
+		"postfix": map[string]string{"image.name": name, "containerimage.digest": a.index, "containerimage.config.digest": a.config},
 	})))
 	inspect := func(string) (string, error) { return a.index, nil }
 	for _, c := range []struct {

@@ -416,6 +416,30 @@ network.
 mail-archive's; change them there first. `ci-pull-images.sh` is used by the
 `compose` job.
 
+`scripts/next-version.sh` is byte-identical with pklnx/mail-archive's at
+`b312d9f` (sha256 `948fc5e2a6117815f6e67859d86c7ac36ae0c471f7103313aea9ccc437ef248e`,
+unchanged since `86ad8b8`); change it there first. mail-archive's
+`next-version-test.sh` (sha256
+`b14e390052d0bf86b9510a962867c987983c65a4e08ea11374fcc6da95b6bcf2`) is not
+vendored: its last sections test mail-archive's own release-bundle and
+release-notes scripts, so it cannot pass here. Instead
+`scripts/version-policy-test.sh` (test 14) covers the `next`, `last`,
+`base`, `pr` and `summary` behaviour Keepia relies on, besides the 0.x
+rules of `scripts/version-policy.sh`.
+
+**Release scripts** (#27; `make release-scripts-test` in the `lint` job,
+no network, no daemon): `scripts/version-policy.sh LAST INPUT < prs.tsv`
+(the 0.x rules over `next-version.sh`: a virtual last version `0.0.0` for
+the first release, and `breaking` raises the minor version before 1.0),
+`scripts/release-bundle.sh VERSION OUTDIR DIGESTS [SOURCES_MD]` (the bundle
+`keepia-mail-VERSION.tar.gz`: Compose with every own image as
+`${KEEPIA_<NAME>_IMAGE:-ghcr.io/keepia/mail-<name>:VERSION@sha256:…}` and no
+`build:`) and `scripts/release-notes.sh VERSION LAST DIGESTS LICENCES`.
+`tools/release-sources` (standard library only; test 21 in `go test`)
+writes each row's SBOM and source list and the release's `sources.json`
+and `SOURCES.md`. The `compose` job starts the bundle with the verified
+images in its own project (test 15b).
+
 ### The image pin check
 
 [`tools/check-image-pins`](../../tools/check-image-pins/main.go) walks the
@@ -648,12 +672,103 @@ lives, also under a skipped path.
    - Any `*.hcl` other than the root's `docker-bake.hcl` and
      `docker-bake.override.hcl` is reported, unless it is on the tool's
      `hclAllowlist`, which is empty. A JSON bake file is reported;
-6. no workflow except `release.yml` grants `packages: write`, at workflow or
+6. no workflow except `.github/workflows/release.yml` (exactly that path,
+   in that case: a `release.yaml` or `Release.yml` is a workflow like any
+   other) grants `packages: write`, at workflow or
    job level; `permissions: write-all`, a job that calls a reusable
    workflow without its own `permissions`, and a job without permissions in
    a workflow without them are reported. In every workflow, `release.yml`
    included, each job's `container` and `services` image is
-   `name:tag@sha256:<64 hex>`.
+   `name:tag@sha256:<64 hex>`;
+7. **the release surface** (#27,
+   [`release.go`](../../tools/check-image-pins/release.go)): `release.yml`
+   has exactly the planned shape, so the one workflow that can push cannot
+   grow a second push path. The policy is data in the tool:
+   - **P2, P6:** exactly the jobs `version`, `build`, `push-rehearsal`,
+     `push`, `index`, `bundle`, `attest`, `attest-assets`, `release` and
+     `latest`, each with exactly its permissions, `needs` and `if`
+     (top-level `permissions: {}`; `packages: write` only in `push`,
+     `index` and `latest`, all with `${{ !inputs.dry_run }}`), and no job
+     `uses:`;
+   - **P3, P4, P5, P9:** in `push`, `push-rehearsal`, `index` and
+     `latest`, every step is exactly the policy's step at its position: an
+     action of the job's list (checkout, setup-go, setup-buildx with CI's
+     inputs, the `tested-*`/`digest-*` artifacts, bake-action once in the
+     push jobs) at the policy's own commit (`actionPins`, CI's pins), with
+     exactly its inputs, or a run step whose trimmed text
+     equals one fixed line (`SOURCE_DATE_EPOCH`, the GHCR login, `-build`,
+     `-verify-pushed`, `-publish-index`, `-move-latest`) with exactly its
+     env and no `if`, `shell`, `working-directory` or `continue-on-error`.
+     Nothing is resolved, so these jobs run no repository script, make
+     target or other `go run`, define no shell function and run no
+     `eval`, `sh -c`, `source` or `xargs` (the findings name the form).
+     `push-rehearsal` is `push` without the login and with `push=false`.
+     The bake jobs' `BAKE_SET` holds exactly the release cache line, and in
+     the push jobs the two outputs (`type=image,push-by-digest=true,
+     name-canonical=true,push=true|false` and `type=oci,dest=pushed.tar`)
+     and `attest=type=provenance,mode=max`; build mode checks what they
+     resolve to, the target's tags `ghcr.io/keepia/mail[-<name>]:VERSION`
+     and `VERSION` as X.Y.Z, and refuses a `pushed.tar` that exists in any
+     form. A script allowlisted for these jobs (none) may have no
+     forwarding function;
+   - **P7:** no `continue-on-error`, job `container`, `services`,
+     `concurrency`, `defaults` or `env` (the bake jobs' `BAKE_TARGET`,
+     `PLATFORM`, `VERSION` and `BAKE_SET` aside), no workflow `env`, and
+     `release`, `attest` and `attest-assets` run no repository code (no
+     checkout, local action, `shell:`, code path or runtime; step env only
+     `GH_TOKEN`, `TAG`, `VERSION`, `BASE`; design-system's rule);
+   - **P8:** `on:` is only `workflow_dispatch` with `dry_run` (boolean,
+     default `true`) and `version` (string, default `""`); the
+     workflow-level `concurrency` is exactly `{group: release,
+     cancel-in-progress: false}` (it serialises the runs that move
+     `latest`); no `${{ }}` in a `run:` text; every `VERSION` env is
+     `${{ needs.version.outputs.version }}`; `SOURCE_DATE_EPOCH` is
+     required before the check step in `build`, `push` and
+     `push-rehearsal`; a command that runs syft (the command word `syft`,
+     or a `go run` of a package under `anchore/syft`) is only `go run
+     github.com/anchore/syft/cmd/syft@v1.57.1 …` with
+     `SYFT_CHECK_FOR_APP_UPDATE: "false"`;
+   - **Everywhere in `release.yml`:** every `env` is a literal mapping (an
+     `env: ${{ fromJSON(…) }}` would set any variable, `BASH_ENV`
+     included, past the rules above); `actions/setup-go` has `cache:
+     false`, so no job restores a Go module or build cache that another
+     job on `main` wrote (#71 review B: such a cache runs its code inside
+     `check-image-pins`, after `docker login`); `-verify-pushed`,
+     `-publish-index`, `-move-latest`, `docker login` and
+     `docker/login-action` appear only in the exact jobs.
+
+   With the cache off, the tool's modules come fresh from the module proxy
+   and are checked against `go.sum`; nothing earlier in an exact job runs
+   code that could change them, so no `go mod verify` line is needed.
+
+   In other workflows a `release-` cache scope in `BAKE_SET` is reported.
+   Its tests are `TestReleaseSurface` (the `fail-27-*` cases, each one
+   change to `testdata/repos/pass-27-release`), `TestReleaseBuildMode` and
+   `TestBuildRefusesPushedTar`.
+
+**The release modes** run in `release.yml`'s write-token jobs, as the
+fixed lines above, and take no argument and no tag name:
+- `-verify-pushed` (`push`, `push-rehearsal`): `pushed.tar` is opened only
+  as a regular file (Lstat, `O_NOFOLLOW`, fstat); every blob has its
+  digest; `index.json` names the push step's `containerimage.digest`; that
+  index holds one `linux/<arch>` image manifest and only attestations of
+  it; its config is the tested config, the build row's
+  `containerimage.config.digest` (`$RUNNER_TEMP/tested/metadata.json`;
+  `-verify-built` requires it and `-save` holds exactly it). It writes
+  `$RUNNER_TEMP/digest/<target>-<arch>.json`.
+- `-publish-index` (`index`): checks every row's index and config in
+  GHCR, then creates `<image>:X.Y.Z` with the version annotation; an
+  existing `X.Y.Z` of the same content is a no-op and any other is never
+  overwritten. It puts out `digests` (image to index digest).
+- `-move-latest` (`latest`): first `git ls-remote --tags` of the constant
+  `https://github.com/keepia/mail` (an empty temp directory, no git config,
+  no inherited `GIT_*`, a 2-minute timeout): the highest `vX.Y.Z`
+  (numeric; an annotated tag through its `^{}` line) must be `v$VERSION`
+  on `GITHUB_SHA`. Then `X.Y.Z` must be the index job's digest, and
+  `latest` moves only forward (its annotation and both configs' version
+  label, all equal), with a check afterwards.
+
+Every mode checks all images before it creates anything.
 
 **Threat model.**
 - The check catches accidental unpinned references and fails closed on
@@ -692,6 +807,12 @@ lives, also under a skipped path.
     function that is called with no arguments
     (`args=("$@"); run() { main "${args[@]}"; }; run`) is not followed;
   - reading `make` takes in the whole Makefile, which over-reports.
+
+  In `release.yml`'s jobs with `packages: write` these limits do not apply:
+  rule 7 resolves nothing there and allows only its fixed lines.
+- Rule 7 checks `release.yml` on pull requests. A `workflow_dispatch` on a
+  branch runs that branch's `release.yml`, which the branch can change; that
+  residual risk is for review (#27, N10).
 - A pull request that edits the check itself, or deliberately disables or
   routes around it (for example a build command assembled at run time, or
   a process started earlier that changes the image store or a file

@@ -83,6 +83,12 @@ links:
 links-test:
 	sh scripts/check-links-test.sh
 
+.PHONY: release-scripts-test
+## release-scripts-test: tests of the release scripts: version policy, bundle and notes (#27 tests 14 and 15; no network, no daemon)
+release-scripts-test:
+	sh scripts/version-policy-test.sh
+	sh scripts/release-bundle-test.sh
+
 # actionlint is built with the project's toolchain and verified through the Go
 # checksum database, like gitleaks.
 $(ACTIONLINT):

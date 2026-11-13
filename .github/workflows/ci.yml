@@ -106,6 +106,9 @@ jobs:
       # source-listing.sh, the SOGo stop wrapper keepia-sogod (#55), the
       # edge address guard (#61) and test 7's km failure cause (#69).
       - run: make image-scripts-test
+      # The release scripts (#27 tests 14 and 15): scripts/version-policy.sh
+      # over the shared next-version.sh, and the bundle and notes scripts.
+      - run: make release-scripts-test
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.14.0
@@ -403,3 +406,27 @@ jobs:
       - name: Stop and remove the template
         if: always()
         run: docker compose down --volumes --timeout 30
+      # Test 15b (#27): the release bundle starts healthy, in its own
+      # project after the template is down. release-bundle.sh pins
+      # placeholder digests; the KEEPIA_*_IMAGE overrides give Compose the
+      # verified image IDs, so nothing is pulled or built.
+      - name: The release bundle starts (test 15b)
+        env:
+          KEEPIA_IMAGE: ${{ steps.keepia.outputs.image }}
+          KEEPIA_POSTFIX_IMAGE: ${{ steps.postfix.outputs.image }}
+          KEEPIA_UNBOUND_IMAGE: ${{ steps.unbound.outputs.image }}
+          KEEPIA_OLEFY_IMAGE: ${{ steps.olefy.outputs.image }}
+          KEEPIA_SOGO_IMAGE: ${{ steps.sogo.outputs.image }}
+        run: |
+          digests=$RUNNER_TEMP/bundle-digests.txt
+          for n in mail mail-postfix mail-unbound mail-olefy mail-sogo; do
+            echo "$n sha256:0000000000000000000000000000000000000000000000000000000000000000"
+          done >"$digests"
+          sh scripts/release-bundle.sh 99.0.0 "$RUNNER_TEMP/bundle" "$digests"
+          tar -xzf "$RUNNER_TEMP/bundle/keepia-mail-99.0.0.tar.gz" -C "$RUNNER_TEMP/bundle"
+          cd "$RUNNER_TEMP/bundle/keepia-mail"
+          docker compose -p keepia-bundle up -d --wait --wait-timeout 300 --no-build --pull never
+          docker compose -p keepia-bundle ps
+      - name: Stop and remove the bundle
+        if: always()
+        run: docker compose -p keepia-bundle down --volumes --timeout 30
