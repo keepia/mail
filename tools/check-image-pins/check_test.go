@@ -18,7 +18,7 @@ var minFixtures = map[string]int{
 	"dockerfile": 33,
 	"compose":    19,
 	"workflow":   9,
-	"repos":      48,
+	"repos":      50,
 }
 
 // fixtureKind maps a testdata directory of single files to the rules its
@@ -370,6 +370,9 @@ func TestVerifyBuilt(t *testing.T) {
 		{"replaced", meta, map[string]string{"ghcr.io/keepia/mail-postfix:dev": other, "ghcr.io/keepia/mail-postfix:x": d1}, 1, "it was replaced after the build"},
 		{"missing", meta, map[string]string{"ghcr.io/keepia/mail-postfix:x": d1}, 1, "is not in the local store"},
 		{"no image", `{"postfix":{}}`, nil, 1, "names no image or digest"},
+		// #27 B1 (b), test 22: the tested config is the build's config
+		// digest; without it there is nothing to compare a push with.
+		{"no config digest", `{"postfix":{"image.name":"ghcr.io/keepia/mail-postfix:dev","containerimage.digest":"` + d1 + `"}}`, map[string]string{"ghcr.io/keepia/mail-postfix:dev": d1}, 1, "has no containerimage.config.digest"},
 		{"empty", `{}`, nil, 1, "names no image"},
 		{"not JSON", `nope`, nil, 1, "does not parse"},
 	}
@@ -413,14 +416,18 @@ func TestClassify(t *testing.T) {
 		".github/workflows/ci.yml":      kindWorkflow,
 		".github/workflows/x.yaml":      kindWorkflow,
 		".github/workflows/release.yml": kindReleaseWorkflow,
-		".github/dependabot.yml":        kindNone,
-		"README.md":                     kindNone,
-		"tools/x/dockerfile.go":         kindNone,
-		"build/docker-bake.hcl":         kindStrayHCL,
-		"images.hcl":                    kindStrayHCL,
-		"Makefile":                      kindMakefile,
-		"tools/x.mk":                    kindMakefile,
-		"scripts/build.sh":              kindScript,
+		// #27 P1: only that exact path is the release workflow.
+		".github/workflows/release.yaml": kindWorkflow,
+		".github/workflows/Release.yml":  kindWorkflow,
+		"other/release.yml":              kindNone,
+		".github/dependabot.yml":         kindNone,
+		"README.md":                      kindNone,
+		"tools/x/dockerfile.go":          kindNone,
+		"build/docker-bake.hcl":          kindStrayHCL,
+		"images.hcl":                     kindStrayHCL,
+		"Makefile":                       kindMakefile,
+		"tools/x.mk":                     kindMakefile,
+		"scripts/build.sh":               kindScript,
 	}
 	for rel, want := range cases {
 		if got := classify(filepath.FromSlash(rel)); got != want {
@@ -450,8 +457,11 @@ func TestRun(t *testing.T) {
 		root := t.TempDir()
 		write(t, root, "Dockerfile", pinnedSyntaxLine+pinnedFrom)
 		write(t, root, ".github/workflows/ci.yml", "permissions:\n  contents: read\njobs:\n  a:\n    runs-on: x\n")
-		// release.yml may push packages.
-		write(t, root, ".github/workflows/release.yml", "permissions:\n  packages: write\n")
+		// release.yml may push packages, in exactly the planned shape
+		// (rule 7).
+		write(t, root, ".github/workflows/release.yml", releaseFixture(t))
+		write(t, root, "scripts/image-test.sh", "#!/bin/bash\ndocker run --rm \"$2\" --version\n")
+		write(t, root, "scripts/ci-docker-mirror.sh", "#!/bin/sh\n")
 		// The root's prototypes and the check fixtures are not walked.
 		write(t, root, "prototypes/p/Dockerfile", "FROM debian:trixie-slim\n")
 		write(t, root, "tools/check-image-pins/testdata/Dockerfile", "FROM debian:trixie-slim\n")
@@ -469,8 +479,12 @@ func TestRun(t *testing.T) {
 		write(t, root, "images/a/Dockerfile", pinnedSyntaxLine+"FROM debian:trixie-slim\n")
 		write(t, root, "docker-bake.json", "{}\n")
 		write(t, root, ".github/workflows/ci.yml", "permissions:\n  packages: write\n")
-		// release.yml may push, but its job images are pinned too.
-		write(t, root, ".github/workflows/release.yml", "permissions:\n  packages: write\njobs:\n  a:\n    container: node:20\n")
+		// release.yml may push, but its job images are pinned too (and
+		// rule 7 allows no container at all).
+		rel := strings.Replace(releaseFixture(t), "  version:\n    runs-on: ubuntu-24.04\n", "  version:\n    runs-on: ubuntu-24.04\n    container: node:20\n", 1)
+		write(t, root, ".github/workflows/release.yml", rel)
+		write(t, root, "scripts/image-test.sh", "#!/bin/bash\ndocker run --rm \"$2\" --version\n")
+		write(t, root, "scripts/ci-docker-mirror.sh", "#!/bin/sh\n")
 		write(t, root, "docker-compose.yml", "services: [\n")
 		var out, errOut bytes.Buffer
 		if code := run([]string{root}, &out, &errOut); code != 1 {
@@ -480,12 +494,13 @@ func TestRun(t *testing.T) {
 			filepath.Join("images", "a", "Dockerfile") + ":2: FROM image",
 			"docker-bake.json:0: a JSON bake file",
 			filepath.Join(".github", "workflows", "ci.yml") + ":1: workflow grants packages: write",
-			filepath.Join(".github", "workflows", "release.yml") + ":4: job a: container image \"node:20\"",
+			filepath.Join(".github", "workflows", "release.yml") + ":29: job version: container image \"node:20\"",
+			filepath.Join(".github", "workflows", "release.yml") + ":29: job version: container is not allowed",
 			"docker-compose.yml:0: does not parse",
 			// bake reads the root's default files, the broken Compose file
 			// included, and the check reports that it cannot resolve them.
 			"docker-compose.yml,docker-bake.json:0: cannot resolve the bake definition",
-			"6 finding(s)",
+			"7 finding(s)",
 		} {
 			if !strings.Contains(out.String(), want) {
 				t.Errorf("output lacks %q:\n%s", want, out.String())

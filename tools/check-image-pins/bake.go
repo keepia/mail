@@ -71,6 +71,10 @@ type bakeTarget struct {
 	Secret           []map[string]string `json:"secret"`
 	Network          *string             `json:"network"`
 	Entitlements     []string            `json:"entitlements"`
+	Tags             []string            `json:"tags"`
+	Labels           map[string]string   `json:"labels"`
+	Output           []map[string]string `json:"output"`
+	Attest           []map[string]string `json:"attest"`
 	keys             []string
 }
 
@@ -243,6 +247,9 @@ type targetPolicy struct {
 	secretSrc string
 	// hostNetwork allows network=host (local mode, -host-network).
 	hostNetwork bool
+	// release, when set, is a build of release.yml (build mode with a
+	// release- cache scope): see checkReleaseTarget.
+	release *releaseBuild
 }
 
 // checkRepoBake resolves the root's default bake files (rel names) in a
@@ -365,6 +372,11 @@ func checkBuildBake(root string, targets, sets []string) ([]string, []string) {
 	if len(names) == 0 {
 		return append(findings, "no target to check"), nil
 	}
+	release, problems := releaseBuildOf(sets)
+	findings = append(findings, problems...)
+	if release != nil && len(names) != 1 {
+		findings = append(findings, "a release build builds exactly one target")
+	}
 	resolved, err := bake{dir: root}.print(sets, names)
 	if err != nil {
 		return append(findings, "cannot resolve the build's bake definition: "+err.Error()), nil
@@ -374,8 +386,11 @@ func checkBuildBake(root string, targets, sets []string) ([]string, []string) {
 		scope := ""
 		if len(names) == 1 {
 			scope = buildCacheScope(names[0])
+			if release != nil && scope != "" {
+				scope = "release-" + scope
+			}
 		}
-		f, d := CheckBakeTargets(root, map[string]bakeTarget{n: resolved[n]}, targetPolicy{cacheScope: scope})
+		f, d := CheckBakeTargets(root, map[string]bakeTarget{n: resolved[n]}, targetPolicy{cacheScope: scope, release: release})
 		findings = append(findings, f...)
 		dockerfiles = append(dockerfiles, d...)
 	}
@@ -406,9 +421,12 @@ func CheckBakeTargets(root string, targets map[string]bakeTarget, policy targetP
 			findings = append(findings, fmt.Sprintf("target %q: %s", n, fmt.Sprintf(format, a...)))
 		}
 		for _, k := range t.keys {
-			if !targetKeys[k] {
+			if !targetKeys[k] && (policy.release == nil || !releaseTargetKeys[k]) {
 				bad("%s is not allowed: it can change how or from what the image is built", k)
 			}
+		}
+		if policy.release != nil {
+			checkReleaseTarget(bad, n, t, policy)
 		}
 		if len(t.Contexts) > 0 {
 			keys := make([]string, 0, len(t.Contexts))
@@ -424,8 +442,10 @@ func CheckBakeTargets(root string, targets map[string]bakeTarget, policy targetP
 		if len(syntaxArg(t)) > 0 {
 			bad("the BUILDKIT_SYNTAX argument overrides the pinned # syntax= directive")
 		}
-		checkCache(bad, "cache-from", t.CacheFrom, policy.cacheScope)
-		checkCache(bad, "cache-to", t.CacheTo, policy.cacheScope)
+		if policy.release == nil {
+			checkCache(bad, "cache-from", t.CacheFrom, policy.cacheScope)
+			checkCache(bad, "cache-to", t.CacheTo, policy.cacheScope)
+		}
 		switch {
 		case len(t.Secret) == 0:
 		case policy.secretSrc != "" && len(t.Secret) == 1 && fmt.Sprint(t.Secret[0]) == fmt.Sprint(map[string]string{"id": "ca", "src": policy.secretSrc}):

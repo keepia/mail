@@ -397,7 +397,12 @@ var actionsEnvCall = regexp.MustCompile(`\b(?:exportvariable|addpath)\s*\(`)
 
 // checkJobBuilds applies the workflow side of rule 5 to one job and
 // returns the job's run texts (for the scripts they reference).
-func checkJobBuilds(line int, job string, wfEnv, wfDefaults any, j map[string]any, resolve resolver, add func(int, string, ...any)) []string {
+//
+// In release.yml (release set) a bake job also has VERSION, exactly the
+// version job's output, and BAKE_SET may set the outputs and attest line
+// of the push jobs; rule 7 (release.go) holds each line to the policy and
+// build mode checks what it resolves to.
+func checkJobBuilds(line int, job string, wfEnv, wfDefaults any, j map[string]any, release bool, resolve resolver, add func(int, string, ...any)) []string {
 	var runs []string
 	if u, ok := j["uses"].(string); ok && !strings.HasPrefix(u, "./") {
 		add(line, "job %s calls the remote reusable workflow %s: the check cannot read what it builds", job, u)
@@ -477,6 +482,12 @@ func checkJobBuilds(line int, job string, wfEnv, wfDefaults any, j map[string]an
 			continue
 		}
 		for _, k := range sortedKeys(env) {
+			if release && scope.name == "job" && k == "VERSION" {
+				if env[k] != versionExpr {
+					add(line, "job %s: job env VERSION must be exactly %s", job, versionExpr)
+				}
+				continue
+			}
 			if !bakeEnvKeys[k] {
 				add(line, "job %s: %s env %s is not allowed in a job that builds with bake (allowed: %s)", job, scope.name, k, strings.Join(sortedBool(bakeEnvKeys), ", "))
 				continue
@@ -491,7 +502,7 @@ func checkJobBuilds(line int, job string, wfEnv, wfDefaults any, j map[string]an
 			}
 		}
 		if scope.name == "job" {
-			checkBakeSetEnv(line, job, env["BAKE_SET"], add)
+			checkBakeSetEnv(line, job, env["BAKE_SET"], release, add)
 		}
 	}
 	return runs
@@ -586,8 +597,11 @@ func checkBakeStep(line int, job string, i int, steps []any, step map[string]any
 
 // checkBakeSetEnv checks the BAKE_SET lines of a job: only cache-from and
 // cache-to, and a literal cache value only of type=gha (build mode checks
-// the resolved value, including what an expression expands to).
-func checkBakeSetEnv(line int, job string, v any, add func(int, string, ...any)) {
+// the resolved value, including what an expression expands to). In
+// release.yml the push jobs' output and attest lines are allowed too
+// (rule 7 checks them exactly); in every other workflow a release- cache
+// scope is reported: only release.yml writes and reads the release cache.
+func checkBakeSetEnv(line int, job string, v any, release bool, add func(int, string, ...any)) {
 	if v == nil {
 		return
 	}
@@ -602,6 +616,12 @@ func checkBakeSetEnv(line int, job string, v any, add func(int, string, ...any))
 			continue
 		}
 		attr := setLineAttr(l)
+		if !release && strings.Contains(l, "release-") {
+			add(line, "job %s: BAKE_SET line %q names a release- cache scope; only release.yml uses the release cache", job, l)
+		}
+		if release && (attr == "output" || attr == "attest") {
+			continue
+		}
 		if !bakeSetAttrs[attr] {
 			add(line, "job %s: BAKE_SET line %q sets %q; only %s are allowed", job, l, attr, strings.Join(sortedBool(bakeSetAttrs), ", "))
 			continue
