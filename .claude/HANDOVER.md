@@ -3,7 +3,7 @@
 Current state only. At session end replace these sections; never append. History lives in PRs, issues and git.
 
 ## Last release
-- None. No release is possible before #5 (release pipeline).
+- None yet. `.github/workflows/release.yml` came with #27 part 4b; its first dry run on `main` (test 17) follows the merge. Runbook: `docs/development/process.md`, "Releases".
 
 ## Open PRs
 - Runbook skeleton for the mailcow migration (#28, part 1 of #13), docs only.
@@ -34,9 +34,13 @@ Current state only. At session end replace these sections; never append. History
   - **Valkey's healthcheck** probes loopback, the only address protected mode serves without a password. When its first client brings the password (0.2.0), move the probe to the private address with AUTH (#61, Review A N3 on #60).
   - **SOGo logs about 43k lines a day** in 0.1.0: it starts without a database route (the gate comes with 0.5.0) and each health probe logs about 30 lines. Only journald's retention (30 days) bounds them; check the host's journald size limits on a small disk (#61, Review A N4 on #60).
 - **Images:** pins, privileges, healthcheck rules and the check's threat model in `.claude/rules/docker.md`; images are built only through `check-image-pins -bake-local` (`make images`) and CI's checked `docker/bake-action` step; `scripts/ci-docker-mirror.sh`, `ci-pull-images.sh` and `check-go-toolchain*.sh` stay byte-identical with mail-archive.
+- **Releases** (#27): `release.yml` from `main` by hand, dry run first. `v0.1.0` is pre-approved (6845990778): the coordinator starts it after a green dry run on `main`, on the same commit, with every image built and the sums and SBOMs complete; if anything differs, it stops and reports. Every later real release needs the maintainer's OK. Tags `X.Y.Z` (immutable) and `latest` (moves forward only; before 1.0 it can include breaking changes); the bundle pins by digest. Rule 7 of `tools/check-image-pins` holds `release.yml` to its exact shape: a Dependabot bump of an action it uses needs the same bump of `actionPins` in `tools/check-image-pins/release.go`, and the BuildKit image (`moby/buildkit:v0.34.2@sha256:c5f8862f…`, in `ci.yml`, `release.yml` and the tool's `buildkitImage`) is bumped by hand. The coordinator never deletes package versions.
 - **Workflow changes:** a change to `.github/workflows/`, `tools/check-action-pins/`, the Makefile's `workflows`/`workflows-test` targets, or the `go.yaml.in/yaml/v3` line in `go.mod` gets `second-review`.
 - **Resource budget:** plans state memory and CPU per role and for all roles on one server, against `docs/development/architecture.md` once #2 is merged.
 
 ## Maintainer actions
 - Add `test`, `lint`, `vulncheck` to the `main` ruleset (#6), after their first green run; `docker` and `compose` (#5) after their first green run on `main`.
 - Delete the remote branch `proof/secret-scan`.
+- The OK for each real release after `v0.1.0` (pre-approved, 6845990778), after a green dry run (`process.md`, "Releases").
+- After the first release: make the five GHCR packages (`mail`, `mail-postfix`, `mail-unbound`, `mail-olefy`, `mail-sogo`) public and link them to keepia/mail.
+- After a failed push row: delete the untested and orphaned package versions the coordinator names.

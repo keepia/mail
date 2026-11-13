@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -11,8 +12,10 @@ import (
 //
 // In every workflow, release.yml included, the images a job runs in are
 // pinned: each `jobs.<id>.container` (a string or its `image`) and each
-// `jobs.<id>.services.<name>.image` is name:tag@sha256:<64 hex>. Action
-// references (`uses: docker://…`) are tools/check-action-pins' rule.
+// `jobs.<id>.services.<name>.image` is name:tag@sha256:<64 hex>, and so
+// is the BuildKit image of every docker/setup-buildx-action step
+// (driver-opts image=; checkBuilderImages). Action references (`uses:
+// docker://…`) are tools/check-action-pins' rule.
 //
 // Rule 6 applies to every workflow except release.yml: nothing grants
 // `packages: write`, so only the release workflow can push to GHCR.
@@ -76,6 +79,7 @@ func CheckWorkflow(src []byte, release bool, resolve resolver) ([]Finding, []str
 			continue
 		}
 		checkJobImages(name.Line, name.Value, job, add)
+		checkBuilderImages(name.Line, name.Value, job, add)
 		runs = append(runs, checkJobBuilds(name.Line, name.Value, wf.Env, wf.Defaults, job, release, resolve, add)...)
 		if release {
 			continue
@@ -125,6 +129,60 @@ func checkJobImages(line int, job string, j map[string]any, add func(int, string
 		sort.Strings(names)
 		for _, n := range names {
 			check("service "+n, services[n])
+		}
+	}
+}
+
+// checkBuilderImages checks the BuildKit image of every builder a job
+// starts with docker/setup-buildx-action (#71 review B, N6): the
+// docker-container driver (the action's default, the only one the bake
+// steps' type=gha cache works with) runs BuildKit from driver-opts'
+// image=, or from the floating moby/buildkit:buildx-stable-1 when none is
+// given. The push bake step hands that container the GHCR credentials,
+// so the image is pinned like every other: exactly one image= entry,
+// name:tag@sha256:<64 hex>, and no input but driver-opts,
+// buildkitd-config-inline and driver (docker-container only).
+// builderInputs are the docker/setup-buildx-action inputs a workflow may
+// set.
+var builderInputs = map[string]bool{"driver-opts": true, "buildkitd-config-inline": true, "driver": true}
+
+func checkBuilderImages(line int, job string, j map[string]any, add func(int, string, ...any)) {
+	steps, _ := j["steps"].([]any)
+	for i, s := range steps {
+		step, _ := asMap(s)
+		uses, _ := step["uses"].(string)
+		if a, _, _ := strings.Cut(strings.ToLower(uses), "@"); a != "docker/setup-buildx-action" {
+			continue
+		}
+		with, _ := asMap(step["with"])
+		// Only these inputs (#72 review B, N2): append adds nodes with
+		// their own image, endpoint a remote builder, version an unpinned
+		// buildx download.
+		for _, k := range sortedKeys(with) {
+			if !builderInputs[k] {
+				add(line, "job %s: step %d: docker/setup-buildx-action input %s is not allowed: only driver-opts, buildkitd-config-inline and driver: docker-container", job, i+1, k)
+			}
+		}
+		if d, ok := with["driver"]; ok && d != "docker-container" {
+			add(line, "job %s: step %d: docker/setup-buildx-action with driver %v: only the docker-container driver, with a pinned BuildKit image", job, i+1, d)
+			continue
+		}
+		opts, _ := with["driver-opts"].(string)
+		var images []string
+		for _, l := range strings.Split(opts, "\n") {
+			for _, f := range strings.Split(l, ",") {
+				if v, ok := strings.CutPrefix(strings.TrimSpace(f), "image="); ok {
+					images = append(images, v)
+				}
+			}
+		}
+		switch {
+		case len(images) == 0:
+			add(line, "job %s: step %d: docker/setup-buildx-action starts BuildKit from the floating moby/buildkit:buildx-stable-1; name it in driver-opts as image=name:tag@sha256:<64 hex>", job, i+1)
+		case len(images) > 1:
+			add(line, "job %s: step %d: docker/setup-buildx-action names %d BuildKit images in driver-opts, want one", job, i+1, len(images))
+		case !isPinnedImage(images[0]):
+			add(line, "job %s: step %d: %s", job, i+1, unpinnedMsg("BuildKit image (driver-opts)", images[0]))
 		}
 	}
 }
