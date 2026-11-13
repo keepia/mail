@@ -225,6 +225,14 @@ jobs:
           IMAGE: ${{ matrix.image }}
           VERIFIED_IMAGE: ${{ steps.verify.outputs.image }}
         run: bash scripts/image-test.sh "$IMAGE" "$VERIFIED_IMAGE"
+      # TEMPORARY (#27 part 4b, reverted in the next commit): the size of
+      # SOGo's whole build in the builder, what a mode=max cache export
+      # holds (uncompressed), and the final image.
+      - name: SOGo build cache size (measurement, temporary)
+        if: matrix.image == 'sogo'
+        run: |
+          docker buildx du
+          docker image ls
       # The compose job loads the amd64 images from here instead of
       # building them again. Verify saves the image itself and checks the
       # tar it wrote (every blob, and the build's config under every name)
@@ -431,6 +439,9 @@ jobs:
           sh scripts/release-bundle.sh 99.0.0 "$RUNNER_TEMP/bundle" "$digests"
           tar -xzf "$RUNNER_TEMP/bundle/keepia-mail-99.0.0.tar.gz" -C "$RUNNER_TEMP/bundle"
           cd "$RUNNER_TEMP/bundle/keepia-mail"
+          # TEMPORARY counter-proof of test 15b (#27 part 4b, reverted in
+          # the next commit): a bundle whose deploy/ lacks a file must fail.
+          rm deploy/store/dovecot/dovecot.conf
           docker compose -p keepia-bundle up -d --wait --wait-timeout 300 --no-build --pull never
           docker compose -p keepia-bundle ps
       - name: Stop and remove the bundle
