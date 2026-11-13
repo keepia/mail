@@ -23,7 +23,9 @@ import (
 //     missing; permissions other than the policy's, top-level other than
 //     {}; a job-level `uses:` (a reusable workflow).
 //   - P3, P4, P5, P9: in push, push-rehearsal, index and latest, every
-//     step is exactly the policy's step at that position: the same action
+//     step is exactly the policy's step at that position (push-rehearsal
+//     is push without the login, with the local registry service and a
+//     host-network builder, #75): the same action
 //     with exactly its inputs, or a run step whose trimmed text equals one
 //     fixed line, with exactly its env and id and no if, shell,
 //     working-directory or continue-on-error. Nothing is resolved: a text
@@ -31,10 +33,12 @@ import (
 //     repository script, make target or other `go run`, defines no shell
 //     function and runs no eval, sh -c, source or xargs (P5 holds by
 //     construction; its messages name the form), and pushes only through
-//     the bake step (by digest, BAKE_SET exactly the policy's lines, which
-//     build mode resolves) and -publish-index and -move-latest.
+//     the bake step (by digest under the bare repository, BAKE_SET
+//     exactly the policy's lines, which build mode resolves) and
+//     -publish-index and -move-latest.
 //   - P6: `needs` and `if` of every job other than the policy's.
-//   - P7: continue-on-error anywhere; a job container, services,
+//   - P7: continue-on-error anywhere; a job container, services (except
+//     push-rehearsal's exact registry service, #75),
 //     concurrency, defaults or env (env only in the bake jobs, exactly
 //     BAKE_TARGET, PLATFORM, VERSION and BAKE_SET); workflow env, defaults
 //     other than run.shell bash; and in release, attest and attest-assets
@@ -104,7 +108,34 @@ const (
 	// (BuildKit v0.34.2), pinned by its index digest; bumped by hand, in
 	// ci.yml, release.yml and here together.
 	buildkitImage = "moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe"
+
+	// registryImage is the throwaway registry push-rehearsal pushes to
+	// (#75): CNCF distribution, Docker's official image, from mirror.gcr.io
+	// (like ci.yml's postgres service), pinned by its index digest (amd64
+	// and arm64); bumped by hand, in release.yml and here together.
+	registryImage = "mirror.gcr.io/library/registry:3.1.2@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c"
+
+	// rehearsalRegistry is where push-rehearsal pushes: its own registry
+	// service on the runner's loopback (#75, D4: a fixed port, because a
+	// job env cannot read the job context for a random one).
+	rehearsalRegistry = "localhost:5000/keepia"
+
+	// bakeRepoExpr is the repository name of a matrix row, mail or
+	// mail-<image> (imageRepo without the registry); it reads only matrix.*
+	// and format, as exprProblem allows.
+	bakeRepoExpr = "${{ matrix.image == 'keepia' && 'mail' || format('mail-{0}', matrix.image) }}"
 )
+
+// rehearsalServices is push-rehearsal's exact `services` value (#75,
+// maintainer decision 6850628924): the pinned registry, published on
+// loopback only, with no env, options, credentials or volumes. Every other
+// job of release.yml has no services.
+var rehearsalServices = map[string]any{
+	"registry": map[string]any{
+		"image": registryImage,
+		"ports": []any{"127.0.0.1:5000:5000"},
+	},
+}
 
 // The exact run lines of attest, attest-assets and release (#71 review B,
 // N2). They run no repository code: only sha256sum, jq and gh.
@@ -208,6 +239,9 @@ type releaseJob struct {
 	outputs map[string]any
 	// noRepoCode: release, attest and attest-assets (P7, design-system).
 	noRepoCode bool
+	// services: the exact job services (push-rehearsal only, #75); nil
+	// for a job that has none (P7).
+	services map[string]any
 }
 
 // stepSpec is one exact step: an action (uses, with) or a run step (run,
@@ -263,6 +297,15 @@ var (
 	stepSetupBake = stepSpec{uses: "docker/setup-buildx-action", with: map[string]any{
 		"driver-opts":             "image=" + buildkitImage,
 		"buildkitd-config-inline": "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]",
+	}}
+	// stepSetupBakeHost is push-rehearsal's builder (#75): stepSetupBake
+	// on the runner's host network, so BuildKit reaches the registry
+	// service on loopback (BuildKit allows plain HTTP to localhost). Only
+	// push-rehearsal has it; push keeps the bridge builder that holds the
+	// GHCR credentials.
+	stepSetupBakeHost = stepSpec{uses: "docker/setup-buildx-action", with: map[string]any{
+		"driver-opts":             "image=" + buildkitImage + "\nnetwork=host",
+		"buildkitd-config-inline": stepSetupBake.with["buildkitd-config-inline"],
 	}}
 	stepTested = stepSpec{uses: "actions/download-artifact", with: map[string]any{
 		"name": "tested-${{ matrix.image }}-${{ matrix.arch }}", "path": "${{ runner.temp }}/tested",
@@ -332,7 +375,7 @@ func attestJobSteps() []stepSpec {
 
 var (
 	pushSteps         = []stepSpec{stepCheckout, stepSetupGo, stepSetupBake, stepTested, stepEpoch, stepLogin, stepCheck, stepBake, stepVerifyPushed, stepUploadDigest}
-	rehearsalSteps    = []stepSpec{stepCheckout, stepSetupGo, stepSetupBake, stepTested, stepEpoch, stepCheck, stepBake, stepVerifyPushed, stepUploadDigest}
+	rehearsalSteps    = []stepSpec{stepCheckout, stepSetupGo, stepSetupBakeHost, stepTested, stepEpoch, stepCheck, stepBake, stepVerifyPushed, stepUploadDigest}
 	indexSteps        = []stepSpec{stepCheckout, stepSetupGo, stepSetupBake, stepDigests, stepLogin, stepPublishIndex}
 	latestSteps       = []stepSpec{stepCheckout, stepSetupGo, stepSetupBake, stepLogin, stepMoveLatest}
 	attestSteps       = attestJobSteps()
@@ -352,7 +395,7 @@ var releaseJobOrder = []string{"version", "build", "push-rehearsal", "push", "in
 var releaseJobs = map[string]releaseJob{
 	"version":        {perms: map[string]string{"contents": "read", "pull-requests": "read"}},
 	"build":          {perms: readOnly, needs: []string{"version"}, bake: true},
-	"push-rehearsal": {perms: readOnly, needs: []string{"version", "build"}, cond: releaseDryIf, bake: true, steps: rehearsalSteps},
+	"push-rehearsal": {perms: readOnly, needs: []string{"version", "build"}, cond: releaseDryIf, bake: true, steps: rehearsalSteps, services: rehearsalServices},
 	"push":           {perms: readPackage, needs: []string{"version", "build"}, cond: releaseRealIf, bake: true, steps: pushSteps},
 	"index": {perms: readPackage, needs: []string{"version", "push"}, cond: releaseRealIf, steps: indexSteps,
 		outputs: map[string]any{"digests": "${{ steps.index.outputs.digests }}"}},
@@ -366,19 +409,27 @@ var releaseJobs = map[string]releaseJob{
 
 // releaseBakeSet are the exact BAKE_SET lines of the bake jobs (revision
 // 2 B, revision 3 B5): the release cache of the row, and for push and
-// its twin the two outputs and the provenance attestation.
+// its twin the bare repository as the target's tags, the two outputs and
+// the provenance attestation. Both push jobs push (push=true, #75): the
+// rehearsal enters BuildKit's push path too, against its own registry
+// service, so a push BuildKit refuses shows in a dry run. The tags are the
+// bare repository because BuildKit refuses push-by-digest of a tagged
+// name ("can't push tagged ref … by digest", run 43401448419); bake gives
+// both outputs the tags as their name, so the tar and the registry hold
+// the same index.
 func releaseBakeSet(job string) []string {
 	const t, scope = "${{ matrix.image }}", "release-${{ matrix.image }}-${{ matrix.arch }}"
 	if job == "build" {
 		return []string{t + ".cache-to=type=gha,mode=max,scope=" + scope}
 	}
-	push := "true"
+	registry := releaseRegistry
 	if job == "push-rehearsal" {
-		push = "false"
+		registry = rehearsalRegistry
 	}
 	return []string{
 		t + ".cache-from=type=gha,scope=" + scope,
-		t + ".output=type=image,push-by-digest=true,name-canonical=true,push=" + push,
+		t + ".tags=" + registry + "/" + bakeRepoExpr,
+		t + ".output=type=image,push-by-digest=true,name-canonical=true,push=true",
 		t + ".output=type=oci,dest=" + pushedTar,
 		t + ".attest=type=provenance,mode=max",
 	}
@@ -403,11 +454,12 @@ var releaseJobKeys = map[string]bool{
 	"strategy": true, "env": true, "timeout-minutes": true, "steps": true, "outputs": true,
 }
 
-// releaseDeniedJobKeys get their own message (P2, P7).
+// releaseDeniedJobKeys get their own message (P2, P7). services is allowed
+// only in a job whose policy has them (push-rehearsal), and then exactly.
 var releaseDeniedJobKeys = map[string]string{
 	"uses":              "a job of release.yml calls no reusable workflow",
 	"container":         "a job of release.yml runs in no container",
-	"services":          "a job of release.yml has no services",
+	"services":          "only push-rehearsal has services: its registry",
 	"concurrency":       "only the workflow-level concurrency group release serialises the runs (B6)",
 	"defaults":          "only the workflow's defaults (run.shell: bash) apply",
 	"continue-on-error": "a failed job must stop the release",
@@ -569,11 +621,20 @@ func checkVersionEnv(line int, where string, env any, add func(int, string, ...a
 // checkReleaseJob checks one job against its policy.
 func checkReleaseJob(line int, name string, p releaseJob, job map[string]any, add func(int, string, ...any)) {
 	for _, k := range sortedKeys(job) {
+		if k == "services" && p.services != nil {
+			if !reflect.DeepEqual(job[k], p.services) {
+				add(line, "job %s: services must be exactly %v (the pinned registry on loopback only, no env, options, credentials, volumes or other port; #75), got %v", name, p.services, job[k])
+			}
+			continue
+		}
 		if msg, ok := releaseDeniedJobKeys[k]; ok {
 			add(line, "job %s: %s is not allowed: %s", name, k, msg)
 		} else if !releaseJobKeys[k] {
 			add(line, "job %s: key %s is not in the release policy", name, k)
 		}
+	}
+	if _, has := job["services"]; p.services != nil && !has {
+		add(line, "job %s: services must be exactly %v: the rehearsal pushes to its own registry (#75)", name, p.services)
 	}
 	want := map[string]any{}
 	for k, v := range p.perms {

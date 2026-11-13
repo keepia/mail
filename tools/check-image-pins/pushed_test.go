@@ -4,8 +4,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -109,9 +111,30 @@ func rowMeta(t *testing.T, target, name, digest, config string) []byte {
 	return mustJSON(t, map[string]any{"buildx.build.warnings": []any{}, target: m})
 }
 
+// The names in the two metadata files (#75): the build row's tested image
+// and the push step's bare repository as buildx reports it.
+const (
+	testedName    = "ghcr.io/keepia/mail-postfix:0.1.0"
+	pushName      = "ghcr.io/keepia/mail-postfix:latest"
+	rehearsalName = "localhost:5000/keepia/mail-postfix:latest"
+)
+
+// regOf is a registry that holds the given rows of repo, as BuildKit
+// pushed them: each index and every blob by digest.
+func regOf(t *testing.T, repo string, imgs ...ociImage) *fakeRegistry {
+	t.Helper()
+	reg := newFakeRegistry(t)
+	for _, img := range imgs {
+		for d, b := range img.blobs {
+			reg.refs[repo+"@"+d] = b
+		}
+	}
+	return reg
+}
+
 // TestVerifyPushed is test 22: the pushed image must be the tested one.
 func TestVerifyPushed(t *testing.T) {
-	const name = "ghcr.io/keepia/mail-postfix:0.1.0"
+	const name = testedName
 	img := newOCIImage(t, "amd64", "a", nil)
 	other := newOCIImage(t, "amd64", "b", nil)
 	second := newOCIImage(t, "amd64", "c", func(m []map[string]any) []map[string]any {
@@ -126,25 +149,36 @@ func TestVerifyPushed(t *testing.T) {
 	})
 	armOnly := newOCIImage(t, "arm64", "e", nil)
 	tested := rowMeta(t, "postfix", name, "sha256:"+strings.Repeat("9", 64), img.config)
+	pushed := func(n, digest string) []byte { return rowMeta(t, "postfix", n, digest, "") }
+	const rehearsalRepo = "localhost:5000/keepia/mail-postfix"
 	cases := []struct {
 		name         string
 		tarData      []byte
 		meta, tested []byte
 		target       string
 		want         string
+		repo         string // the repository of the success record
 	}{
-		{"tested image", ociTar(t, img, img.index, ""), rowMeta(t, "postfix", name, img.index, ""), tested, "postfix", ""},
-		{"changed blob", ociTar(t, img, img.index, img.config), rowMeta(t, "postfix", name, img.index, ""), tested, "postfix", "has the content of"},
-		{"index digest is not the metadata's", ociTar(t, img, img.index, ""), rowMeta(t, "postfix", name, other.index, ""), tested, "postfix", "want exactly the pushed index"},
-		{"second platform manifest", ociTar(t, second, second.index, ""), rowMeta(t, "postfix", name, second.index, ""), rowMeta(t, "postfix", name, "sha256:"+strings.Repeat("9", 64), second.config), "postfix", "holds 2 image manifests"},
-		{"attestation of another manifest", ociTar(t, strayAttest, strayAttest.index, ""), rowMeta(t, "postfix", name, strayAttest.index, ""), rowMeta(t, "postfix", name, "sha256:"+strings.Repeat("9", 64), strayAttest.config), "postfix", "references " + other.manifest},
-		{"config is not the tested one", ociTar(t, other, other.index, ""), rowMeta(t, "postfix", name, other.index, ""), tested, "postfix", "but the tested config is " + img.config},
-		{"wrong platform", ociTar(t, armOnly, armOnly.index, ""), rowMeta(t, "postfix", name, armOnly.index, ""), rowMeta(t, "postfix", name, "sha256:"+strings.Repeat("9", 64), armOnly.config), "postfix", "is not linux/amd64"},
-		{"tested metadata without config digest", ociTar(t, img, img.index, ""), rowMeta(t, "postfix", name, img.index, ""), rowMeta(t, "postfix", name, img.index, ""), "postfix", "has no containerimage.config.digest"},
-		{"push metadata names another config", ociTar(t, img, img.index, ""), rowMeta(t, "postfix", name, img.index, other.config), tested, "postfix", "names the config " + other.config},
-		{"another repository", ociTar(t, img, img.index, ""), rowMeta(t, "postfix", "ghcr.io/other/mail-postfix:0.1.0", img.index, ""), tested, "postfix", "want " + name},
-		{"another target", ociTar(t, img, img.index, ""), rowMeta(t, "olefy", name, img.index, ""), tested, "postfix", "want exactly postfix"},
-		{"not a tar", []byte("nope"), rowMeta(t, "postfix", name, img.index, ""), tested, "postfix", "does not read"},
+		{"tested image, pushed to GHCR", ociTar(t, img, img.index, ""), pushed(pushName, img.index), tested, "postfix", "", testRepo},
+		// #75: the rehearsal's own registry.
+		{"tested image, pushed to the rehearsal's registry", ociTar(t, img, img.index, ""), pushed(rehearsalName, img.index), tested, "postfix", "", rehearsalRepo},
+		{"changed blob", ociTar(t, img, img.index, img.config), pushed(pushName, img.index), tested, "postfix", "has the content of", ""},
+		{"index digest is not the metadata's", ociTar(t, img, img.index, ""), pushed(pushName, other.index), tested, "postfix", "want exactly the pushed index", ""},
+		{"second platform manifest", ociTar(t, second, second.index, ""), pushed(pushName, second.index), rowMeta(t, "postfix", name, "sha256:"+strings.Repeat("9", 64), second.config), "postfix", "holds 2 image manifests", ""},
+		{"attestation of another manifest", ociTar(t, strayAttest, strayAttest.index, ""), pushed(pushName, strayAttest.index), rowMeta(t, "postfix", name, "sha256:"+strings.Repeat("9", 64), strayAttest.config), "postfix", "references " + other.manifest, ""},
+		{"config is not the tested one", ociTar(t, other, other.index, ""), pushed(pushName, other.index), tested, "postfix", "but the tested config is " + img.config, ""},
+		{"wrong platform", ociTar(t, armOnly, armOnly.index, ""), pushed(pushName, armOnly.index), rowMeta(t, "postfix", name, "sha256:"+strings.Repeat("9", 64), armOnly.config), "postfix", "is not linux/amd64", ""},
+		{"tested metadata without config digest", ociTar(t, img, img.index, ""), pushed(pushName, img.index), rowMeta(t, "postfix", name, img.index, ""), "postfix", "has no containerimage.config.digest", ""},
+		{"push metadata names another config", ociTar(t, img, img.index, ""), rowMeta(t, "postfix", pushName, img.index, other.config), tested, "postfix", "names the config " + other.config, ""},
+		{"tested metadata of another repository", ociTar(t, img, img.index, ""), pushed(pushName, img.index), rowMeta(t, "postfix", "ghcr.io/other/mail-postfix:0.1.0", img.index, img.config), "postfix", "want " + name, ""},
+		// #75 (D5): the push step's metadata names exactly <R>/<repo>:latest.
+		{"push metadata names the tested tag", ociTar(t, img, img.index, ""), pushed(testedName, img.index), tested, "postfix", "names the images [" + testedName + "], want exactly one of " + pushName + " or " + rehearsalName, ""},
+		{"push metadata of another registry", ociTar(t, img, img.index, ""), pushed("ghcr.io/other/mail-postfix:latest", img.index), tested, "postfix", "want exactly one of", ""},
+		{"push metadata of another image", ociTar(t, img, img.index, ""), pushed("localhost:5000/keepia/mail-olefy:latest", img.index), tested, "postfix", "want exactly one of", ""},
+		{"push metadata with a second name", ociTar(t, img, img.index, ""), pushed(pushName+","+rehearsalName, img.index), tested, "postfix", "want exactly one of", ""},
+		{"push metadata with no name", ociTar(t, img, img.index, ""), pushed("", img.index), tested, "postfix", "names the images [], want exactly one of", ""},
+		{"another target", ociTar(t, img, img.index, ""), rowMeta(t, "olefy", pushName, img.index, ""), tested, "postfix", "want exactly postfix", ""},
+		{"not a tar", []byte("nope"), pushed(pushName, img.index), tested, "postfix", "does not read", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -152,16 +186,78 @@ func TestVerifyPushed(t *testing.T) {
 			if err := os.WriteFile(p, c.tarData, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			rec, findings := verifyPushed(pushedInput{meta: c.meta, tested: c.tested, target: c.target, platform: "linux/amd64", version: "0.1.0", tar: p})
+			repo := testRepo
+			if strings.Contains(string(c.meta), "localhost:5000") {
+				repo = rehearsalRepo
+			}
+			reg := regOf(t, repo, img, other, second, strayAttest, armOnly)
+			rec, findings := verifyPushed(pushedInput{meta: c.meta, tested: c.tested, target: c.target, platform: "linux/amd64", version: "0.1.0", tar: p, reg: reg})
 			got := strings.Join(findings, "\n")
 			if c.want == "" {
-				if len(findings) > 0 || rec.Config != img.config || rec.Index != img.index || rec.Manifest != img.manifest || rec.Repository != "ghcr.io/keepia/mail-postfix" {
+				if len(findings) > 0 || rec.Config != img.config || rec.Index != img.index || rec.Manifest != img.manifest || rec.Repository != c.repo {
 					t.Fatalf("findings %q, record %+v", findings, rec)
+				}
+				// The registry read: the index and its platform manifest,
+				// in the repository the row was pushed to.
+				if want := []string{"raw " + c.repo + "@" + img.index, "raw " + c.repo + "@" + img.manifest}; !slices.Equal(reg.calls, want) {
+					t.Fatalf("registry calls %q, want %q", reg.calls, want)
 				}
 				return
 			}
 			if !strings.Contains(got, c.want) {
 				t.Fatalf("findings %q, want %q", findings, c.want)
+			}
+			// No registry call when a check of the metadata or the tar
+			// failed.
+			if len(reg.calls) > 0 {
+				t.Fatalf("refused before the registry read, but the registry was asked: %q", reg.calls)
+			}
+		})
+	}
+}
+
+// TestVerifyPushedRegistryRead (#75, D3 and D-e): after every check of
+// pushed.tar passed, -verify-pushed reads the row back from the registry
+// it was pushed to; other content there is a mismatch, a failed read is
+// reported apart from it.
+func TestVerifyPushedRegistryRead(t *testing.T) {
+	img := newOCIImage(t, "amd64", "a", nil)
+	other := newOCIImage(t, "amd64", "b", nil)
+	data := ociTar(t, img, img.index, "")
+	const mismatch = "the registry holds other content than pushed.tar for " + testRepo + "@"
+	cases := []struct {
+		name string
+		edit func(reg *fakeRegistry)
+		want string
+	}{
+		{"index missing", func(reg *fakeRegistry) { delete(reg.refs, testRepo+"@"+img.index) }, registryReadPrefix + ": " + testRepo + "@" + img.index + ": not found"},
+		{"index bytes differ", func(reg *fakeRegistry) { reg.refs[testRepo+"@"+img.index] = other.indexJSON }, mismatch + img.index + ": " + testRepo + "@" + img.index + " has the content of " + other.index},
+		{"platform manifest differs", func(reg *fakeRegistry) { reg.refs[testRepo+"@"+img.manifest] = other.blobs[other.manifest] }, mismatch + img.index + ": " + testRepo + "@" + img.manifest + " has the content of " + other.manifest},
+		{"platform manifest missing", func(reg *fakeRegistry) { delete(reg.refs, testRepo+"@"+img.manifest) }, registryReadPrefix + ": " + testRepo + "@" + img.manifest},
+		{"registry error", func(reg *fakeRegistry) { reg.errs[testRepo+"@"+img.index] = errors.New("unauthorized") }, registryReadPrefix + ": " + testRepo + "@" + img.index + ": unauthorized. pushed.tar passed every check (it is the tested image), so this is a read error, not a content mismatch"},
+		{"another repository holds it", func(reg *fakeRegistry) {
+			moved := map[string][]byte{}
+			for k, v := range reg.refs {
+				moved[strings.Replace(k, testRepo, "localhost:5000/keepia/mail-postfix", 1)] = v
+			}
+			reg.refs = moved
+		}, registryReadPrefix + ": " + testRepo + "@" + img.index + ": not found"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), pushedTar)
+			if err := os.WriteFile(p, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			reg := regOf(t, testRepo, img, other)
+			c.edit(reg)
+			rec, f := verifyPushed(pushedInput{meta: rowMeta(t, "postfix", pushName, img.index, ""), tested: rowMeta(t, "postfix", testedName, img.index, img.config),
+				target: "postfix", platform: "linux/amd64", version: "0.1.0", tar: p, reg: reg})
+			if len(f) != 1 || !strings.Contains(f[0], c.want) || rec.Index != "" {
+				t.Fatalf("findings %q, record %+v, want one finding with %q", f, rec, c.want)
+			}
+			if isRead := strings.HasPrefix(f[0], registryReadPrefix); isRead != strings.HasPrefix(c.want, registryReadPrefix) {
+				t.Fatalf("finding %q: read error %v, want %v", f[0], isRead, !isRead)
 			}
 		})
 	}
@@ -171,12 +267,11 @@ func TestVerifyPushed(t *testing.T) {
 // symlink, or swapped for a FIFO between the Lstat and the open
 // (revision 5): each is refused.
 func TestVerifyPushedOpensOnlyARegularFile(t *testing.T) {
-	const name = "ghcr.io/keepia/mail-postfix:0.1.0"
 	img := newOCIImage(t, "amd64", "a", nil)
 	data := ociTar(t, img, img.index, "")
 	in := func(p string) pushedInput {
-		return pushedInput{meta: rowMeta(t, "postfix", name, img.index, ""), tested: rowMeta(t, "postfix", name, img.index, img.config),
-			target: "postfix", platform: "linux/amd64", version: "0.1.0", tar: p}
+		return pushedInput{meta: rowMeta(t, "postfix", pushName, img.index, ""), tested: rowMeta(t, "postfix", testedName, img.index, img.config),
+			target: "postfix", platform: "linux/amd64", version: "0.1.0", tar: p, reg: regOf(t, testRepo, img)}
 	}
 	t.Run("directory", func(t *testing.T) {
 		p := filepath.Join(t.TempDir(), pushedTar)
@@ -243,9 +338,18 @@ func TestVerifyPushedOpensOnlyARegularFile(t *testing.T) {
 // TestRunVerifyPushed: the mode reads pushed.tar in the working
 // directory and the tested metadata from $RUNNER_TEMP/tested, and writes
 // the digest file and the step outputs only on success.
-func TestRunVerifyPushed(t *testing.T) {
-	const name = "ghcr.io/keepia/mail-postfix:0.1.0"
-	img := newOCIImage(t, "amd64", "a", nil)
+// useRegistry makes -verify-pushed read from reg for the rest of the test.
+func useRegistry(t *testing.T, reg registry) {
+	t.Helper()
+	old := pushedRegistry
+	pushedRegistry = func() (registry, error) { return reg, nil }
+	t.Cleanup(func() { pushedRegistry = old })
+}
+
+// verifyPushedEnv prepares a push row of img in the rehearsal's registry
+// for run -verify-pushed and returns RUNNER_TEMP.
+func verifyPushedEnv(t *testing.T, img ociImage) string {
+	t.Helper()
 	work, temp := t.TempDir(), t.TempDir()
 	t.Chdir(work)
 	if err := os.WriteFile(pushedTar, ociTar(t, img, img.index, ""), 0o600); err != nil {
@@ -254,7 +358,7 @@ func TestRunVerifyPushed(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(temp, "tested"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(temp, "tested", "metadata.json"), rowMeta(t, "postfix", name, img.index, img.config), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(temp, "tested", "metadata.json"), rowMeta(t, "postfix", testedName, img.index, img.config), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out := filepath.Join(temp, "github-output")
@@ -266,17 +370,50 @@ func TestRunVerifyPushed(t *testing.T) {
 	t.Setenv("BAKE_TARGET", "postfix")
 	t.Setenv("PLATFORM", "linux/amd64")
 	t.Setenv("VERSION", "0.1.0")
-	t.Setenv("BAKE_METADATA", string(rowMeta(t, "postfix", name, img.index, "")))
+	t.Setenv("BAKE_METADATA", string(rowMeta(t, "postfix", rehearsalName, img.index, "")))
+	return temp
+}
+
+// TestRunVerifyPushedReadError (#75, D-e): a failed registry read after
+// every tar check passed exits 1 with its own summary, and writes no
+// digest file.
+func TestRunVerifyPushedReadError(t *testing.T) {
+	img := newOCIImage(t, "amd64", "a", nil)
+	temp := verifyPushedEnv(t, img)
+	reg := newFakeRegistry(t)
+	reg.errs["localhost:5000/keepia/mail-postfix@"+img.index] = errors.New("dial tcp 127.0.0.1:5000: connect: connection refused")
+	useRegistry(t, reg)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"-verify-pushed"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("exit %d, want 1:\n%s%s", code, stdout.String(), stderr.String())
+	}
+	if s := stdout.String(); !strings.Contains(s, "connection refused. pushed.tar passed every check") || !strings.Contains(s, "a read error, not a mismatch.") || strings.Contains(s, "is not the tested image") {
+		t.Fatalf("output:\n%s", s)
+	}
+	if _, err := os.Stat(filepath.Join(temp, "digest")); !os.IsNotExist(err) {
+		t.Fatalf("a digest directory after a failed read: %v", err)
+	}
+}
+
+func TestRunVerifyPushed(t *testing.T) {
+	img := newOCIImage(t, "amd64", "a", nil)
+	temp := verifyPushedEnv(t, img)
+	out := os.Getenv("GITHUB_OUTPUT")
+	useRegistry(t, regOf(t, "localhost:5000/keepia/mail-postfix", img))
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"-verify-pushed"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit %d:\n%s%s", code, stdout.String(), stderr.String())
+	}
+	// The success line names the registry the row was read back from.
+	if want := "for localhost:5000/keepia/mail-postfix linux/amd64: index " + img.index + ", manifest " + img.manifest + "; read back from the registry localhost:5000.\n"; !strings.Contains(stdout.String(), want) {
+		t.Fatalf("output lacks %q:\n%s", want, stdout.String())
 	}
 	b, err := os.ReadFile(filepath.Join(temp, "digest", "postfix-amd64.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var rec pushedRecord
-	if err := json.Unmarshal(b, &rec); err != nil || rec.Index != img.index || rec.Config != img.config || rec.Version != "0.1.0" {
+	if err := json.Unmarshal(b, &rec); err != nil || rec.Index != img.index || rec.Config != img.config || rec.Version != "0.1.0" || rec.Repository != "localhost:5000/keepia/mail-postfix" {
 		t.Fatalf("digest file %s (%v)", b, err)
 	}
 	o, _ := os.ReadFile(out)

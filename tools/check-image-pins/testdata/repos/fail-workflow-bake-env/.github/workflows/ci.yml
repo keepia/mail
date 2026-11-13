@@ -1,7 +1,8 @@
 # The shared form, steered through env: a BUILDX_ variable and a bake
 # variable at workflow and job level, a BAKE_SET line that sets named
-# contexts, a check step that can be skipped, and a run step that calls
-# bake itself.
+# contexts, a BAKE_SET line that sets the tags (only release.yml's push
+# jobs may, #75), a check step that can be skipped, and a run step that
+# calls bake itself.
 on: pull_request
 permissions:
   contents: read
@@ -16,6 +17,7 @@ jobs:
       BAKE_SET: |
         app.cache-from=type=gha,scope=app
         app.contexts.base=docker-image://busybox:latest
+        app.tags=ghcr.io/keepia/mail
         ${{ matrix.attr }}=x
     steps:
       - run: docker buildx bake -f ci-alt.hcl --print app

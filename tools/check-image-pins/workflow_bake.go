@@ -598,9 +598,11 @@ func checkBakeStep(line int, job string, i int, steps []any, step map[string]any
 // checkBakeSetEnv checks the BAKE_SET lines of a job: only cache-from and
 // cache-to, and a literal cache value only of type=gha (build mode checks
 // the resolved value, including what an expression expands to). In
-// release.yml the push jobs' output and attest lines are allowed too
-// (rule 7 checks them exactly); in every other workflow a release- cache
-// scope is reported: only release.yml writes and reads the release cache.
+// release.yml the push jobs' tags, output and attest lines are allowed
+// too (rule 7 checks them exactly, build mode their resolved values; #75
+// added tags); in every other workflow they are refused, and a release-
+// cache scope is reported: only release.yml writes and reads the release
+// cache.
 func checkBakeSetEnv(line int, job string, v any, release bool, add func(int, string, ...any)) {
 	if v == nil {
 		return
@@ -619,7 +621,7 @@ func checkBakeSetEnv(line int, job string, v any, release bool, add func(int, st
 		if !release && strings.Contains(l, "release-") {
 			add(line, "job %s: BAKE_SET line %q names a release- cache scope; only release.yml uses the release cache", job, l)
 		}
-		if release && (attr == "output" || attr == "attest") {
+		if release && (attr == "output" || attr == "attest" || attr == "tags") {
 			continue
 		}
 		if !bakeSetAttrs[attr] {

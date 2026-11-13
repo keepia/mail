@@ -175,7 +175,8 @@ package setting.
    issue: the version with its rule and the pull request table, every
    image with its tags and platforms, the upstream images by digest, the
    ten build rows with their verified images and tested configs, the ten
-   push-rehearsal rows ("pushed config = tested config"), the SBOM and
+   push-rehearsal rows (pushed by digest to the job's local registry;
+   "pushed config = tested config", read back from `localhost:5000`), the SBOM and
    source table (10 of 10), the bundle listing and the notes head. A dry
    run holds no write token and publishes nothing. The version must equal
    the milestone title (the version check above).
@@ -221,8 +222,9 @@ package setting.
      Fix the cause on `main` and start a new run.
    - `push` failed before its bake step: that row pushed nothing; "Re-run
      failed jobs".
-   - **`push` failed at `-verify-pushed` (the pushed config is not the
-     tested one).** BuildKit pushed during the bake step, so that row's
+   - **`push` failed at `-verify-pushed` with a mismatch (the pushed
+     config is not the tested one, or `the registry holds other content
+     than pushed.tar`).** BuildKit pushed during the bake step, so that row's
      **untested image is in GHCR by digest**, untagged. Nothing is tagged,
      attested or released. The coordinator stops and reports to the
      maintainer the digest the error names, and the digests of the rows
@@ -234,6 +236,14 @@ package setting.
      reproducible) and the release restarts with "Re-run all jobs": only
      `build` seeds the cache. No tag exists yet, so `version` gives the
      same version.
+   - **`push` failed at `-verify-pushed` with `the registry read failed`
+     only** (#75): every check of `pushed.tar` passed, so the row's image
+     is the tested one; only reading it back from GHCR failed (a network
+     error, a timeout, an answer buildx does not know). That is a read
+     error, not a mismatch: nothing is deleted for it. The coordinator
+     stops and reports the error text to the maintainer, who decides
+     between "Re-run failed jobs" (the rebuild from the cache pushes the
+     same digest again) and a reviewed fix.
    - `index` failed: fix the cause, then "Re-run failed jobs".
      `-publish-index` keeps an `X.Y.Z` that holds exactly the expected
      content and refuses any other; in that case the maintainer deletes

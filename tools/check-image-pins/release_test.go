@@ -104,6 +104,16 @@ const (
 	attestLine      = "${{ matrix.image }}.attest=type=provenance,mode=max\n"
 	pushedStep      = "      - id: pushed\n"
 	sha40           = "1111111111111111111111111111111111111111"
+
+	// #75: the tags lines of push and push-rehearsal, the rehearsal's
+	// registry service and its host-network builder.
+	pushTagsLine      = "${{ matrix.image }}.tags=ghcr.io/keepia/" + bakeRepoExpr + "\n"
+	rehearsalTagsLine = "${{ matrix.image }}.tags=localhost:5000/keepia/" + bakeRepoExpr + "\n"
+	registryPorts     = "        ports: [\"127.0.0.1:5000:5000\"]\n"
+	registryService   = "    services:\n      registry:\n        image: " + registryImage + "\n" + registryPorts
+	bridgeDriverOpts  = "          driver-opts: image=" + buildkitImage + "\n"
+	hostDriverOpts    = "          driver-opts: |\n            image=" + buildkitImage + "\n            network=host\n"
+	jobEnvStart       = "    env:\n      BAKE_TARGET:"
 )
 
 // releaseViewCheck is the release job's check that no release of the tag
@@ -227,7 +237,9 @@ var releaseCases = []struct {
 	{"fail-27-p9-login-action", inJob("push", pushedStep, "      - uses: docker/login-action@"+sha40+"\n"+pushedStep), nil, []string{"job push has 11 steps", "uses docker/login-action@" + sha40 + ", which is not one of this job's actions"}},
 	{"fail-27-p9-github-script", inJob("push", pushedStep, "      - uses: actions/github-script@"+sha40+"\n"+pushedStep), nil, []string{"job push has 11 steps", "uses actions/github-script@" + sha40 + ", which is not one of this job's actions"}},
 	{"fail-27-p9-twin-extra-step", runStepBefore("push-rehearsal", "echo rehearsal only"), nil, []string{"job push-rehearsal has 10 steps; the release policy has exactly 9", "(P4): \"echo rehearsal only\""}},
-	{"fail-27-p9-twin-push-true", inJob("push-rehearsal", pushOutputFalse, pushOutputTrue), nil, []string{"job push-rehearsal: BAKE_SET line \"${{ matrix.image }}.output=type=image,push-by-digest=true,name-canonical=true,push=true\" is not in the release policy", "job push-rehearsal: BAKE_SET lacks the line"}},
+	// #75: the twin pushes too (push=false never enters BuildKit's push
+	// path); this case was fail-27-p9-twin-push-true before.
+	{"fail-75-rehearsal-push-false", inJob("push-rehearsal", pushOutputTrue, pushOutputFalse), nil, []string{"job push-rehearsal: BAKE_SET line \"${{ matrix.image }}.output=type=image,push-by-digest=true,name-canonical=true,push=false\" is not in the release policy", "job push-rehearsal: BAKE_SET lacks the line \"${{ matrix.image }}.output=type=image,push-by-digest=true,name-canonical=true,push=true\""}},
 	{"fail-27-p9-unpinned-action", inJob("push", "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2", "actions/upload-artifact@v7"), nil, []string{"step 10 uses actions/upload-artifact@v7, which is not one of this job's actions (P9"}},
 	{"fail-27-p9-upload-pushed-tar", inJob("push", "          path: ${{ runner.temp }}/digest/\n", "          path: pushed.tar\n"), nil, []string{"job push: step 10 must be exactly uses actions/upload-artifact"}},
 	// B1 M3: SOURCE_DATE_EPOCH is required.
@@ -339,6 +351,43 @@ var releaseCases = []struct {
 		[]string{"other.yml:4: job x: step 1: docker/setup-buildx-action input endpoint is not allowed", "other.yml:4: job x: step 1: docker/setup-buildx-action input version is not allowed"}},
 	{"fail-27-4b-ci-buildx-floating", unchanged, map[string]string{".github/workflows/other.yml": "permissions:\n  contents: read\njobs:\n  x:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1\n"},
 		[]string{"other.yml:4: job x: step 1: docker/setup-buildx-action starts BuildKit from the floating moby/buildkit:buildx-stable-1"}},
+	// #75: push by digest under the bare repository, in both push jobs.
+	// The old texts of run 43401448419 are refused.
+	{"fail-75-rehearsal-old-text", inJob("push-rehearsal", rehearsalTagsLine+"        "+pushOutputTrue, pushOutputFalse), nil, []string{
+		"job push-rehearsal: BAKE_SET line \"${{ matrix.image }}.output=type=image,push-by-digest=true,name-canonical=true,push=false\" is not in the release policy",
+		"job push-rehearsal: BAKE_SET lacks the line \"" + strings.TrimSuffix(rehearsalTagsLine, "\n") + "\"",
+		"job push-rehearsal: BAKE_SET lacks the line \"" + strings.TrimSuffix(pushOutputTrue, "\n") + "\""}},
+	{"fail-75-push-old-text", inJob("push", pushTagsLine+"        ", ""), nil, []string{"job push: BAKE_SET lacks the line \"" + strings.TrimSuffix(pushTagsLine, "\n") + "\" (P3)"}},
+	{"fail-75-rehearsal-ghcr", inJob("push-rehearsal", "tags=localhost:5000/keepia/", "tags=ghcr.io/keepia/"), nil, []string{
+		"job push-rehearsal: BAKE_SET line \"" + strings.TrimSuffix(pushTagsLine, "\n") + "\" is not in the release policy",
+		"job push-rehearsal: BAKE_SET lacks the line \"" + strings.TrimSuffix(rehearsalTagsLine, "\n") + "\""}},
+	{"fail-75-push-localhost", inJob("push", "tags=ghcr.io/keepia/", "tags=localhost:5000/keepia/"), nil, []string{
+		"job push: BAKE_SET line \"" + strings.TrimSuffix(rehearsalTagsLine, "\n") + "\" is not in the release policy",
+		"job push: BAKE_SET lacks the line \"" + strings.TrimSuffix(pushTagsLine, "\n") + "\""}},
+	{"fail-75-tags-with-version", inJob("push", bakeRepoExpr+"\n", bakeRepoExpr+":${{ matrix.arch }}\n"), nil, []string{
+		"job push: BAKE_SET line \"${{ matrix.image }}.tags=ghcr.io/keepia/" + bakeRepoExpr + ":${{ matrix.arch }}\" is not in the release policy",
+		"job push: BAKE_SET lacks the line \"" + strings.TrimSuffix(pushTagsLine, "\n") + "\""}},
+	{"fail-75-tags-in-build", inJob("build", "scope=release-${{ matrix.image }}-${{ matrix.arch }}\n", "scope=release-${{ matrix.image }}-${{ matrix.arch }}\n        "+pushTagsLine), nil, []string{
+		"job build: BAKE_SET line \"" + strings.TrimSuffix(pushTagsLine, "\n") + "\" is not in the release policy"}},
+	// The registry service: only in push-rehearsal, and exactly.
+	{"fail-75-services-in-push", inJob("push", jobEnvStart, registryService+jobEnvStart), nil, []string{"job push: services is not allowed: only push-rehearsal has services: its registry"}},
+	{"fail-75-services-in-index", inJob("index", "    outputs:\n", registryService+"    outputs:\n"), nil, []string{"job index: services is not allowed: only push-rehearsal has services: its registry"}},
+	{"fail-75-services-missing", inJob("push-rehearsal", registryService, ""), nil, []string{"job push-rehearsal: services must be exactly map[registry:map[image:" + registryImage + " ports:[127.0.0.1:5000:5000]]]: the rehearsal pushes to its own registry"}},
+	{"fail-75-service-all-addresses", inJob("push-rehearsal", `"127.0.0.1:5000:5000"`, `"0.0.0.0:5000:5000"`), nil, []string{"job push-rehearsal: services must be exactly map[registry:map[image:" + registryImage + " ports:[127.0.0.1:5000:5000]]] (the pinned registry on loopback only, no env, options, credentials, volumes or other port; #75), got map[registry:map[image:" + registryImage + " ports:[0.0.0.0:5000:5000]]]"}},
+	{"fail-75-service-no-address", inJob("push-rehearsal", `"127.0.0.1:5000:5000"`, `"5000:5000"`), nil, []string{"job push-rehearsal: services must be exactly"}},
+	{"fail-75-service-second-port", inJob("push-rehearsal", `"127.0.0.1:5000:5000"]`, `"127.0.0.1:5000:5000", "127.0.0.1:5001:5001"]`), nil, []string{"job push-rehearsal: services must be exactly"}},
+	{"fail-75-service-env", inJob("push-rehearsal", registryPorts, registryPorts+"        env:\n          REGISTRY_HTTP_ADDR: 0.0.0.0:5000\n"), nil, []string{"job push-rehearsal: services must be exactly"}},
+	{"fail-75-service-options", inJob("push-rehearsal", registryPorts, registryPorts+"        options: --network host\n"), nil, []string{"job push-rehearsal: services must be exactly"}},
+	{"fail-75-service-credentials", inJob("push-rehearsal", registryPorts, registryPorts+"        credentials:\n          username: x\n          password: ${{ secrets.X }}\n"), nil, []string{"job push-rehearsal: services must be exactly"}},
+	{"fail-75-service-volumes", inJob("push-rehearsal", registryPorts, registryPorts+"        volumes:\n          - /var/run/docker.sock:/var/run/docker.sock\n"), nil, []string{"job push-rehearsal: services must be exactly"}},
+	{"fail-75-service-unpinned", inJob("push-rehearsal", "image: "+registryImage, "image: registry:3"), nil, []string{"job push-rehearsal: services must be exactly", `job push-rehearsal: service registry image "registry:3" is not pinned`}},
+	{"fail-75-service-other-image", inJob("push-rehearsal", "image: "+registryImage, "image: mirror.gcr.io/library/registry:3.1.1@sha256:"+strings.Repeat("a", 64)), nil, []string{"job push-rehearsal: services must be exactly"}},
+	{"fail-75-service-second", inJob("push-rehearsal", registryPorts, registryPorts+"      cache:\n        image: "+registryImage+"\n"), nil, []string{"job push-rehearsal: services must be exactly"}},
+	// network=host only in push-rehearsal's builder.
+	{"fail-75-host-network-push", inJob("push", bridgeDriverOpts, hostDriverOpts), nil, []string{"job push: step 3 must be exactly uses docker/setup-buildx-action@" + actionPins["docker/setup-buildx-action"]}},
+	{"fail-75-host-network-index", inJob("index", bridgeDriverOpts, hostDriverOpts), nil, []string{"job index: step 3 must be exactly uses docker/setup-buildx-action@"}},
+	{"fail-75-host-network-build", inJob("build", bridgeDriverOpts, hostDriverOpts), nil, []string{"job build: step 4 uses docker/setup-buildx-action with"}},
+	{"fail-75-rehearsal-bridge", inJob("push-rehearsal", "            network=host\n", ""), nil, []string{"job push-rehearsal: step 3 must be exactly uses docker/setup-buildx-action@"}},
 }
 
 // copyTree copies the fixture tree to dir.
@@ -458,13 +507,20 @@ func TestReleaseBuildMode(t *testing.T) {
 	repo := filepath.Join("testdata", "repos", "pass-27-bake")
 	t.Setenv("PLATFORM", "linux/amd64")
 	const (
-		from   = "postfix.cache-from=type=gha,scope=release-postfix-amd64"
-		img    = "postfix.output=type=image,push-by-digest=true,name-canonical=true,push=true"
-		oci    = "postfix.output=type=oci,dest=pushed.tar"
-		attest = "postfix.attest=type=provenance,mode=max"
-		to     = "postfix.cache-to=type=gha,mode=max,scope=release-postfix-amd64"
+		from      = "postfix.cache-from=type=gha,scope=release-postfix-amd64"
+		tags      = "postfix.tags=ghcr.io/keepia/mail-postfix"
+		localTags = "postfix.tags=localhost:5000/keepia/mail-postfix"
+		img       = "postfix.output=type=image,push-by-digest=true,name-canonical=true,push=true"
+		oci       = "postfix.output=type=oci,dest=pushed.tar"
+		attest    = "postfix.attest=type=provenance,mode=max"
+		to        = "postfix.cache-to=type=gha,mode=max,scope=release-postfix-amd64"
 	)
-	push := strings.Join([]string{from, img, oci, attest}, "\n")
+	push := strings.Join([]string{from, tags, img, oci, attest}, "\n")
+	rehearsal := strings.Replace(push, tags, localTags, 1)
+	// The texts of run 43401448419 (#75): no tags line; the rehearsal
+	// with push=false.
+	oldPush := strings.Join([]string{from, img, oci, attest}, "\n")
+	oldRehearsal := strings.Replace(oldPush, "push=true", "push=false", 1)
 	cases := []struct {
 		name, target, sets, version string
 		registry                    *string
@@ -473,7 +529,18 @@ func TestReleaseBuildMode(t *testing.T) {
 	}{
 		{"build row", "postfix", to, "0.1.0", nil, 0, "build postfix resolves to pinned images"},
 		{"push row", "postfix", push, "0.1.0", nil, 0, "build postfix resolves to pinned images"},
-		{"rehearsal row", "postfix", strings.Replace(push, "push=true", "push=false", 1), "0.1.0", nil, 0, "build postfix resolves"},
+		{"rehearsal row", "postfix", rehearsal, "0.1.0", nil, 0, "build postfix resolves to pinned images"},
+		// #75: the bare repository, push=true, push-by-digest=true.
+		{"old push text", "postfix", oldPush, "0.1.0", nil, 1, "a release push's tags must be exactly [ghcr.io/keepia/mail-postfix] or [localhost:5000/keepia/mail-postfix], the bare repository: BuildKit refuses push-by-digest of a tagged name (#75), got [ghcr.io/keepia/mail-postfix:0.1.0]"},
+		{"old rehearsal text", "postfix", oldRehearsal, "0.1.0", nil, 1, "(push=false never enters BuildKit's push path, #75)"},
+		{"rehearsal push=false", "postfix", strings.Replace(rehearsal, "push=true", "push=false", 1), "0.1.0", nil, 1, "a release build's output must be exactly [type=image,push-by-digest=true,name-canonical=true,push=true type=oci,dest=pushed.tar]"},
+		{"push-by-digest missing", "postfix", strings.Replace(push, "push-by-digest=true,", "", 1), "0.1.0", nil, 1, "needs push-by-digest=true: without it BuildKit pushes the bare repository as :latest"},
+		{"push-by-digest false", "postfix", strings.Replace(push, "push-by-digest=true", "push-by-digest=false", 1), "0.1.0", nil, 1, "needs push-by-digest=true: without it BuildKit pushes the bare repository as :latest"},
+		{"tags with the version", "postfix", strings.Replace(push, tags, tags+":0.1.0", 1), "0.1.0", nil, 1, "got [ghcr.io/keepia/mail-postfix:0.1.0]"},
+		{"tags of another registry", "postfix", strings.Replace(push, tags, "postfix.tags=ghcr.io/other/mail-postfix", 1), "0.1.0", nil, 1, "got [ghcr.io/other/mail-postfix]"},
+		{"tags of another image", "postfix", strings.Replace(push, tags, "postfix.tags=localhost:5000/keepia/mail-olefy", 1), "0.1.0", nil, 1, "got [localhost:5000/keepia/mail-olefy]"},
+		{"two names", "postfix", strings.Replace(push, tags, tags+","+strings.TrimPrefix(localTags, "postfix.tags="), 1), "0.1.0", nil, 1, "got [ghcr.io/keepia/mail-postfix,localhost:5000/keepia/mail-postfix]"},
+		{"build row with bare tags", "postfix", to + "\n" + tags, "0.1.0", nil, 1, "a release build's tags must be exactly [ghcr.io/keepia/mail-postfix:0.1.0] (the build job's tested image)"},
 		{"attest sbom", "postfix", strings.Replace(push, attest, "postfix.attest=type=sbom", 1), "0.1.0", nil, 1, "a release build's attest must be exactly"},
 		{"attest generator", "postfix", strings.Replace(push, attest, attest+",generator=docker.io/attacker/gen:latest", 1), "0.1.0", nil, 1, "a release build's attest must be exactly"},
 		{"foreign scope", "postfix", strings.Replace(push, "release-postfix-amd64", "release-olefy-amd64", 1), "0.1.0", nil, 1, "a release build's cache-from must be exactly"},
@@ -486,7 +553,8 @@ func TestReleaseBuildMode(t *testing.T) {
 		{"build with cache-from", "postfix", to + "\n" + strings.Replace(from, "cache-from", "cache-from", 1), "0.1.0", nil, 1, "a release build's cache-from must be exactly"},
 		// A target tag of another repository (the tags replace the
 		// output's name with push-by-digest; buildx build/opt.go).
-		{"foreign tag", "other", strings.ReplaceAll(push, "postfix", "other"), "0.1.0", nil, 1, "a release build's tags must be exactly [ghcr.io/keepia/mail-other:0.1.0]"},
+		{"foreign tag", "other", strings.ReplaceAll(oldPush, "postfix", "other"), "0.1.0", nil, 1, "a release push's tags must be exactly [ghcr.io/keepia/mail-other] or [localhost:5000/keepia/mail-other]"},
+		{"foreign tag, build row", "other", strings.ReplaceAll(to, "postfix", "other"), "0.1.0", nil, 1, "a release build's tags must be exactly [ghcr.io/keepia/mail-other:0.1.0]"},
 		// Outside a release build, output and attest stay forbidden.
 		{"output in CI", "postfix", "postfix.cache-from=type=gha,scope=postfix-amd64\n" + oci, "", nil, 1, `target "postfix": output is not allowed`},
 	}
