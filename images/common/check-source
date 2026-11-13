@@ -7,7 +7,8 @@
 # Usage: check-source ARCHIVE MANIFEST DIR
 # Unpacks ARCHIVE into DIR (without the archive's top directory) and fails
 # unless DIR holds exactly the pinned tree: the same files with the same
-# content and modes, the same directories, and nothing else.
+# content and modes, the same directories, and nothing else. Each operand
+# is a path, also one that starts with "-"; none may be empty.
 #
 # The archive is unpacked with umask 022 and --no-same-permissions, so no
 # entry lands with a setuid, setgid or sticky bit or writable by group or
@@ -37,11 +38,17 @@
 # RUN, so it is not in an image.
 set -eu
 
-if [ $# -ne 3 ]; then
+if [ $# -ne 3 ] || [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ]; then
 	echo "usage: check-source ARCHIVE MANIFEST DIR" >&2
 	exit 2
 fi
 archive=$1 manifest=$2 dir=$3
+# A relative operand gets "./", so one that starts with "-" is a path: not
+# an option to grep, mkdir or tar, not stdin to tar, and not "cd -" (#66).
+# An empty one is refused above: it would become the caller's directory.
+case $archive in /*) ;; *) archive=./$archive ;; esac
+case $manifest in /*) ;; *) manifest=./$manifest ;; esac
+case $dir in /*) ;; *) dir=./$dir ;; esac
 
 lists=$(mktemp -d)
 trap 'rm -rf "$lists"' EXIT
@@ -52,7 +59,7 @@ if [ ! -f "$manifest" ] || [ ! -r "$manifest" ]; then
 	echo "check-source: cannot read the manifest $manifest" >&2
 	exit 1
 fi
-grep -v '^#' "$manifest" >"$lists/want" || [ $? -eq 1 ]
+grep -v -e '^#' -- "$manifest" >"$lists/want" || [ $? -eq 1 ]
 
 umask 022
 mkdir -p "$dir"
