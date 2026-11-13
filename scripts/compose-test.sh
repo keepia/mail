@@ -1,20 +1,24 @@
 #!/bin/bash
 # Tests the Compose template "all roles on one server" (docker-compose.yml;
-# #5 plan, tests 6 and 8-13; #61, test 14). The CI compose job runs it
-# after loading the verified images; ./km migrate (test 7) runs in the
-# job's next steps.
+# #5 plan, tests 6 and 8-13; #61, test 14; #66, the checks marked so
+# below). The CI compose job runs it after loading the verified images;
+# ./km migrate (test 7) runs in the job's next steps.
 #
 # It starts every service with `docker compose up -d --wait --no-build
 # --pull never` (nothing is built or pulled: the images must already be in
-# the local store) and leaves them running; the caller stops them
-# (`docker compose down -v`). Then:
+# the local store) and leaves them running, except edge-postfix, which it
+# stops at its end (test 14); the caller removes them (`docker compose
+# down -v`). Then:
 #
 # 14  wildcard edge addresses (first, before the template starts): with
 #     EDGE_IPV4=0.0.0.0, and then EDGE_IPV6=::, starting edge-postfix
 #     fails, the guard edge-addresses names the variable, and edge-postfix
 #     never runs (#61). A `docker start` of the edge-postfix left behind
 #     (the guard's bypass) must exit 1 on edge-postfix's own check, before
-#     Postfix runs. The partial start is removed again.
+#     Postfix runs. The partial start is removed again. At the very end, a
+#     stop of the running edge-postfix must exit 0 and not be OOM-killed:
+#     its check must exec Postfix's launcher, so the stop signal reaches
+#     it (#66).
 #  6  containers and health: the project's containers are exactly the 14
 #     expected services, one each, plus the one-shot guard edge-addresses,
 #     which exited 0; every one of the 14 has a healthcheck and is
@@ -33,13 +37,17 @@
 #     reach rspamd, clamd, olefy or memcached, which a container on the
 #     same network can (#61); every container is on exactly its networks,
 #     with exactly its fixed addresses; only edge-postfix publishes, port
-#     25 on EDGE_IPV4 and EDGE_IPV6.
+#     25 on EDGE_IPV4 and EDGE_IPV6. The line in architecture section 7
+#     that lists the internal subnets, read from the document and run with
+#     no active profile, lists exactly the subnets this test checks (#66).
 # 10  privileges: CapDrop ALL, exactly the planned CapAdd (Postfix five,
 #     Dovecot SYS_CHROOT, all others none), no-new-privileges, not
 #     privileged, no host network, no Docker socket, the template's
 #     pids_limit; every process runs as a non-zero uid, except Postfix's
 #     master and its launchers. The same for edge-addresses, which also
-#     has no network and a read-only root.
+#     has no network and a read-only root. edge-postfix's entrypoint is
+#     its image's with the edge address check put in after `tini --`, and
+#     its command is the image's (#66).
 # 11  volumes: a user line in store-users and a message over LMTP to
 #     store-dovecot land as a file in the named volume store-mail;
 #     edge-vmail stays empty; no container has an anonymous volume.
@@ -505,6 +513,35 @@ for n in $(jq -r '.networks | keys[]' <<<"$config"); do
 	$ok && pass "test 9: network $n internal=true, gateway mode isolated, no host address in it"
 done
 
+# The operator's line in architecture section 7 that lists the internal
+# subnets (the host must hold no address in them), taken from the document
+# and run as it stands, so the document cannot drift from what is tested.
+# It runs with no active profile, as for an operator without .env or
+# COMPOSE_PROFILES: it must still list exactly the subnets checked above
+# (#66). The CI checkout has no .env; a local .env sets the profiles
+# again, so only a run without one proves that. Only the form "docker
+# compose <words> config --format json | jq -r '<filter>'" is run;
+# anything else fails here.
+arch=docs/development/architecture.md
+doc_re=$'^ *`(docker compose [-a-zA-Z0-9 \'*_./=]*config --format json [|] jq -r \'[^\']*\')`[.]?$'
+doc_line=$(awk '/^## 7\. /{ s = 1; next } /^## /{ s = 0 } s && /config --format json \| jq/' "$arch")
+want_subnets=$(jq -r '.networks | to_entries[] | select(.key != "edge-public") | .value.ipam.config[].subnet' <<<"$config" | sort | xargs)
+if [[ $doc_line == *$'\n'* ]] || ! [[ $doc_line =~ $doc_re ]]; then
+	fail "test 9: $arch section 7 has no single subnet line of the form \`docker compose ... config --format json | jq -r '...'\`: [$doc_line]"
+else
+	doc_cmd=${BASH_REMATCH[1]}
+	if ! got=$(env -u COMPOSE_PROFILES bash -o pipefail -c "$doc_cmd"); then
+		fail "test 9: the section 7 line failed with no active profile: $doc_cmd"
+	else
+		got=$(sort <<<"$got" | xargs)
+		if [ -n "$want_subnets" ] && [ "$got" = "$want_subnets" ]; then
+			pass "test 9: the section 7 line lists the $(wc -w <<<"$got") internal subnets with no active profile: $doc_cmd"
+		else
+			fail "test 9: the section 7 line lists [$got] with no active profile, want [$want_subnets]: $doc_cmd"
+		fi
+	fi
+fi
+
 # The host cannot reach the services without authentication on the
 # internal networks (the bridge has no address there), while a container
 # on the same network can (#61).
@@ -650,6 +687,23 @@ for s in "${oneshot_services[@]}"; do
 		fail "test 10: $s has [$got], want [$want]"
 	fi
 done
+# edge-postfix runs its image's entrypoint and command, with the edge
+# address check put in after `tini --` (#61). The template copies both from
+# images/postfix/Dockerfile, so a change on one side must reach the other
+# (#66): compared with the image this container runs, by its ID.
+c=$(container edge-postfix)
+if [ -n "$c" ]; then
+	got=$(docker inspect "$c" | jq -c '.[0].Config | {Entrypoint, Cmd}')
+	img=$(docker image inspect "$(docker inspect -f '{{.Image}}' "$c")" | jq -c '.[0].Config | {Entrypoint, Cmd}')
+	want=$(jq -c 'if .Entrypoint[0:2] == ["/usr/bin/tini", "--"]
+		then .Entrypoint |= (.[0:2] + ["sh", "/etc/keepia/check-edge-addresses.sh"] + .[2:])
+		else .Entrypoint = "the image entrypoint \(.Entrypoint) does not start with tini --" end' <<<"$img")
+	if [ "$got" = "$want" ]; then
+		pass "test 10: edge-postfix runs its image's entrypoint and command with the edge address check after tini: $got"
+	else
+		fail "test 10: edge-postfix runs $got, want $want (its image has $img)"
+	fi
+fi
 
 # ---- test 11: volumes ---------------------------------------------------------
 
@@ -825,6 +879,31 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
 		echo "|---|---|---|---:|---:|---:|---:|"
 		printf '%s\n' "$table" | sed 's/|/ | /g; s/^/| /; s/$/ |/'
 	} >>"$GITHUB_STEP_SUMMARY"
+fi
+
+# ---- test 14: a stop of edge-postfix ------------------------------------------
+
+# Last, because it stops a service (test 7, which the CI job runs next,
+# needs only postgres and keepia). A stop must end edge-postfix with status
+# 0, not by the kill after the timeout: its entrypoint puts the edge
+# address check between tini and Postfix's launcher, and the check must
+# exec the launcher, or the stop signal ends the check's sh instead (#66).
+# The job's own `docker compose down` removes the container with its
+# status, so it is read here.
+echo "---- test 14: a stop of edge-postfix exits 0"
+c=$(container edge-postfix)
+if [ -z "$c" ]; then
+	fail "test 14: edge-postfix has no container to stop"
+elif ! out=$(timeout 60 docker compose stop --timeout 30 edge-postfix 2>&1); then
+	fail "test 14: docker compose stop edge-postfix failed: $(tr '\n' ' ' <<<"$out" | tail -c 300)"
+else
+	st=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}' "$c")
+	if [ "$st" = "exited 0 false" ]; then
+		pass "test 14: a stop of edge-postfix exits 0 (status, exit code, OOM-killed: $st)"
+	else
+		fail "test 14: after a stop, edge-postfix is [$st] (status, exit code, OOM-killed), want [exited 0 false]"
+		docker logs --tail 20 "$c" >&2 || true
+	fi
 fi
 
 if [ "$failed" != 0 ]; then
