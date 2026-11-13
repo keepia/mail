@@ -11,6 +11,8 @@
 # or CI's checked build. If one of them is not in the local Docker store,
 # km stops before starting anything and names `make images`. Docker
 # Compose's progress output is hidden. The exit status is the command's.
+# CI's test 7 runs km under `sh -x` and logs the trace: never expand a
+# secret in a shell word here.
 set -eu
 
 cd "$(dirname "$0")"
