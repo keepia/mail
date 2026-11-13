@@ -235,6 +235,12 @@ func TestPublishIndex(t *testing.T) {
 			s.arm.Version = "0.0.9"
 			writeRecords(t, s.dir, s.amd, s.arm)
 		}, "not for its own name at 0.1.0"},
+		// #75 (D2): a push-rehearsal record names the repository it was
+		// pushed to, so it never feeds -publish-index.
+		{"a rehearsal record", func(t *testing.T, s *setup) {
+			s.arm.Repository = "localhost:5000/keepia/mail-postfix"
+			writeRecords(t, s.dir, s.amd, s.arm)
+		}, "postfix-arm64.json is for postfix localhost:5000/keepia/mail-postfix linux/arm64 at 0.1.0, not for its own name at 0.1.0"},
 		{"registry content is not its digest", func(t *testing.T, s *setup) {
 			s.reg.refs[testRepo+"@"+s.amd.Index] = []byte(`{"other":1}`)
 			writeRecords(t, s.dir, s.amd, s.arm)

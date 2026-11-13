@@ -35,14 +35,27 @@ import (
 //     O_NOFOLLOW (and O_NONBLOCK, so a FIFO cannot block), then fstat on
 //     the descriptor, which must be a regular file and the file Lstat saw.
 //
+// The push step's metadata names exactly <R>/<repo>:latest (#75, D5):
+// the target's tags are the bare repository and buildx reports the OCI
+// output's name normalised; R is ghcr.io/keepia (push) or
+// localhost:5000/keepia (push-rehearsal's own registry). Any other name
+// fails closed, so a buildx change shows in the next dry run. The build
+// row's metadata still names ghcr.io/keepia/<repo>:VERSION.
+//
 // It checks that every blob of the tar has its digest; that index.json
 // names exactly one manifest, the metadata's containerimage.digest; that
 // this index holds exactly one image manifest, for linux/<arch>, plus only
 // attestation manifests that reference it; and that its config is the
 // tested config (also for os and architecture). A cache hit proves
-// nothing (review M4): only this comparison counts. On success it writes
-// $RUNNER_TEMP/digest/<target>-<arch>.json for -publish-index and the
-// step outputs index and manifest.
+// nothing (review M4): only this comparison counts. Then, and only then,
+// it reads <R>/<repo>@<index> back from the registry it was pushed to
+// (#75, D3; checkRowInRegistry, the row check -publish-index runs): the
+// same bytes as the tar's index, the same platform manifest, the tested
+// config. A failed read is reported apart from other content (D-e). On
+// success it writes $RUNNER_TEMP/digest/<target>-<arch>.json for
+// -publish-index, whose repository is R/<repo> (so a rehearsal record
+// never feeds -publish-index or attest, D2), and the step outputs index
+// and manifest.
 
 // pushedRecord is a push row's result: the digest file -publish-index
 // reads.
@@ -61,9 +74,31 @@ type pushedInput struct {
 	meta, tested              []byte
 	target, platform, version string
 	tar                       string
+	// reg reads the pushed row back (the docker CLI in the job; a fake
+	// in tests).
+	reg registry
 	// afterLstat runs between the Lstat and the open of the tar (tests
 	// swap the file there).
 	afterLstat func()
+}
+
+// registryReadPrefix starts the finding of a failed registry read (D-e),
+// so runVerifyPushed and the runbook tell it apart from a mismatch.
+const registryReadPrefix = "the registry read failed"
+
+// pushedRepo returns the repository a push step's metadata names: exactly
+// one name, <R>/<repo>:latest with R one of the two push registries.
+func pushedRepo(b builtImage, target string) (string, string) {
+	names := b.names()
+	repos := pushRepos(target)
+	if len(names) == 1 {
+		for _, r := range repos {
+			if names[0] == r+":latest" {
+				return r, ""
+			}
+		}
+	}
+	return "", fmt.Sprintf("the push step's metadata names the images %v, want exactly one of %s:latest or %s:latest (the bare repository the row was pushed to)", names, repos[0], repos[1])
 }
 
 // ociDescriptor is an entry of an OCI index.
@@ -270,8 +305,7 @@ func verifyPushed(in pushedInput) (pushedRecord, []string) {
 	if !semverRE.MatchString(in.version) {
 		return rec, []string{fmt.Sprintf("VERSION %q is not X.Y.Z", in.version)}
 	}
-	repo := imageRepo(in.target)
-	wantName := repo + ":" + in.version
+	wantTested := imageRepo(in.target) + ":" + in.version
 	pushed, f := targetImage(in.meta, in.target, "push step's metadata (BAKE_METADATA)")
 	if f != "" {
 		return rec, []string{f}
@@ -287,18 +321,17 @@ func verifyPushed(in pushedInput) (pushedRecord, []string) {
 	if !imageID.MatchString(pushed.Digest) {
 		findings = append(findings, fmt.Sprintf("the push step's metadata has no containerimage.digest (got %q)", pushed.Digest))
 	}
-	for _, b := range []struct {
-		what string
-		img  builtImage
-	}{{"push step's", pushed}, {"build row's", tested}} {
-		names := b.img.names()
-		if len(names) == 0 {
-			findings = append(findings, fmt.Sprintf("the %s metadata names no image", b.what))
-		}
-		for _, n := range names {
-			if n != wantName {
-				findings = append(findings, fmt.Sprintf("the %s metadata names the image %s, want %s", b.what, n, wantName))
-			}
+	repo, f := pushedRepo(pushed, in.target)
+	if f != "" {
+		findings = append(findings, f)
+	}
+	names := tested.names()
+	if len(names) == 0 {
+		findings = append(findings, "the build row's metadata names no image")
+	}
+	for _, n := range names {
+		if n != wantTested {
+			findings = append(findings, fmt.Sprintf("the build row's metadata names the image %s, want %s", n, wantTested))
 		}
 	}
 	if pushed.ConfigDigest != "" && pushed.ConfigDigest != tested.ConfigDigest {
@@ -356,6 +389,22 @@ func verifyPushed(in pushedInput) (pushedRecord, []string) {
 	if len(findings) > 0 {
 		return rec, findings
 	}
+	// The registry read, only once every check of the tar has passed.
+	if in.reg == nil {
+		return rec, []string{"no registry to read the pushed row back from"}
+	}
+	got, err := checkRowInRegistry(in.reg, repo, arch, pushed.Digest, manifestDigest, tested.ConfigDigest)
+	var readErr *registryReadError
+	if errors.As(err, &readErr) {
+		return rec, []string{fmt.Sprintf("%s: %v. pushed.tar passed every check (it is the tested image), so this is a read error, not a content mismatch: the coordinator stops and reports, and no package version is deleted for it (runbook)", registryReadPrefix, err)}
+	}
+	if err == nil && !bytes.Equal(got, raw) {
+		err = errors.New("its index bytes differ from pushed.tar's")
+	}
+	if err != nil {
+		return rec, []string{fmt.Sprintf("the registry holds other content than pushed.tar for %s@%s: %v; in a real run an image that is not the tested one may be in GHCR by digest, untagged: the maintainer deletes it (runbook)", repo, pushed.Digest, err)}
+	}
+	// The record names the repository the row was pushed to (D2).
 	return pushedRecord{
 		Target: in.target, Platform: in.platform, Repository: repo, Version: in.version,
 		Index: pushed.Digest, Manifest: manifestDigest, Config: m.Config.Digest,
@@ -380,16 +429,27 @@ func runVerifyPushed(stdout io.Writer) int {
 		r.add("tested metadata", 0, err.Error())
 		return 1
 	}
+	reg, err := pushedRegistry()
+	if err != nil {
+		r.add("verify-pushed", 0, err.Error())
+		return 1
+	}
 	in := pushedInput{
 		meta: []byte(os.Getenv("BAKE_METADATA")), tested: tested,
 		target: os.Getenv("BAKE_TARGET"), platform: os.Getenv("PLATFORM"), version: os.Getenv("VERSION"),
-		tar: pushedTar,
+		tar: pushedTar, reg: reg,
 	}
 	rec, findings := verifyPushed(in)
+	readFailed := len(findings) > 0
 	for _, f := range findings {
 		r.add(pushedTar, 0, f)
+		readFailed = readFailed && strings.HasPrefix(f, registryReadPrefix)
 	}
-	if r.bad > 0 {
+	switch {
+	case readFailed:
+		fmt.Fprintf(stdout, "check-image-pins: %d finding(s): the registry read failed after every check of pushed.tar passed; a read error, not a mismatch.\n", r.bad)
+		return 1
+	case r.bad > 0:
 		fmt.Fprintf(stdout, "check-image-pins: %d finding(s): the pushed image is not the tested image.\n", r.bad)
 		return 1
 	}
@@ -405,9 +465,15 @@ func runVerifyPushed(stdout io.Writer) int {
 			}
 		}
 	}
-	fmt.Fprintf(stdout, "check-image-pins: pushed config = tested config (%s) for %s %s: index %s, manifest %s.\n", rec.Config, rec.Repository, rec.Platform, rec.Index, rec.Manifest)
+	fmt.Fprintf(stdout, "check-image-pins: pushed config = tested config (%s) for %s %s: index %s, manifest %s; read back from the registry %s.\n",
+		rec.Config, rec.Repository, rec.Platform, rec.Index, rec.Manifest, strings.SplitN(rec.Repository, "/", 2)[0])
 	return 0
 }
+
+// pushedRegistry is the registry -verify-pushed reads the row back from:
+// the docker CLI (anonymous on localhost in push-rehearsal, with the
+// job's GHCR login in push); tests replace it.
+var pushedRegistry = func() (registry, error) { return newDockerRegistry() }
 
 // writePushedRecord writes a push row's digest file into dir.
 func writePushedRecord(dir string, rec pushedRecord) error {

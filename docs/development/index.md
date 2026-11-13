@@ -736,15 +736,26 @@ lives, also under a skipped path.
      Nothing is resolved, so these jobs run no repository script, make
      target or other `go run`, define no shell function and run no
      `eval`, `sh -c`, `source` or `xargs` (the findings name the form).
-     `push-rehearsal` is `push` without the login and with `push=false`.
+     `push-rehearsal` is `push` without the login, with the local registry
+     service and a host-network builder (#75): it pushes by digest too,
+     to `localhost:5000/keepia/…` on the runner, so BuildKit's push path
+     runs in every dry run. Its setup-buildx step adds `network=host` to
+     `driver-opts`; every other job keeps CI's bridge builder.
      The bake jobs' `BAKE_SET` holds exactly the release cache line, and in
-     the push jobs the two outputs (`type=image,push-by-digest=true,
-     name-canonical=true,push=true|false` and `type=oci,dest=pushed.tar`)
-     and `attest=type=provenance,mode=max`; build mode checks what they
-     resolve to, the target's tags `ghcr.io/keepia/mail[-<name>]:VERSION`
-     and `VERSION` as X.Y.Z, and refuses a `pushed.tar` that exists in any
-     form. A script allowlisted for these jobs (none) may have no
-     forwarding function;
+     the push jobs the target's tags (the bare repository:
+     `ghcr.io/keepia/mail[-<name>]` in `push`,
+     `localhost:5000/keepia/mail[-<name>]` in `push-rehearsal`), the two
+     outputs (`type=image,push-by-digest=true,name-canonical=true,push=true`
+     and `type=oci,dest=pushed.tar`) and `attest=type=provenance,mode=max`;
+     build mode checks what they resolve to (the build job's tags
+     `ghcr.io/keepia/mail[-<name>]:VERSION`, a push job's tags one of the
+     two bare repositories, `push=true` and `push-by-digest=true`), and
+     `VERSION` as X.Y.Z, and refuses a `pushed.tar` that exists in any
+     form. The tags are bare because BuildKit refuses push-by-digest of a
+     tagged name (`can't push tagged ref … by digest`, run 43401448419).
+     A bare name is safe only with `push-by-digest=true`: without it,
+     BuildKit pushes the name as `:latest`. A script allowlisted for these
+     jobs (none) may have no forwarding function;
    - **`attest`, `attest-assets` and `release` have exact steps too**
      (#27 part 4b, #71 review B N2), the same way: the `dist` and `digest-*`
      artifacts, `sha256sum -c SHA256SUMS` in `dist`, `attest`'s subjects
@@ -756,8 +767,11 @@ lives, also under a skipped path.
      `working-directory` are part of the step. So these jobs run no
      third-party action, no `curl | sh`, no `GITHUB_ENV` write and nothing
      from the bundle;
-   - **P7:** no `continue-on-error`, job `container`, `services`,
-     `concurrency`, `defaults` or `env` (the bake jobs' `BAKE_TARGET`,
+   - **P7:** no `continue-on-error`, job `container`, `services` (except
+     `push-rehearsal`'s, exactly the pinned `registry` image on
+     `127.0.0.1:5000` with no env, options, credentials, volumes or other
+     port; the maintainer's OK 6850628924), `concurrency`, `defaults` or
+     `env` (the bake jobs' `BAKE_TARGET`,
      `PLATFORM`, `VERSION` and `BAKE_SET` aside), no workflow `env`, and
      `release`, `attest` and `attest-assets` run no repository code (no
      checkout, local action, `shell:`, code path or runtime; step env only
@@ -793,15 +807,17 @@ lives, also under a skipped path.
      `create`, `container run`) is reported unless the step is exactly the
      build row's package-list line of the verified image; and every
      `docker/setup-buildx-action` has exactly CI's mirror and the pinned
-     BuildKit image (A N2, N3; B D1).
+     BuildKit image (A N2, N3; B D1), plus `network=host` in
+     `push-rehearsal` only.
 
    With the cache off, the tool's modules come fresh from the module proxy
    and are checked against `go.sum`; nothing earlier in an exact job runs
    code that could change them, so no `go mod verify` line is needed.
 
-   In other workflows a `release-` cache scope in `BAKE_SET` is reported.
+   In other workflows a `release-` cache scope in `BAKE_SET` is reported,
+   and so is a `tags`, `output` or `attest` line.
    Its tests are `TestReleaseWorkflow` (the repository's own `release.yml`
-   is clean), `TestReleaseSurface` (the `fail-27-*` cases, each one change
+   is clean), `TestReleaseSurface` (the `fail-27-*` and `fail-75-*` cases, each one change
    to the repository's `release.yml` in the tree
    `testdata/repos/pass-27-release`), `TestReleaseBuildMode` and
    `TestBuildRefusesPushedTar`. `make image-pins` checks the real
@@ -815,8 +831,21 @@ fixed lines above, and take no argument and no tag name:
   index holds one `linux/<arch>` image manifest and only attestations of
   it; its config is the tested config, the build row's
   `containerimage.config.digest` (`$RUNNER_TEMP/tested/metadata.json`;
-  `-verify-built` requires it and `-save` holds exactly it). It writes
-  `$RUNNER_TEMP/digest/<target>-<arch>.json`.
+  `-verify-built` requires it and `-save` holds exactly it). The push
+  step's metadata must name exactly `<R>/mail[-<name>]:latest` (buildx's
+  name for the bare repository), with `R` `ghcr.io/keepia` or
+  `localhost:5000/keepia`. Then, once the tar has passed, it reads the row
+  back from that registry, the same check `-publish-index` runs per row:
+  the index has its digest and the tar's bytes, holds the tar's
+  `linux/<arch>` manifest, and its config is the tested config (anonymous
+  on `localhost` in `push-rehearsal`, with the login in `push`). A failed
+  read gets its own finding, `the registry read failed: …`, apart from a
+  mismatch (`the registry holds other content than pushed.tar …`); the
+  runbook treats the two differently (process.md, "Releases", step 5).
+  The success line names the registry. It writes
+  `$RUNNER_TEMP/digest/<target>-<arch>.json`, whose `repository` is where
+  the row was pushed: a rehearsal's `localhost:5000/keepia/…` record is
+  refused by `-publish-index` and by `attest`'s subjects step.
 - `-publish-index` (`index`): checks every row's index and config in
   GHCR, then creates `<image>:X.Y.Z` with the version annotation; an
   existing `X.Y.Z` of the same content is a no-op and any other is never
@@ -904,8 +933,8 @@ publishes a release from `main`, started by hand; the runbook is in
 |---|---|---|
 | `version` | both | started on main; the pull requests since the last release, the version (`scripts/version-policy.sh LAST INPUT < prs.tsv`); the tag and release do not exist yet; the images and their tags |
 | `build` | both | each image × amd64/arm64, cold: CI's build row (check, bake, verify, image tests, the saved and checked tar), `packages.txt`, syft v1.57.1 on the tar, `tools/release-sources row`; writes the release cache (`mode=max`) |
-| `push-rehearsal` | dry run | `push` without the login and with `push=false` |
-| `push` | real run | rebuilds from the release cache and pushes by digest; `-verify-pushed`: the pushed config is the tested config |
+| `push-rehearsal` | dry run | `push` without the login: pushes by digest to its own `registry` service on `127.0.0.1:5000` (pinned, loopback only, host-network builder), so BuildKit's push path runs; nothing leaves the runner |
+| `push` | real run | rebuilds from the release cache and pushes by digest under the bare repository `ghcr.io/keepia/mail[-<name>]` (no tag); `-verify-pushed`: the pushed config is the tested config, read back from GHCR |
 | `index` | real run | `-publish-index`: `ghcr.io/keepia/mail[-<name>]:X.Y.Z` with both platforms |
 | `bundle` | both | `tools/release-sources release` (10 SBOMs, `sources.json`, `SOURCES.md`), the bundle, the notes head `notes.md`, and `SHA256SUMS`, which names exactly the other files; a dry run pins the placeholder digest `sha256:0…0`, a real run asserts that none is left |
 | `attest` | real run | provenance of each image index, the SBOM of each platform manifest (`actions/attest`, GitHub's attestation API) |
@@ -917,6 +946,14 @@ publishes a release from `main`, started by hand; the runbook is in
 follows every release, and **before 1.0 it follows every 0.x release, so
 it can include breaking changes**. Pin `X.Y.Z` or a digest; the bundle
 always pins every image by digest. No other tag exists.
+
+**The provenance subject names `@latest`.** The push rows push by digest
+under the bare repository (BuildKit refuses push-by-digest of a tagged
+name, #75), so BuildKit's own provenance attestation of each platform
+image (`attest=type=provenance,mode=max`) names its subject `pkg:docker/ghcr.io/keepia/mail[-<name>]@latest?platform=linux%2F<arch>`:
+BuildKit's name for a repository without a tag. It moves no tag (the
+push writes none) and the subject's digest is the binding part; a reader
+of an old release's provenance sees `latest` there, not `X.Y.Z`.
 
 **Verify** an image's provenance and a platform image's SBOM:
 
@@ -938,7 +975,10 @@ pull request bumps `actionPins` (one line per action). The BuildKit image
 of every builder (`driver-opts: image=moby/buildkit:vX.Y.Z@sha256:…` in
 `ci.yml` and `release.yml`, `buildkitImage` in the tool) is not seen by
 Dependabot: bump the three together by hand, to the release that
-`moby/buildkit:buildx-stable-1` names.
+`moby/buildkit:buildx-stable-1` names. The same holds for
+`push-rehearsal`'s registry service
+(`mirror.gcr.io/library/registry:X.Y.Z@sha256:…` in `release.yml`,
+`registryImage` in the tool): bump both together by hand.
 
 **The release cache.** `build` writes `release-<image>-<arch>` scopes with
 `mode=max` to the 10 GB Actions cache; `push` and `push-rehearsal` read

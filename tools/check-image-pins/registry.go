@@ -33,7 +33,10 @@ import (
 //     from -verify-pushed) names sha256 digests, and in the registry
 //     <name>@<index> is an index with exactly one image manifest for
 //     linux/<arch> (plus attestation manifests that reference it) whose
-//     config is the tested config;
+//     config is the tested config (checkRowInRegistry, which
+//     -verify-pushed runs on the same row right after its push, #75). A
+//     digest file names the repository it was pushed to, so a
+//     push-rehearsal record (localhost:5000/keepia/…) is refused here;
 //  3. X.Y.Z is immutable: if the tag exists and holds exactly the two
 //     expected image manifests (and attestations that reference them) and
 //     the version annotation, it is a no-op; any other content is refused
@@ -160,6 +163,59 @@ func rawDigest(reg registry, ref, want string) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("%s has the content of %s", ref, got)
 	}
 	return raw, got, nil
+}
+
+// registryReadError is a registry call that failed, as opposed to a
+// registry that answered with other content (#75, D-e): -verify-pushed
+// reports the two apart, because only a content mismatch means that an
+// untested image may be in GHCR.
+type registryReadError struct{ err error }
+
+func (e *registryReadError) Error() string { return e.err.Error() }
+func (e *registryReadError) Unwrap() error { return e.err }
+
+// checkRowInRegistry is the registry check of one pushed row, which
+// -verify-pushed (push, push-rehearsal) and -publish-index (index) run
+// alike: repo@index has the index digest and is an index with exactly one
+// image manifest, for linux/<arch>, the given one (plus attestation
+// manifests that reference it), and that manifest's config is the tested
+// config. It returns the index's bytes. A failed read is a
+// *registryReadError; any other error means the registry holds other
+// content.
+func checkRowInRegistry(reg registry, repo, arch, index, manifest, config string) ([]byte, error) {
+	read := func(ref, want string) ([]byte, error) {
+		raw, err := reg.raw(ref)
+		if err != nil {
+			return nil, &registryReadError{fmt.Errorf("%s: %w", ref, err)}
+		}
+		if got := sha256Of(raw); got != want {
+			return nil, fmt.Errorf("%s has the content of %s", ref, got)
+		}
+		return raw, nil
+	}
+	raw, err := read(repo+"@"+index, index)
+	if err != nil {
+		return nil, err
+	}
+	m, err := platformImage(raw, arch)
+	if err == nil && m != manifest {
+		err = fmt.Errorf("its image manifest is %s", m)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s@%s: %w (want the image manifest %s)", repo, index, err, manifest)
+	}
+	mraw, err := read(repo+"@"+m, m)
+	if err != nil {
+		return nil, err
+	}
+	var man ociManifest
+	if err := json.Unmarshal(mraw, &man); err != nil {
+		return nil, fmt.Errorf("%s@%s does not parse, want the tested config %s: %w", repo, m, config, err)
+	}
+	if man.Config.Digest != config {
+		return nil, fmt.Errorf("%s@%s: its config is %q, want the tested config %s", repo, m, man.Config.Digest, config)
+	}
+	return raw, nil
 }
 
 // releaseIndex checks a published X.Y.Z or latest index: exactly two image
@@ -328,26 +384,11 @@ func publishIndex(version, digestDir string, deps publishDeps) (map[string]strin
 		var sources []string
 		for _, arch := range releaseArchList {
 			rec := recs[t][arch]
-			raw, _, err := rawDigest(deps.reg, repo+"@"+rec.Index, rec.Index)
-			if err != nil {
+			if _, err := checkRowInRegistry(deps.reg, repo, arch, rec.Index, rec.Manifest, rec.Config); err != nil {
 				findings = append(findings, fmt.Sprintf("%s linux/%s: %v", repo, arch, err))
 				continue
 			}
-			m, err := platformImage(raw, arch)
-			if err != nil || m != rec.Manifest {
-				findings = append(findings, fmt.Sprintf("%s@%s: %v (want the image manifest %s)", repo, rec.Index, err, rec.Manifest))
-				continue
-			}
-			mraw, _, err := rawDigest(deps.reg, repo+"@"+m, m)
-			var man ociManifest
-			if err == nil {
-				err = json.Unmarshal(mraw, &man)
-			}
-			if err != nil || man.Config.Digest != rec.Config {
-				findings = append(findings, fmt.Sprintf("%s@%s: its config is %q, want the tested config %s (%v)", repo, m, man.Config.Digest, rec.Config, err))
-				continue
-			}
-			p.manifest[arch] = m
+			p.manifest[arch] = rec.Manifest
 			sources = append(sources, repo+"@"+rec.Index)
 		}
 		if len(p.manifest) != len(releaseArchList) {

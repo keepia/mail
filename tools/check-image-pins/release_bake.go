@@ -18,17 +18,36 @@ import (
 //     attest;
 //   - the push and push-rehearsal jobs: cache-from type=gha with that
 //     scope, no cache-to, exactly the two outputs
-//     type=image,push-by-digest=true,name-canonical=true,push=true|false
-//     and type=oci,dest=pushed.tar, and exactly the attestation
+//     type=image,push-by-digest=true,name-canonical=true,push=true and
+//     type=oci,dest=pushed.tar, and exactly the attestation
 //     type=provenance,mode=max (BuildKit's built-in generator; no
-//     generator image).
+//     generator image). Both push (#75): push=false never enters
+//     BuildKit's push path, so a dry run with it cannot show a push
+//     BuildKit refuses.
 //
-// In both, VERSION (the job env) is X.Y.Z, REGISTRY is not set, and the
-// target's tags are exactly ghcr.io/keepia/mail[-<target>]:<VERSION>:
-// with push-by-digest the tags name the repository the image goes to
-// (buildx replaces the output's name with them, so the output has no
-// name=). The workflow side (release.go) holds each job to its exact
-// BAKE_SET lines; this side checks what they resolve to.
+// In both, VERSION (the job env) is X.Y.Z and REGISTRY is not set. The
+// build job's tags are exactly ghcr.io/keepia/mail[-<target>]:<VERSION>.
+// The push jobs' tags are exactly the bare repository,
+// ghcr.io/keepia/mail[-<target>] (push) or
+// localhost:5000/keepia/mail[-<target>] (push-rehearsal's own registry):
+// buildx gives both outputs the tags as their name (so the output has no
+// name=, and the tar, the provenance and the registry name the same
+// index), and BuildKit refuses push-by-digest of a tagged name ("can't
+// push tagged ref … by digest", measured in run 43401448419 and in the
+// plan of #75).
+//
+// A bare name is safe only with push-by-digest=true (#75, D-b): BuildKit
+// then pushes the manifest by digest alone and writes no tag, but
+// without it BuildKit pushes the bare name as :latest (util/push,
+// TagNameOnly). So push-by-digest=true is the only thing that keeps these
+// tags from moving latest, and a missing or false push-by-digest is
+// refused here as well as by rule 7's exact BAKE_SET lines. The
+// provenance's subject then names the image as
+// pkg:docker/<repository>@latest (BuildKit's purl of a name without a tag,
+// D-a); that moves no tag, and its digest is the binding part.
+//
+// The workflow side (release.go) holds each job to its exact BAKE_SET
+// lines; this side checks what they resolve to.
 
 // releaseRegistry is the registry prefix of every released image.
 const releaseRegistry = "ghcr.io/keepia"
@@ -83,11 +102,28 @@ func imageRepo(target string) string {
 	return releaseRegistry + "/mail-" + target
 }
 
+// pushRepos are the bare repositories a push job may push a target to:
+// GHCR (push) and push-rehearsal's own registry. Rule 7 binds each to its
+// job by the exact BAKE_SET lines.
+func pushRepos(target string) []string {
+	return []string{imageRepo(target), rehearsalRepo(target)}
+}
+
+// rehearsalRepo is the repository push-rehearsal pushes a target to.
+func rehearsalRepo(target string) string {
+	return rehearsalRegistry + strings.TrimPrefix(imageRepo(target), releaseRegistry)
+}
+
 // checkReleaseTarget checks a resolved target of a release build.
 func checkReleaseTarget(bad func(string, ...any), name string, t bakeTarget, policy targetPolicy) {
-	want := []string{imageRepo(name) + ":" + policy.release.version}
-	if !reflect.DeepEqual(t.Tags, want) {
-		bad("a release build's tags must be exactly %v (they name the repository the image is pushed to), got %v", want, t.Tags)
+	push := len(t.Output) > 0 || len(t.Attest) > 0
+	if !push {
+		want := []string{imageRepo(name) + ":" + policy.release.version}
+		if !reflect.DeepEqual(t.Tags, want) {
+			bad("a release build's tags must be exactly %v (the build job's tested image), got %v", want, t.Tags)
+		}
+	} else if repos := pushRepos(name); len(t.Tags) != 1 || (t.Tags[0] != repos[0] && t.Tags[0] != repos[1]) {
+		bad("a release push's tags must be exactly [%s] or [%s], the bare repository: BuildKit refuses push-by-digest of a tagged name (#75), got %v", repos[0], repos[1], t.Tags)
 	}
 	scope := policy.cacheScope
 	gha := func(mode bool) []map[string]string {
@@ -105,7 +141,7 @@ func checkReleaseTarget(bad func(string, ...any), name string, t bakeTarget, pol
 			bad("a release build's %s must be exactly %v, got %v", attr, want, got)
 		}
 	}
-	if len(t.Output) == 0 && len(t.Attest) == 0 {
+	if !push {
 		// The build job: tested and loaded, writes the release cache.
 		exact("cache-from", t.CacheFrom, nil)
 		exact("cache-to", t.CacheTo, gha(true))
@@ -114,11 +150,15 @@ func checkReleaseTarget(bad func(string, ...any), name string, t bakeTarget, pol
 	// push and push-rehearsal: every layer from the build job's cache.
 	exact("cache-from", t.CacheFrom, gha(false))
 	exact("cache-to", t.CacheTo, nil)
+	if len(t.Output) > 0 && t.Output[0]["push-by-digest"] != "true" {
+		// Its own finding (D-b): with the bare tags above, this option is
+		// what keeps BuildKit from pushing the name as :latest.
+		bad("a release push's image output needs push-by-digest=true: without it BuildKit pushes the bare repository as :latest; got %v", t.Output[0])
+	}
 	if len(t.Output) != 2 || len(t.Output[0]) != 4 || t.Output[0]["type"] != "image" ||
-		t.Output[0]["push-by-digest"] != "true" || t.Output[0]["name-canonical"] != "true" ||
-		(t.Output[0]["push"] != "true" && t.Output[0]["push"] != "false") ||
+		t.Output[0]["push-by-digest"] != "true" || t.Output[0]["name-canonical"] != "true" || t.Output[0]["push"] != "true" ||
 		!reflect.DeepEqual(t.Output[1], map[string]string{"type": "oci", "dest": pushedTar}) {
-		bad("a release build's output must be exactly [type=image,push-by-digest=true,name-canonical=true,push=true|false type=oci,dest=%s], got %v", pushedTar, t.Output)
+		bad("a release build's output must be exactly [type=image,push-by-digest=true,name-canonical=true,push=true type=oci,dest=%s] (push=false never enters BuildKit's push path, #75), got %v", pushedTar, t.Output)
 	}
 	exact("attest", t.Attest, []map[string]string{{"type": "provenance", "mode": "max"}})
 }

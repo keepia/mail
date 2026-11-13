@@ -4,9 +4,11 @@ name: Release
 # Release -> Run workflow on main; #27, plan revisions 1-5). The default is
 # a dry run: it builds and tests every own image for linux/amd64 and
 # linux/arm64, scans it (syft), rehearses the push without a token
-# (push-rehearsal: push=false, the pushed config must equal the tested
-# one), writes the SBOMs, the source list, the bundle and the notes, and
-# releases nothing. A real run (dry_run unticked, as the runbook below
+# (push-rehearsal: the same push by digest, to a throwaway registry on
+# the runner's loopback; the pushed config must equal the tested one, read
+# back from that registry; #75), writes the SBOMs, the source list, the
+# bundle and the notes, and releases nothing: nothing leaves the runner.
+# A real run (dry_run unticked, as the runbook below
 # allows) pushes every row by digest (push), publishes the image
 # indexes ghcr.io/keepia/mail[-<name>]:X.Y.Z (index), attests them and the
 # release assets, creates the tag vX.Y.Z and the GitHub release, and moves
@@ -29,12 +31,17 @@ name: Release
 #   keeps at most one pending run per group: a third dispatch while one is
 #   pending cancels the pending one, which has done nothing. Start it again
 #   once the running one has finished; that "cancelled" is no failure.
-# - A push row failed at its -verify-pushed step: its untested image is in
-#   GHCR by digest, untagged. Nothing is tagged, attested or released. The
-#   coordinator lists that digest and the digests of the rows that passed
-#   (their digest-* artifacts); the maintainer deletes those package
-#   versions. Fix the cause, then "Re-run all jobs" (only build re-seeds
-#   the cache).
+# - A push row failed at its -verify-pushed step with a mismatch (the
+#   pushed config is not the tested one, or the registry holds other
+#   content than pushed.tar): its untested image is in GHCR by digest,
+#   untagged. Nothing is tagged, attested or released. The coordinator
+#   lists that digest and the digests of the rows that passed (their
+#   digest-* artifacts); the maintainer deletes those package versions.
+#   Fix the cause, then "Re-run all jobs" (only build re-seeds the cache).
+# - A push row failed at -verify-pushed with "the registry read failed"
+#   (every check of pushed.tar passed, only the read back from GHCR did
+#   not): a read error, not a mismatch. Nothing is deleted; the
+#   coordinator stops and reports (process.md, "Releases", step 5).
 # - push failed before its bake step, index, attest or attest-assets
 #   failed: fix the cause, then "Re-run failed jobs". -publish-index keeps
 #   an X.Y.Z of the same content and refuses any other.
@@ -100,7 +107,7 @@ jobs:
           if [ "$DRY_RUN" = false ]; then
             msg="releasing: push, index, attestations, tag, release and latest follow when every check passes"
           else
-            msg="dry run, nothing released: build, test and the push rehearsal only; no token, no push, no tag, no release"
+            msg="dry run, nothing released: build, test and the push rehearsal to a registry on the runner only; no token, no push to GHCR, no tag, no release"
           fi
           echo "::notice::$msg"
           echo "**$msg**" >>"$GITHUB_STEP_SUMMARY"
@@ -316,8 +323,13 @@ jobs:
           if-no-files-found: error
 
   # The push path without a token, in a dry run only: the same steps as
-  # push without the login and with push=false. The pushed config must
-  # equal the tested one, from the release cache alone.
+  # push without the login, pushing by digest to the job's own registry
+  # service on the runner's loopback (#75, maintainer decision 6850628924),
+  # so BuildKit's push path runs in every dry run. The builder runs on the
+  # host network to reach it; push keeps the bridge builder. The pushed
+  # config must equal the tested one, from the release cache alone, and
+  # -verify-pushed reads the row back from that registry. Its digest files
+  # name localhost:5000/keepia/…, which -publish-index and attest refuse.
   push-rehearsal:
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 60
@@ -330,13 +342,18 @@ jobs:
       matrix:
         image: [keepia, postfix, unbound, olefy, sogo]
         arch: [amd64, arm64]
+    services:
+      registry:
+        image: mirror.gcr.io/library/registry:3.1.2@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
+        ports: ["127.0.0.1:5000:5000"]
     env:
       BAKE_TARGET: ${{ matrix.image }}
       PLATFORM: linux/${{ matrix.arch }}
       VERSION: ${{ needs.version.outputs.version }}
       BAKE_SET: |
         ${{ matrix.image }}.cache-from=type=gha,scope=release-${{ matrix.image }}-${{ matrix.arch }}
-        ${{ matrix.image }}.output=type=image,push-by-digest=true,name-canonical=true,push=false
+        ${{ matrix.image }}.tags=localhost:5000/keepia/${{ matrix.image == 'keepia' && 'mail' || format('mail-{0}', matrix.image) }}
+        ${{ matrix.image }}.output=type=image,push-by-digest=true,name-canonical=true,push=true
         ${{ matrix.image }}.output=type=oci,dest=pushed.tar
         ${{ matrix.image }}.attest=type=provenance,mode=max
     steps:
@@ -349,7 +366,9 @@ jobs:
           cache: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
-          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+          driver-opts: |
+            image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+            network=host
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
@@ -360,7 +379,7 @@ jobs:
       - name: Commit time
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
       - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
-      - name: Rebuild from the release cache
+      - name: Rebuild from the release cache and push by digest to the local registry
         id: build
         uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
         with:
@@ -378,9 +397,15 @@ jobs:
           if-no-files-found: error
 
   # Pushes every row by digest through the checked bake step, then proves
-  # that the pushed config is the tested config. BuildKit pushes during the
-  # bake step: on a mismatch the untested image is in GHCR by digest,
-  # untagged, and the run stops here (runbook above).
+  # that the pushed config is the tested config and reads the row back
+  # from GHCR. BuildKit pushes during the bake step: on a mismatch the
+  # untested image is in GHCR by digest, untagged, and the run stops here
+  # (runbook above). The tags line names the bare repository: BuildKit
+  # refuses push-by-digest of a tagged name (run 43401448419, #75), and
+  # with push-by-digest it writes no tag. The provenance's subject then
+  # reads pkg:docker/ghcr.io/keepia/mail[-<name>]@latest?platform=…: that
+  # is BuildKit's name for an untagged repository, it moves no tag, and
+  # the subject's digest is the binding part.
   push:
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 60
@@ -400,6 +425,7 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BAKE_SET: |
         ${{ matrix.image }}.cache-from=type=gha,scope=release-${{ matrix.image }}-${{ matrix.arch }}
+        ${{ matrix.image }}.tags=ghcr.io/keepia/${{ matrix.image == 'keepia' && 'mail' || format('mail-{0}', matrix.image) }}
         ${{ matrix.image }}.output=type=image,push-by-digest=true,name-canonical=true,push=true
         ${{ matrix.image }}.output=type=oci,dest=pushed.tar
         ${{ matrix.image }}.attest=type=provenance,mode=max
