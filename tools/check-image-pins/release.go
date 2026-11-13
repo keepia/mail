@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
 	"regexp"
 	"slices"
@@ -51,10 +52,18 @@ import (
 //     docker login and docker/login-action appear only in the exact jobs;
 //     the exact jobs' actions are at the policy's own commits
 //     (actionPins).
+//   - #27 part 4b: attest, attest-assets and release have exact steps too
+//     (#71 review B, N2), so they run no third-party action, no `curl |
+//     sh` and nothing that writes GITHUB_ENV; and in the other jobs
+//     (#71 delta reviews A N1-N3, B D1-D2): a release mode in any
+//     spelling (-flag=value, inside quotes or an sh -c text) and docker
+//     login inside an sh -c text; action names compared without case;
+//     actions/cache, a docker:// step and an anchore action anywhere; a
+//     container run other than the build row's package-list line;
+//     docker/setup-buildx-action other than with the policy's inputs
+//     (the pinned BuildKit image, #71 review B, N6).
 //
-// The rule runs on release.yml in repository mode (make image-pins);
-// main's workflows hold no release.yml until #27 part 4b, so it reports
-// nothing there.
+// The rule runs on release.yml in repository mode (make image-pins).
 
 // releaseWorkflowName is the one workflow file name rule 6 exempts, in
 // .github/workflows and in exactly this case.
@@ -81,6 +90,98 @@ const (
 	// syftRun starts the SBOM step of the build job (Q1: syft by a literal
 	// version through the Go module proxy).
 	syftRun = "go run github.com/anchore/syft/cmd/syft@v1.57.1 "
+
+	// linePackages is the one container a job of release.yml runs: the
+	// build row reads the package list of the verified image ID (plan
+	// revision 2, D.7). Any other `docker run` is reported (#71 review A,
+	// N2: `docker run anchore/syft:latest` would bypass the syft rule).
+	linePackages = `docker run --rm --entrypoint cat "$VERIFIED_IMAGE" /usr/share/keepia/packages.txt >"$RUNNER_TEMP/tested/packages.txt"`
+
+	// buildkitImage is the BuildKit image of every builder that
+	// docker/setup-buildx-action starts (#71 review B, N6): the push
+	// bake step hands it the GHCR credentials. It is the release of
+	// moby/buildkit:buildx-stable-1 the runners used in #27 part 4a
+	// (BuildKit v0.34.2), pinned by its index digest; bumped by hand, in
+	// ci.yml, release.yml and here together.
+	buildkitImage = "moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe"
+)
+
+// The exact run lines of attest, attest-assets and release (#71 review B,
+// N2). They run no repository code: only sha256sum, jq and gh.
+const (
+	lineChecksum = "sha256sum -c SHA256SUMS"
+
+	// lineSubjects names every attestation subject, checked: the index
+	// digest of each image from the index job, and the platform manifest
+	// digest of each image and architecture from the push rows' digest
+	// files (the manifests -publish-index put into that index).
+	lineSubjects = `for target in keepia postfix unbound olefy sogo; do
+  repo=ghcr.io/keepia/mail-$target
+  if [ "$target" = keepia ]; then
+    repo=ghcr.io/keepia/mail
+  fi
+  index=$(jq -er --arg r "$repo" '.[$r]' <<<"$INDEX_DIGESTS")
+  if [[ ! "$index" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "::error::the index job names no index digest for $repo: '$index'"
+    exit 1
+  fi
+  echo "$target=$index" >>"$GITHUB_OUTPUT"
+  for arch in amd64 arm64; do
+    manifest=$(jq -er --arg t "$target" --arg p "linux/$arch" --arg r "$repo" --arg v "$VERSION" \
+      'select(.target == $t and .platform == $p and .repository == $r and .version == $v) | .manifest' \
+      "$RUNNER_TEMP/digest/$target-$arch.json")
+    if [[ ! "$manifest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+      echo "::error::no platform manifest digest for $repo linux/$arch: '$manifest'"
+      exit 1
+    fi
+    echo "$target-$arch=$manifest" >>"$GITHUB_OUTPUT"
+  done
+done`
+
+	// lineCreateTag creates the tag on the built commit through the API
+	// (design-system's release job). Creating a ref fails when it exists,
+	// so a tag pushed since the version job's check is never reused.
+	lineCreateTag = `if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+  echo "::error::not a release version: '$VERSION'"
+  exit 1
+fi
+if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$GITHUB_SHA" --silent; then
+  echo "::error::could not create the tag v$VERSION on $GITHUB_SHA; does it exist?"
+  exit 1
+fi`
+
+	// lineCreateRelease publishes the release on that tag (--verify-tag:
+	// gh never creates one). The notes are the head from
+	// release-notes.sh and the list generated from the pull requests
+	// since BASE; the first release has no BASE and no --notes-start-tag
+	// (plan revision 2, N9). gh fails if the release exists, so published
+	// assets are never replaced.
+	lineCreateRelease = `start=()
+if [ -n "$BASE" ]; then
+  start=(--notes-start-tag "$BASE")
+fi
+gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
+  --title "Keepia Mail $VERSION" --notes-file notes.md --generate-notes "${start[@]}" \
+  "keepia-mail-$VERSION.tar.gz" sbom-*.spdx.json sources.json SOURCES.md SHA256SUMS`
+
+	// lineRemoveTag removes the tag this run created, and the draft gh
+	// leaves when an upload fails, so the next run can start over; also
+	// when the job is cancelled or times out. A published release and its
+	// tag stay.
+	lineRemoveTag = `if out=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>&1); then
+  if [ "$out" != true ]; then
+    echo "::error::release v$VERSION is published although a step failed; check it, the tag stays"
+    exit 1
+  fi
+  gh release delete "v$VERSION" --repo "$GITHUB_REPOSITORY" --yes
+elif [ "$out" != "release not found" ]; then
+  echo "::error::could not check for release v$VERSION: $out; delete the tag v$VERSION by hand if no release uses it"
+  exit 1
+fi
+gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/v$VERSION" --silent
+echo "::notice::removed the tag v$VERSION; fix the failure and run the workflow again"`
+
+	condRemoveTag = "(failure() || cancelled()) && steps.tag.outcome == 'success'"
 )
 
 // releaseJob is the policy of one job of release.yml.
@@ -99,20 +200,32 @@ type releaseJob struct {
 }
 
 // stepSpec is one exact step: an action (uses, with) or a run step (run,
-// env), with its id.
+// env), with its id, and for a run step of release and attest* its
+// working-directory and `if` (none in the jobs with the push path).
 type stepSpec struct {
 	uses string
 	with map[string]any
 	run  string
 	env  map[string]any
 	id   string
+	wd   string
+	cond string
 }
 
+// String names the spec; %#v keeps a string "false" apart from the
+// boolean false (#71 review B, D3).
 func (s stepSpec) String() string {
 	if s.uses != "" {
-		return fmt.Sprintf("uses %s@%s with %v", s.uses, actionPins[s.uses], s.with)
+		return fmt.Sprintf("uses %s@%s with %#v", s.uses, actionPins[s.uses], s.with)
 	}
-	return fmt.Sprintf("run: %s (env %v, id %q)", s.run, s.env, s.id)
+	out := fmt.Sprintf("run: %s (env %#v, id %q", s.run, s.env, s.id)
+	if s.wd != "" {
+		out += fmt.Sprintf(", working-directory %q", s.wd)
+	}
+	if s.cond != "" {
+		out += fmt.Sprintf(", if %q", s.cond)
+	}
+	return out + ")"
 }
 
 // actionPins are the exact commits of the actions the exact jobs may use
@@ -126,6 +239,7 @@ var actionPins = map[string]string{
 	"actions/download-artifact":  "9000827ccba6bdab643e8b6fd33ac0654aef8333", // v8.0.2
 	"actions/upload-artifact":    "cf430e030ddbb5b0abf93d22962f4752f3646cd9", // v7.0.2
 	"docker/bake-action":         "59cb1203cd42bcefd40a1b6d73b589e48c86040e", // v7.5.0
+	"actions/attest":             "1e69f48acb82d1966a394da916b4c1698aa569d6", // v4.2.2 (6843420864, Q2)
 }
 
 var (
@@ -136,6 +250,7 @@ var (
 	// tool's modules come fresh from the proxy, checked against go.sum.
 	stepSetupGo   = stepSpec{uses: "actions/setup-go", with: map[string]any{"go-version-file": "go.mod", "cache": false}}
 	stepSetupBake = stepSpec{uses: "docker/setup-buildx-action", with: map[string]any{
+		"driver-opts":             "image=" + buildkitImage,
 		"buildkitd-config-inline": "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]",
 	}}
 	stepTested = stepSpec{uses: "actions/download-artifact", with: map[string]any{
@@ -160,11 +275,58 @@ var (
 	stepMoveLatest   = stepSpec{run: lineMoveLatest, env: map[string]any{"VERSION": versionExpr, "INDEX_DIGESTS": indexDigestsExpr}}
 )
 
+// The steps of attest, attest-assets and release (#71 review B, N2).
 var (
-	pushSteps      = []stepSpec{stepCheckout, stepSetupGo, stepSetupBake, stepTested, stepEpoch, stepLogin, stepCheck, stepBake, stepVerifyPushed, stepUploadDigest}
-	rehearsalSteps = []stepSpec{stepCheckout, stepSetupGo, stepSetupBake, stepTested, stepEpoch, stepCheck, stepBake, stepVerifyPushed, stepUploadDigest}
-	indexSteps     = []stepSpec{stepCheckout, stepSetupGo, stepSetupBake, stepDigests, stepLogin, stepPublishIndex}
-	latestSteps    = []stepSpec{stepCheckout, stepSetupGo, stepSetupBake, stepLogin, stepMoveLatest}
+	stepDist     = stepSpec{uses: "actions/download-artifact", with: map[string]any{"name": "dist", "path": "dist"}}
+	stepChecksum = stepSpec{run: lineChecksum, wd: "dist"}
+	stepSubjects = stepSpec{run: lineSubjects, id: "subjects", env: map[string]any{"VERSION": versionExpr, "INDEX_DIGESTS": indexDigestsExpr}}
+	// The release assets (the bundle, the SBOMs, the source lists, the
+	// notes and SHA256SUMS), which the release job uploads.
+	stepAttestAssets = stepSpec{uses: "actions/attest", with: map[string]any{"subject-path": "dist/*"}}
+	ghToken          = "${{ github.token }}" //nolint:gosec // an expression the workflow must hold, not a credential
+	stepCreateTag    = stepSpec{run: lineCreateTag, id: "tag", env: map[string]any{"GH_TOKEN": ghToken, "VERSION": versionExpr}}
+	stepCreateRel    = stepSpec{run: lineCreateRelease, wd: "dist", env: map[string]any{
+		"GH_TOKEN": ghToken, "VERSION": versionExpr, "BASE": "${{ needs.version.outputs.base }}",
+	}}
+	stepRemoveTag = stepSpec{run: lineRemoveTag, cond: condRemoveTag, env: map[string]any{"GH_TOKEN": ghToken, "VERSION": versionExpr}}
+)
+
+// releaseTargets are the own images in the order of bake's default group
+// (the bundle job checks the set against bake itself).
+var releaseTargets = []string{"keepia", "postfix", "unbound", "olefy", "sogo"}
+
+// attestJobSteps are attest's steps: the release assets and the push
+// rows' digest files, checked, the subjects, then per image the
+// provenance of its index digest and the SBOM of each platform manifest
+// (plan revision 2, F; push-to-registry stays off, so the job needs no
+// packages: write).
+func attestJobSteps() []stepSpec {
+	steps := []stepSpec{stepDist, stepDigests, stepChecksum, stepSubjects}
+	for _, t := range releaseTargets {
+		repo := imageRepo(t)
+		image := strings.TrimPrefix(repo, releaseRegistry+"/")
+		steps = append(steps, stepSpec{uses: "actions/attest", with: map[string]any{
+			"subject-name": repo, "subject-digest": "${{ steps.subjects.outputs." + t + " }}",
+		}})
+		for _, a := range releaseArchList {
+			steps = append(steps, stepSpec{uses: "actions/attest", with: map[string]any{
+				"subject-name":   repo,
+				"subject-digest": "${{ steps.subjects.outputs." + t + "-" + a + " }}",
+				"sbom-path":      "dist/sbom-" + image + "-" + a + ".spdx.json",
+			}})
+		}
+	}
+	return steps
+}
+
+var (
+	pushSteps         = []stepSpec{stepCheckout, stepSetupGo, stepSetupBake, stepTested, stepEpoch, stepLogin, stepCheck, stepBake, stepVerifyPushed, stepUploadDigest}
+	rehearsalSteps    = []stepSpec{stepCheckout, stepSetupGo, stepSetupBake, stepTested, stepEpoch, stepCheck, stepBake, stepVerifyPushed, stepUploadDigest}
+	indexSteps        = []stepSpec{stepCheckout, stepSetupGo, stepSetupBake, stepDigests, stepLogin, stepPublishIndex}
+	latestSteps       = []stepSpec{stepCheckout, stepSetupGo, stepSetupBake, stepLogin, stepMoveLatest}
+	attestSteps       = attestJobSteps()
+	attestAssetsSteps = []stepSpec{stepDist, stepChecksum, stepAttestAssets}
+	releaseJobSteps   = []stepSpec{stepDist, stepChecksum, stepCreateTag, stepCreateRel, stepRemoveTag}
 )
 
 var (
@@ -184,10 +346,11 @@ var releaseJobs = map[string]releaseJob{
 	"index": {perms: readPackage, needs: []string{"version", "push"}, cond: releaseRealIf, steps: indexSteps,
 		outputs: map[string]any{"digests": "${{ steps.index.outputs.digests }}"}},
 	"bundle":        {perms: readOnly, needs: []string{"version", "build", "push-rehearsal", "push", "index"}, cond: releaseBundleIf},
-	"attest":        {perms: attestPerms, needs: []string{"version", "index", "bundle"}, cond: releaseRealIf, noRepoCode: true},
-	"attest-assets": {perms: attestPerms, needs: []string{"bundle"}, cond: releaseRealIf, noRepoCode: true},
-	"release":       {perms: map[string]string{"contents": "write"}, needs: []string{"version", "bundle", "attest", "attest-assets"}, cond: releaseRealIf, noRepoCode: true},
-	"latest":        {perms: readPackage, needs: []string{"version", "index", "release"}, cond: releaseRealIf, steps: latestSteps},
+	"attest":        {perms: attestPerms, needs: []string{"version", "index", "bundle"}, cond: releaseRealIf, noRepoCode: true, steps: attestSteps},
+	"attest-assets": {perms: attestPerms, needs: []string{"bundle"}, cond: releaseRealIf, noRepoCode: true, steps: attestAssetsSteps},
+	"release": {perms: map[string]string{"contents": "write"}, needs: []string{"version", "bundle", "attest", "attest-assets"}, cond: releaseRealIf,
+		noRepoCode: true, steps: releaseJobSteps},
+	"latest": {perms: readPackage, needs: []string{"version", "index", "release"}, cond: releaseRealIf, steps: latestSteps},
 }
 
 // releaseBakeSet are the exact BAKE_SET lines of the bake jobs (revision
@@ -247,7 +410,7 @@ var releaseStepKeys = map[string]bool{"name": true, "uses": true, "with": true, 
 // releaseJobEnv are the step env keys of release, attest and
 // attest-assets (design-system's RELEASE_JOB_ENV, with this repository's
 // names).
-var releaseJobEnv = map[string]bool{"GH_TOKEN": true, "TAG": true, "VERSION": true, "BASE": true}
+var releaseJobEnv = map[string]bool{"GH_TOKEN": true, "TAG": true, "VERSION": true, "BASE": true, "INDEX_DIGESTS": true}
 
 // Repository code in a run text (design-system's CODE_COMMAND, CODE_PATH
 // and RELATIVE_COMMAND, without lookbehind and with this repository's
@@ -591,13 +754,22 @@ func checkReleaseSteps(line int, name string, p releaseJob, steps []any, add fun
 			!reflect.DeepEqual(asAnyMap(step["env"]), map[string]any{"SYFT_CHECK_FOR_APP_UPDATE": "false"})) {
 			add(line, "job %s: step %d runs syft other than as `%s…` with exactly the env SYFT_CHECK_FOR_APP_UPDATE: \"false\" (a literal version through the Go module proxy, no update check; plan revision 2 D.7)", name, i+1, syftRun)
 		}
+		checkReleaseUses(line, name, i, step, add)
 		if p.steps == nil {
 			checkReleaseModesElsewhere(line, name, i, step, add)
+			checkContainerRuns(line, name, i, run, add)
 		}
-		if uses, _ := step["uses"].(string); p.steps == nil && strings.HasPrefix(uses, "actions/setup-go@") {
+		// Action names without case: GitHub resolves owner and repository
+		// that way (#71 delta reviews A N3, B D1).
+		uses, _ := step["uses"].(string)
+		action, _, _ := strings.Cut(strings.ToLower(uses), "@")
+		if p.steps == nil && action == "actions/setup-go" {
 			if w, _ := asMap(step["with"]); w["cache"] != false {
 				add(line, "job %s: step %d uses actions/setup-go without cache: false: it would restore a Go cache that other jobs on main write (#71 review B, B1)", name, i+1)
 			}
+		}
+		if p.steps == nil && action == "docker/setup-buildx-action" && !sameInputs(step["with"], stepSetupBake.with) {
+			add(line, "job %s: step %d uses docker/setup-buildx-action with %#v; release.yml has exactly %#v: CI's mirror and the pinned BuildKit image (#71 review B, N6)", name, i+1, step["with"], stepSetupBake.with)
 		}
 	}
 	if p.bake && (epochAt < 0 || checkAt < 0 || epochAt > checkAt) {
@@ -639,25 +811,82 @@ var releaseModeFlags = []string{"-verify-pushed", "-publish-index", "-move-lates
 // checkReleaseModesElsewhere reports, in a job that is not an exact-steps
 // job, a step that runs a release mode of the tool or logs in to a
 // registry (#71 review A, B3): those belong to push, push-rehearsal,
-// index and latest only.
+// index and latest only. A mode counts in any spelling (#71 delta
+// reviews A N1, B D2): its name anywhere in the text once quotes and
+// backslashes are gone, so -move-latest=true, --publish-index, "-verify-"pushed
+// and a mode inside a `bash -c '…'` text are reported. docker login
+// counts wherever its words appear in a command, an sh -c text
+// included.
 func checkReleaseModesElsewhere(line int, name string, i int, step map[string]any, add func(int, string, ...any)) {
 	run, _ := step["run"].(string)
-	for _, words := range shellCommands(run) {
-		for _, w := range words {
-			for _, f := range releaseModeFlags {
-				if strings.TrimLeft(w, "-") == strings.TrimLeft(f, "-") {
-					add(line, "job %s: step %d runs %s: the release modes run only in push, push-rehearsal, index and latest", name, i+1, f)
+	flat := normalizeShell(run)
+	for _, f := range releaseModeFlags {
+		if strings.Contains(flat, strings.TrimLeft(f, "-")) {
+			add(line, "job %s: step %d runs %s: the release modes run only in push, push-rehearsal, index and latest", name, i+1, f)
+		}
+	}
+	login := false
+	for _, words := range commands(run) {
+		for j, w := range words {
+			if engines[path0(w)] {
+				if sub, _ := subcommand(words[j+1:]); sub == "login" {
+					login = true
 				}
 			}
 		}
-		if j := commandStart(words); j < len(words) && engines[strings.ToLower(path0(words[j]))] {
-			if sub, _ := subcommand(words[j+1:]); sub == "login" {
-				add(line, "job %s: step %d runs docker login: only push, index and latest log in to GHCR", name, i+1)
-			}
-		}
+	}
+	if login {
+		add(line, "job %s: step %d runs docker login: only push, index and latest log in to GHCR", name, i+1)
 	}
 	if uses, _ := step["uses"].(string); strings.HasPrefix(strings.ToLower(uses), "docker/login-action@") {
 		add(line, "job %s: step %d uses docker/login-action: only push, index and latest log in to GHCR", name, i+1)
+	}
+}
+
+// checkReleaseUses reports, in every job of release.yml, an action that
+// could bring in code or a cache the rule does not see (#71 delta review
+// A N2, N3): actions/cache (and its restore and save actions), which
+// would restore a module or build cache that any job on main can write;
+// a `docker://` step, which runs an image; and any anchore action
+// (sbom-action, scan-action), which runs syft or grype in a version the
+// syft rule does not fix.
+func checkReleaseUses(line int, name string, i int, step map[string]any, add func(int, string, ...any)) {
+	uses, _ := step["uses"].(string)
+	u := strings.ToLower(strings.TrimSpace(uses))
+	action, _, _ := strings.Cut(u, "@")
+	switch {
+	case action == "actions/cache" || strings.HasPrefix(action, "actions/cache/"):
+		add(line, "job %s: step %d uses %s: release.yml restores and saves no cache, so no step reads what another job on main wrote (#71 review A, N3)", name, i+1, uses)
+	case strings.HasPrefix(u, "docker://"):
+		add(line, "job %s: step %d uses %s: a step of release.yml runs no image", name, i+1, uses)
+	case strings.HasPrefix(action, "anchore/"):
+		add(line, "job %s: step %d uses %s: syft runs only as `%s…` (#71 review A, N2)", name, i+1, uses, syftRun)
+	}
+}
+
+// checkContainerRuns reports, in a job that is not an exact-steps job, a
+// container the step runs (docker, podman or nerdctl run or create, also
+// as `container run`) unless the step's text is exactly linePackages:
+// `docker run anchore/syft:latest …` would bypass the syft rule, and any
+// other image would run unpinned (#71 review A, N2).
+func checkContainerRuns(line int, name string, i int, run string, add func(int, string, ...any)) {
+	if strings.TrimSpace(run) == linePackages {
+		return
+	}
+	for _, words := range commands(run) {
+		for j, w := range words {
+			if !engines[path0(w)] {
+				continue
+			}
+			sub, after := subcommand(words[j+1:])
+			if sub == "container" {
+				sub, _ = subcommand(after)
+			}
+			if sub == "run" || sub == "create" {
+				add(line, "job %s: step %d runs a container (%s %s): in release.yml only the build row's package-list line does, of the verified image (`%s`)", name, i+1, path0(w), sub, linePackages)
+				return
+			}
+		}
 	}
 }
 
@@ -720,19 +949,33 @@ func checkNoRepoCode(line int, name string, i int, step map[string]any, add func
 func checkExactSteps(line int, name string, want []stepSpec, steps []any, add func(int, string, ...any)) {
 	runs := map[string]bool{}
 	actions := map[string]bool{}
+	// if and working-directory only where a step of the policy has them
+	// (release's cleanup step and the checksum steps; stepDiff compares
+	// them exactly).
+	keys := maps.Clone(releaseStepKeys)
 	for _, s := range want {
 		if s.run != "" {
 			runs[s.run] = true
 		} else {
 			actions[s.uses] = true
 		}
+		if s.cond != "" {
+			keys["if"] = true
+		}
+		if s.wd != "" {
+			keys["working-directory"] = true
+		}
 	}
+	// The P3/P5 messages name the forms a job with the push path (push,
+	// its twin, index, latest) must not run; attest* and release have
+	// their own messages (checkNoRepoCode).
+	writes := !releaseJobs[name].noRepoCode
 	ownProblem := make([]bool, len(steps))
 	for i, s := range steps {
 		step, _ := asMap(s)
 		for _, k := range sortedKeys(step) {
-			if !releaseStepKeys[k] {
-				add(line, "job %s: step %d has %s: a step of this job has no if, shell, working-directory or continue-on-error (P4)", name, i+1, k)
+			if !keys[k] {
+				add(line, "job %s: step %d has %s: a step of this job has no if, shell, working-directory or continue-on-error other than the policy's (P4)", name, i+1, k)
 				ownProblem[i] = true
 			}
 		}
@@ -757,8 +1000,10 @@ func checkExactSteps(line int, name string, want []stepSpec, steps []any, add fu
 			if !runs[t] {
 				add(line, "job %s: step %d runs a text that is not one of this job's lines; nothing is resolved, the text must equal a line exactly (P4): %q", name, i+1, t)
 				ownProblem[i] = true
-				for _, msg := range pushJobTextProblems(t) {
-					add(line, "job %s: step %d %s", name, i+1, msg)
+				if writes {
+					for _, msg := range pushJobTextProblems(t) {
+						add(line, "job %s: step %d %s", name, i+1, msg)
+					}
 				}
 			}
 		default:
@@ -770,7 +1015,11 @@ func checkExactSteps(line int, name string, want []stepSpec, steps []any, add fu
 		var list []string
 		for _, s := range want {
 			if s.run != "" {
-				list = append(list, "run: "+s.run)
+				first, _, more := strings.Cut(s.run, "\n")
+				if more {
+					first += " …"
+				}
+				list = append(list, "run: "+first)
 			} else {
 				list = append(list, s.uses)
 			}
@@ -801,10 +1050,15 @@ func stepDiff(want stepSpec, step map[string]any) string {
 			return fmt.Sprintf("uses %v", step["uses"])
 		}
 		if !sameInputs(step["with"], want.with) {
-			return fmt.Sprintf("with %v", step["with"])
+			return fmt.Sprintf("with %#v", step["with"])
 		}
 		if _, has := step["env"]; has {
 			return "an action step has no env"
+		}
+		for _, k := range []string{"if", "working-directory"} {
+			if _, has := step[k]; has {
+				return "an action step has no " + k
+			}
 		}
 		return ""
 	}
@@ -813,6 +1067,13 @@ func stepDiff(want stepSpec, step map[string]any) string {
 	}
 	if _, has := step["with"]; has {
 		return "a run step has no with"
+	}
+	for _, k := range []struct{ key, want string }{{"working-directory", want.wd}, {"if", want.cond}} {
+		v, has := step[k.key]
+		s, _ := v.(string)
+		if has != (k.want != "") || strings.TrimSpace(s) != k.want {
+			return fmt.Sprintf("%s %#v, want %q", k.key, v, k.want)
+		}
 	}
 	// The env key itself, not its decoded mapping: an env given as one
 	// expression is not "no env" (#71 review A, B1).

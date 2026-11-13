@@ -483,6 +483,7 @@ func TestRun(t *testing.T) {
 		// rule 7 allows no container at all).
 		rel := strings.Replace(releaseFixture(t), "  version:\n    runs-on: ubuntu-24.04\n", "  version:\n    runs-on: ubuntu-24.04\n    container: node:20\n", 1)
 		write(t, root, ".github/workflows/release.yml", rel)
+		versionLine := strconv.Itoa(strings.Count(rel[:strings.Index(rel, "\n  version:\n")+1], "\n") + 1)
 		write(t, root, "scripts/image-test.sh", "#!/bin/bash\ndocker run --rm \"$2\" --version\n")
 		write(t, root, "scripts/ci-docker-mirror.sh", "#!/bin/sh\n")
 		write(t, root, "docker-compose.yml", "services: [\n")
@@ -494,8 +495,8 @@ func TestRun(t *testing.T) {
 			filepath.Join("images", "a", "Dockerfile") + ":2: FROM image",
 			"docker-bake.json:0: a JSON bake file",
 			filepath.Join(".github", "workflows", "ci.yml") + ":1: workflow grants packages: write",
-			filepath.Join(".github", "workflows", "release.yml") + ":29: job version: container image \"node:20\"",
-			filepath.Join(".github", "workflows", "release.yml") + ":29: job version: container is not allowed",
+			filepath.Join(".github", "workflows", "release.yml") + ":" + versionLine + ": job version: container image \"node:20\"",
+			filepath.Join(".github", "workflows", "release.yml") + ":" + versionLine + ": job version: container is not allowed",
 			"docker-compose.yml:0: does not parse",
 			// bake reads the root's default files, the broken Compose file
 			// included, and the check reports that it cannot resolve them.

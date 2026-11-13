@@ -1,0 +1,912 @@
+name: Release
+
+# Publishes a release of Keepia Mail from main, started by hand (Actions ->
+# Release -> Run workflow on main; #27, plan revisions 1-5). The default is
+# a dry run: it builds and tests every own image for linux/amd64 and
+# linux/arm64, scans it (syft), rehearses the push without a token
+# (push-rehearsal: push=false, the pushed config must equal the tested
+# one), writes the SBOMs, the source list, the bundle and the notes, and
+# releases nothing. A real run (dry_run unticked, only with the
+# maintainer's OK) pushes every row by digest (push), publishes the image
+# indexes ghcr.io/keepia/mail[-<name>]:X.Y.Z (index), attests them and the
+# release assets, creates the tag vX.Y.Z and the GitHub release, and moves
+# `latest` last, forward only (latest). X.Y.Z never changes.
+#
+# tools/check-image-pins rule 7 holds this file to exactly this shape: the
+# jobs, their permissions, `needs` and `if`, the exact steps of push,
+# push-rehearsal, index, latest, attest, attest-assets and release, the
+# action pins, the concurrency group and the trigger
+# (docs/development/index.md, "The image pin check"). A dry run holds no
+# write token; only push, index and latest hold packages: write, only
+# attest and attest-assets hold id-token and attestations, only release
+# holds contents: write.
+#
+# Runbook (docs/development/process.md, "Releases", has the full text):
+# - Dry run first; a real run only with the maintainer's OK.
+# - The concurrency group `release` runs one release at a time. GitHub
+#   keeps at most one pending run per group: a third dispatch while one is
+#   pending cancels the pending one, which has done nothing. Start it again
+#   once the running one has finished; that "cancelled" is no failure.
+# - A push row failed at its -verify-pushed step: its untested image is in
+#   GHCR by digest, untagged. Nothing is tagged, attested or released. The
+#   coordinator lists that digest and the digests of the rows that passed
+#   (their digest-* artifacts); the maintainer deletes those package
+#   versions. Fix the cause, then "Re-run all jobs" (only build re-seeds
+#   the cache).
+# - push failed before its bake step, index, attest or attest-assets
+#   failed: fix the cause, then "Re-run failed jobs". -publish-index keeps
+#   an X.Y.Z of the same content and refuses any other.
+# - release failed: its last step removes the tag and draft this run
+#   created; "Re-run failed jobs".
+# - latest failed: the release is published; `latest` may still point at
+#   the previous release for some images. "Re-run failed jobs": the moves
+#   are idempotent and only go forward.
+# - To abandon a published release, the maintainer moves `latest` back by
+#   hand (docker buildx imagetools create -t
+#   ghcr.io/keepia/mail-<name>:latest ghcr.io/keepia/mail-<name>:<previous
+#   X.Y.Z>), then deletes the release, the tag and the package versions.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build, test and rehearse the push, but publish nothing (untick for the real release)
+        type: boolean
+        default: true
+      version:
+        description: The version (X.Y.Z), only as the version check allows
+        type: string
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # The version and the checks before anything is built. Reads the pull
+  # requests behind the commits, so it gets pull-requests: read.
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      last: ${{ steps.version.outputs.last }}
+      base: ${{ steps.version.outputs.base }}
+    steps:
+      # A run from any other ref fails here, red, before anything else runs.
+      - name: Started on main
+        run: |
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::release.yml runs only on main, not on '$GITHUB_REF'"
+            exit 1
+          fi
+      # Anything but an unticked box counts as a dry run, as it does for
+      # the jobs that publish.
+      - name: Mode
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = false ]; then
+            msg="releasing: push, index, attestations, tag, release and latest follow when every check passes"
+          else
+            msg="dry run, nothing released: build, test and the push rehearsal only; no token, no push, no tag, no release"
+          fi
+          echo "::notice::$msg"
+          echo "**$msg**" >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # The first-parent commits since the last release, each one's pull
+      # request (scripts/next-version.sh pr), then the version by
+      # scripts/version-policy.sh LAST INPUT < prs.tsv (the 0.x rules over
+      # next-version.sh). The pull request table is in the summary before
+      # the version can fail.
+      - name: Version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          last=$(sh scripts/next-version.sh last)
+          base=$(sh scripts/next-version.sh base)
+          range="${base:+$base..}HEAD"
+          if ! shas=$(git rev-list --first-parent "$range"); then
+            echo "::error::git rev-list $range failed"
+            exit 1
+          fi
+          prs="$RUNNER_TEMP/prs.tsv"
+          : >"$prs"
+          for sha in $shas; do
+            gh api "repos/$GITHUB_REPOSITORY/commits/$sha/pulls?per_page=100" | sh scripts/next-version.sh pr "$sha" >>"$prs"
+          done
+          {
+            echo "### Release version"
+            echo
+            echo "- Last release: ${last:-none, this is the first release}"
+            echo "- Range: $range"
+            echo "- Version input: ${INPUT:-none}"
+            echo
+            sh scripts/next-version.sh summary <"$prs"
+            echo
+          } >>"$GITHUB_STEP_SUMMARY"
+          err="$RUNNER_TEMP/version-policy.err"
+          if ! version=$(sh scripts/version-policy.sh "$last" "$INPUT" <"$prs" 2>"$err"); then
+            echo "::error::$(cat "$err")"
+            echo "**No release:** $(cat "$err")" >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          {
+            echo "**Version $version.** The rule: $(cat "$err")"
+            echo
+          } >>"$GITHUB_STEP_SUMMARY"
+          {
+            echo "version=$version"
+            echo "last=$last"
+            echo "base=$base"
+          } >>"$GITHUB_OUTPUT"
+      # Also stops a re-run of a finished release before anything is
+      # built. Because of this check, X.Y.Z does not exist when index runs,
+      # so a wrong "not found" from the registry cannot make -publish-index
+      # overwrite a published tag (process.md, "Releases").
+      - name: Tag and release do not exist yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          refs=$(git ls-remote --tags origin "refs/tags/v$NEXT")
+          if [ -n "$refs" ]; then
+            echo "::error::the tag v$NEXT exists; set the version input"
+            exit 1
+          fi
+          if out=$(gh release view "v$NEXT" --repo "$GITHUB_REPOSITORY" --json tagName 2>&1); then
+            echo "::error::the release v$NEXT exists; set the version input"
+            exit 1
+          fi
+          if [ "$out" != "release not found" ]; then
+            echo "::error::could not check for the release v$NEXT: $out"
+            exit 1
+          fi
+      # Test 17: every own image with its tags and platforms, and every
+      # upstream image of the Compose template by digest.
+      - name: Images
+        env:
+          NEXT: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Images"
+            echo
+            echo "| Image | Tags | Platforms |"
+            echo "|---|---|---|"
+            for n in mail mail-postfix mail-unbound mail-olefy mail-sogo; do
+              echo "| \`ghcr.io/keepia/$n\` | \`$NEXT\`, \`latest\` | linux/amd64, linux/arm64 |"
+            done
+            echo
+            echo "A dry run publishes no tag. A real run publishes \`$NEXT\` in the job index and moves \`latest\` in the last job, after the release."
+            echo
+            echo "### Upstream images (docker-compose.yml, by digest, not published by Keepia)"
+            echo
+            grep -E '^[[:space:]]+image:[[:space:]]+[a-z]' docker-compose.yml | awk '{ print "- `" $2 "`" }' | sort -u
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  # CI's docker-build row with the release inputs, cold (no cache-from):
+  # build, verify, the image tests on the verified ID, the saved and checked
+  # tar, its package list, syft's scan of that tar, and the row's SBOM and
+  # source list (tools/release-sources row). It writes the release cache
+  # (mode=max) that push and push-rehearsal rebuild from.
+  build:
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    needs: version
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [keepia, postfix, unbound, olefy, sogo]
+        arch: [amd64, arm64]
+    env:
+      BAKE_TARGET: ${{ matrix.image }}
+      PLATFORM: linux/${{ matrix.arch }}
+      VERSION: ${{ needs.version.outputs.version }}
+      BAKE_SET: |
+        ${{ matrix.image }}.cache-to=type=gha,mode=max,scope=release-${{ matrix.image }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: sh scripts/ci-docker-mirror.sh
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - name: Commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - name: Build
+        id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          load: true
+          set: ${{ env.BAKE_SET }}
+      - id: verify
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - name: Smoke, health and reload tests
+        env:
+          IMAGE: ${{ matrix.image }}
+          VERIFIED_IMAGE: ${{ steps.verify.outputs.image }}
+        run: bash scripts/image-test.sh "$IMAGE" "$VERIFIED_IMAGE"
+      - name: Save the image
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built -save "$RUNNER_TEMP/image.tar"
+      # The tested config (containerimage.config.digest) that push and
+      # push-rehearsal compare the pushed image with.
+      - name: Build metadata
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/tested"
+          printf '%s\n' "$BAKE_METADATA" >"$RUNNER_TEMP/tested/metadata.json"
+      # The package list of a Debian-based image, read from the verified
+      # image ID (the distroless Keepia image has none).
+      - id: verify2
+        if: matrix.image != 'keepia'
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-built
+      - name: Package list
+        if: matrix.image != 'keepia'
+        env:
+          VERIFIED_IMAGE: ${{ steps.verify2.outputs.image }}
+        run: docker run --rm --entrypoint cat "$VERIFIED_IMAGE" /usr/share/keepia/packages.txt >"$RUNNER_TEMP/tested/packages.txt"
+      # syft v1.57.1 through the Go module proxy, checked against its
+      # go.sum (6843420864, Q1), on the saved and checked tar.
+      - name: SBOM
+        env:
+          SYFT_CHECK_FOR_APP_UPDATE: "false"
+        run: go run github.com/anchore/syft/cmd/syft@v1.57.1 scan "docker-archive:$RUNNER_TEMP/image.tar" -o "spdx-json=$RUNNER_TEMP/syft.spdx.json" -o "syft-json=$RUNNER_TEMP/syft.json"
+      - name: SBOM and source list of the row
+        run: |
+          packages=
+          if [ -f "$RUNNER_TEMP/tested/packages.txt" ]; then packages=-packages=$RUNNER_TEMP/tested/packages.txt; fi
+          GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/release-sources row -target "$BAKE_TARGET" -platform "$PLATFORM" -version "$VERSION" -commit "$GITHUB_SHA" \
+            -metadata "$RUNNER_TEMP/tested/metadata.json" -syft "$RUNNER_TEMP/syft.json" -spdx "$RUNNER_TEMP/syft.spdx.json" ${packages:+"$packages"} -out "$RUNNER_TEMP/tested"
+      # Test 17: the row's verified image and tested config.
+      - name: Row summary
+        run: |
+          set -euo pipefail
+          meta="$RUNNER_TEMP/tested/metadata.json"
+          digest=$(jq -er --arg t "$BAKE_TARGET" '.[$t]["containerimage.digest"]' "$meta")
+          config=$(jq -er --arg t "$BAKE_TARGET" '.[$t]["containerimage.config.digest"]' "$meta")
+          {
+            echo "### $BAKE_TARGET $PLATFORM $VERSION"
+            echo
+            echo "- verified image: \`$digest\`"
+            echo "- tested config: \`$config\`"
+          } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tested-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/tested/
+          if-no-files-found: error
+
+  # The push path without a token, in a dry run only: the same steps as
+  # push without the login and with push=false. The pushed config must
+  # equal the tested one, from the release cache alone.
+  push-rehearsal:
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    needs: [version, build]
+    if: ${{ inputs.dry_run }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [keepia, postfix, unbound, olefy, sogo]
+        arch: [amd64, arm64]
+    env:
+      BAKE_TARGET: ${{ matrix.image }}
+      PLATFORM: linux/${{ matrix.arch }}
+      VERSION: ${{ needs.version.outputs.version }}
+      BAKE_SET: |
+        ${{ matrix.image }}.cache-from=type=gha,scope=release-${{ matrix.image }}-${{ matrix.arch }}
+        ${{ matrix.image }}.output=type=image,push-by-digest=true,name-canonical=true,push=false
+        ${{ matrix.image }}.output=type=oci,dest=pushed.tar
+        ${{ matrix.image }}.attest=type=provenance,mode=max
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tested-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/tested
+      - name: Commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - name: Rebuild from the release cache
+        id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          set: ${{ env.BAKE_SET }}
+      - id: pushed
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-pushed
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digest/
+          if-no-files-found: error
+
+  # Pushes every row by digest through the checked bake step, then proves
+  # that the pushed config is the tested config. BuildKit pushes during the
+  # bake step: on a mismatch the untested image is in GHCR by digest,
+  # untagged, and the run stops here (runbook above).
+  push:
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    needs: [version, build]
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [keepia, postfix, unbound, olefy, sogo]
+        arch: [amd64, arm64]
+    env:
+      BAKE_TARGET: ${{ matrix.image }}
+      PLATFORM: linux/${{ matrix.arch }}
+      VERSION: ${{ needs.version.outputs.version }}
+      BAKE_SET: |
+        ${{ matrix.image }}.cache-from=type=gha,scope=release-${{ matrix.image }}-${{ matrix.arch }}
+        ${{ matrix.image }}.output=type=image,push-by-digest=true,name-canonical=true,push=true
+        ${{ matrix.image }}.output=type=oci,dest=pushed.tar
+        ${{ matrix.image }}.attest=type=provenance,mode=max
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tested-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/tested
+      - name: Commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >>"$GITHUB_ENV"
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -build "$BAKE_TARGET" -build-set "$BAKE_SET"
+      - name: Rebuild from the release cache and push by digest
+        id: build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          set: ${{ env.BAKE_SET }}
+      - id: pushed
+        env:
+          BAKE_METADATA: ${{ steps.build.outputs.metadata }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -verify-pushed
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digest/
+          if-no-files-found: error
+
+  # The image indexes X.Y.Z, through -publish-index only: it checks every
+  # row in the registry first, never overwrites an X.Y.Z of other content,
+  # and puts out the index digests as a JSON object.
+  index:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: [version, push]
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digests: ${{ steps.index.outputs.digests }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digest-*
+          path: ${{ runner.temp }}/digest
+          merge-multiple: true
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - id: index
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -publish-index
+
+  # The release assets: the SBOMs and the source list of the whole release
+  # (tools/release-sources release: exactly bake's default group x amd64,
+  # arm64, each for the config its push row proved), the bundle, the notes
+  # head and SHA256SUMS. In a dry run the bundle pins the placeholder
+  # digest; a real run asserts that none is left.
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: [version, build, push-rehearsal, push, index]
+    if: ${{ !cancelled() && needs.version.result == 'success' && needs.build.result == 'success' && ((inputs.dry_run && needs.push-rehearsal.result == 'success') || (!inputs.dry_run && needs.push.result == 'success' && needs.index.result == 'success')) }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: The rows' SBOMs and source lists
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: tested-*
+          path: ${{ runner.temp }}/tested
+      - name: The push rows' digest files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digest-*
+          path: ${{ runner.temp }}/digest
+          merge-multiple: true
+      # The lines "<name> sha256:<64 hex>" release-bundle.sh and
+      # release-notes.sh read: in a real run from the index job's JSON
+      # object, in a dry run (no index) the placeholder.
+      - name: Index digests
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          INDEX_DIGESTS: ${{ needs.index.outputs.digests }}
+        run: |
+          set -euo pipefail
+          zero=sha256:0000000000000000000000000000000000000000000000000000000000000000
+          names="mail mail-postfix mail-unbound mail-olefy mail-sogo"
+          out="$RUNNER_TEMP/digests.txt"
+          if [ "$DRY_RUN" != false ]; then
+            if [ -n "$INDEX_DIGESTS" ]; then
+              echo "::error::a dry run with index digests: $INDEX_DIGESTS"
+              exit 1
+            fi
+            for n in $names; do
+              echo "$n $zero"
+            done >"$out"
+            echo "::notice::dry run: the bundle and the notes pin the placeholder digest $zero"
+            echo "**Dry run:** the bundle and the notes pin the placeholder digest \`$zero\`; a real run pins the published index digests." >>"$GITHUB_STEP_SUMMARY"
+          else
+            jq -er 'to_entries[] | "\(.key | ltrimstr("ghcr.io/keepia/")) \(.value)"' <<<"$INDEX_DIGESTS" | sort >"$out"
+            want=$(for n in $names; do echo "$n"; done | sort)
+            if [ "$(cut -d' ' -f1 "$out")" != "$want" ]; then
+              echo "::error::the index job's digests are not exactly the five images: $INDEX_DIGESTS"
+              exit 1
+            fi
+            if grep -qvE '^mail(-[a-z]+)? sha256:[0-9a-f]{64}$' "$out" || grep -qF "$zero" "$out"; then
+              echo "::error::an index digest is not sha256:<64 hex>, or it is the placeholder: $INDEX_DIGESTS"
+              exit 1
+            fi
+          fi
+          cat "$out"
+      - name: SBOMs and sources of the release
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          rows="$RUNNER_TEMP/rows"
+          mkdir -p "$rows" dist
+          for d in "$RUNNER_TEMP"/tested/tested-*; do
+            cp "$d"/sbom-*.spdx.json "$d"/sources-*.json "$rows/"
+          done
+          {
+            echo "### SBOMs and sources"
+            echo
+          } >>"$GITHUB_STEP_SUMMARY"
+          GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/release-sources release -version "$VERSION" -in "$rows" -digests "$RUNNER_TEMP/digest" -out "$RUNNER_TEMP/sources" | tee -a "$GITHUB_STEP_SUMMARY"
+          cp "$rows"/sbom-*.spdx.json "$RUNNER_TEMP/sources/sources.json" "$RUNNER_TEMP/sources/SOURCES.md" dist/
+          {
+            echo
+            echo "### Push rows: pushed config = tested config"
+            echo
+            echo "| Image | Platform | Config | Index | Platform manifest |"
+            echo "|---|---|---|---|---|"
+            for f in "$RUNNER_TEMP"/digest/*.json; do
+              jq -r '"| `\(.repository)` | \(.platform) | `\(.config)` | `\(.index)` | `\(.manifest)` |"' "$f"
+            done
+            echo
+          } >>"$GITHUB_STEP_SUMMARY"
+      - name: Bundle
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: sh scripts/release-bundle.sh "$VERSION" "$RUNNER_TEMP/bundle" "$RUNNER_TEMP/digests.txt" "$RUNNER_TEMP/sources/SOURCES.md"
+      - name: Release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          LAST: ${{ needs.version.outputs.last }}
+        run: sh scripts/release-notes.sh "$VERSION" "$LAST" "$RUNNER_TEMP/digests.txt" "$RUNNER_TEMP/sources/licences.txt" >dist/notes.md
+      # Exactly the planned files, no placeholder in a real run, then
+      # SHA256SUMS over all of them (attest-assets and release check it).
+      - name: Release assets
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          zero=sha256:0000000000000000000000000000000000000000000000000000000000000000
+          bundle="keepia-mail-$VERSION.tar.gz"
+          cp "$RUNNER_TEMP/bundle/$bundle" dist/
+          cd dist
+          want=$(
+            echo "$bundle"
+            echo notes.md
+            echo SOURCES.md
+            echo sources.json
+            for n in mail mail-postfix mail-unbound mail-olefy mail-sogo; do
+              for a in amd64 arm64; do
+                echo "sbom-$n-$a.spdx.json"
+              done
+            done
+          )
+          if [ "$(ls -A | sort)" != "$(sort <<<"$want")" ]; then
+            echo "::error::the release assets are not exactly the planned files:"
+            ls -A
+            exit 1
+          fi
+          tar -xzOf "$bundle" keepia-mail/docker-compose.yml >"$RUNNER_TEMP/bundle-compose.yml"
+          if [ "$DRY_RUN" = false ] && grep -qF "$zero" notes.md "$RUNNER_TEMP/bundle-compose.yml"; then
+            echo "::error::a real release must not pin the placeholder digest $zero"
+            exit 1
+          fi
+          sha256sum -- * >SHA256SUMS
+          {
+            echo "### Release assets"
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+            echo
+            echo "### The bundle"
+            echo
+            echo '```'
+            tar -tvzf "$bundle"
+            echo '```'
+            echo
+            echo "### Release notes (before the generated list)"
+            echo
+            cat notes.md
+          } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  # Provenance of each image index and an SBOM attestation of each platform
+  # manifest, through GitHub's attestation API (no push to the registry, so
+  # no packages: write). Runs no repository code.
+  attest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: [version, index, bundle]
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digest-*
+          path: ${{ runner.temp }}/digest
+          merge-multiple: true
+      - name: Checksum
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+      # Every subject digest, checked: the index of each image from the
+      # index job, the platform manifests from the push rows (the ones
+      # -publish-index put into that index).
+      - name: Subjects
+        id: subjects
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          INDEX_DIGESTS: ${{ needs.index.outputs.digests }}
+        run: |
+          for target in keepia postfix unbound olefy sogo; do
+            repo=ghcr.io/keepia/mail-$target
+            if [ "$target" = keepia ]; then
+              repo=ghcr.io/keepia/mail
+            fi
+            index=$(jq -er --arg r "$repo" '.[$r]' <<<"$INDEX_DIGESTS")
+            if [[ ! "$index" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::the index job names no index digest for $repo: '$index'"
+              exit 1
+            fi
+            echo "$target=$index" >>"$GITHUB_OUTPUT"
+            for arch in amd64 arm64; do
+              manifest=$(jq -er --arg t "$target" --arg p "linux/$arch" --arg r "$repo" --arg v "$VERSION" \
+                'select(.target == $t and .platform == $p and .repository == $r and .version == $v) | .manifest' \
+                "$RUNNER_TEMP/digest/$target-$arch.json")
+              if [[ ! "$manifest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "::error::no platform manifest digest for $repo linux/$arch: '$manifest'"
+                exit 1
+              fi
+              echo "$target-$arch=$manifest" >>"$GITHUB_OUTPUT"
+            done
+          done
+      - name: Provenance of ghcr.io/keepia/mail
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail
+          subject-digest: ${{ steps.subjects.outputs.keepia }}
+      - name: SBOM of ghcr.io/keepia/mail linux/amd64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail
+          subject-digest: ${{ steps.subjects.outputs.keepia-amd64 }}
+          sbom-path: dist/sbom-mail-amd64.spdx.json
+      - name: SBOM of ghcr.io/keepia/mail linux/arm64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail
+          subject-digest: ${{ steps.subjects.outputs.keepia-arm64 }}
+          sbom-path: dist/sbom-mail-arm64.spdx.json
+      - name: Provenance of ghcr.io/keepia/mail-postfix
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail-postfix
+          subject-digest: ${{ steps.subjects.outputs.postfix }}
+      - name: SBOM of ghcr.io/keepia/mail-postfix linux/amd64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail-postfix
+          subject-digest: ${{ steps.subjects.outputs.postfix-amd64 }}
+          sbom-path: dist/sbom-mail-postfix-amd64.spdx.json
+      - name: SBOM of ghcr.io/keepia/mail-postfix linux/arm64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail-postfix
+          subject-digest: ${{ steps.subjects.outputs.postfix-arm64 }}
+          sbom-path: dist/sbom-mail-postfix-arm64.spdx.json
+      - name: Provenance of ghcr.io/keepia/mail-unbound
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail-unbound
+          subject-digest: ${{ steps.subjects.outputs.unbound }}
+      - name: SBOM of ghcr.io/keepia/mail-unbound linux/amd64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail-unbound
+          subject-digest: ${{ steps.subjects.outputs.unbound-amd64 }}
+          sbom-path: dist/sbom-mail-unbound-amd64.spdx.json
+      - name: SBOM of ghcr.io/keepia/mail-unbound linux/arm64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail-unbound
+          subject-digest: ${{ steps.subjects.outputs.unbound-arm64 }}
+          sbom-path: dist/sbom-mail-unbound-arm64.spdx.json
+      - name: Provenance of ghcr.io/keepia/mail-olefy
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail-olefy
+          subject-digest: ${{ steps.subjects.outputs.olefy }}
+      - name: SBOM of ghcr.io/keepia/mail-olefy linux/amd64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail-olefy
+          subject-digest: ${{ steps.subjects.outputs.olefy-amd64 }}
+          sbom-path: dist/sbom-mail-olefy-amd64.spdx.json
+      - name: SBOM of ghcr.io/keepia/mail-olefy linux/arm64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail-olefy
+          subject-digest: ${{ steps.subjects.outputs.olefy-arm64 }}
+          sbom-path: dist/sbom-mail-olefy-arm64.spdx.json
+      - name: Provenance of ghcr.io/keepia/mail-sogo
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail-sogo
+          subject-digest: ${{ steps.subjects.outputs.sogo }}
+      - name: SBOM of ghcr.io/keepia/mail-sogo linux/amd64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail-sogo
+          subject-digest: ${{ steps.subjects.outputs.sogo-amd64 }}
+          sbom-path: dist/sbom-mail-sogo-amd64.spdx.json
+      - name: SBOM of ghcr.io/keepia/mail-sogo linux/arm64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/keepia/mail-sogo
+          subject-digest: ${{ steps.subjects.outputs.sogo-arm64 }}
+          sbom-path: dist/sbom-mail-sogo-arm64.spdx.json
+
+  # Provenance of every release asset. Runs no repository code.
+  attest-assets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: bundle
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: Checksum
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+
+  # The tag vX.Y.Z on the built commit and the GitHub release with the
+  # assets (design-system's release job). Runs no repository code.
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [version, bundle, attest, attest-assets]
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: Checksum
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+      # Creating a ref fails when it exists, so a tag pushed since the
+      # version job's check is never reused.
+      - name: Create the tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::not a release version: '$VERSION'"
+            exit 1
+          fi
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$GITHUB_SHA" --silent; then
+            echo "::error::could not create the tag v$VERSION on $GITHUB_SHA; does it exist?"
+            exit 1
+          fi
+      # The notes: the head from release-notes.sh, then the list generated
+      # from the pull requests since BASE (.github/release.yml). The first
+      # release has no BASE and no --notes-start-tag.
+      - name: Create the release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+          BASE: ${{ needs.version.outputs.base }}
+        run: |
+          start=()
+          if [ -n "$BASE" ]; then
+            start=(--notes-start-tag "$BASE")
+          fi
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Keepia Mail $VERSION" --notes-file notes.md --generate-notes "${start[@]}" \
+            "keepia-mail-$VERSION.tar.gz" sbom-*.spdx.json sources.json SOURCES.md SHA256SUMS
+      # Removes the tag this run created, and the draft gh leaves when an
+      # upload fails, so the next run can start over; also when the job is
+      # cancelled or times out. A published release and its tag stay.
+      - name: Remove the tag after a failed release
+        if: (failure() || cancelled()) && steps.tag.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if out=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>&1); then
+            if [ "$out" != true ]; then
+              echo "::error::release v$VERSION is published although a step failed; check it, the tag stays"
+              exit 1
+            fi
+            gh release delete "v$VERSION" --repo "$GITHUB_REPOSITORY" --yes
+          elif [ "$out" != "release not found" ]; then
+            echo "::error::could not check for release v$VERSION: $out; delete the tag v$VERSION by hand if no release uses it"
+            exit 1
+          fi
+          gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/v$VERSION" --silent
+          echo "::notice::removed the tag v$VERSION; fix the failure and run the workflow again"
+
+  # Moves `latest` to X.Y.Z, last, after the release exists: forward only,
+  # and only if v$VERSION is the highest release tag on this commit
+  # (-move-latest, step 0).
+  latest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [version, index, release]
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - env:
+          VERSION: ${{ needs.version.outputs.version }}
+          INDEX_DIGESTS: ${{ needs.index.outputs.digests }}
+        run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -move-latest

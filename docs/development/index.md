@@ -679,7 +679,11 @@ lives, also under a skipped path.
    workflow without its own `permissions`, and a job without permissions in
    a workflow without them are reported. In every workflow, `release.yml`
    included, each job's `container` and `services` image is
-   `name:tag@sha256:<64 hex>`;
+   `name:tag@sha256:<64 hex>`, and so is the BuildKit image of every
+   `docker/setup-buildx-action` step (`driver-opts: image=…`, the
+   docker-container driver only): without it the builder runs the floating
+   `moby/buildkit:buildx-stable-1`, and in `push` that container holds the
+   GHCR credentials (#71 review B, N6);
 7. **the release surface** (#27,
    [`release.go`](../../tools/check-image-pins/release.go)): `release.yml`
    has exactly the planned shape, so the one workflow that can push cannot
@@ -711,12 +715,24 @@ lives, also under a skipped path.
      and `VERSION` as X.Y.Z, and refuses a `pushed.tar` that exists in any
      form. A script allowlisted for these jobs (none) may have no
      forwarding function;
+   - **`attest`, `attest-assets` and `release` have exact steps too**
+     (#27 part 4b, #71 review B N2), the same way: the `dist` and `digest-*`
+     artifacts, `sha256sum -c SHA256SUMS` in `dist`, `attest`'s subjects
+     step (the index digests from `index`, the platform manifests from the
+     push rows' digest files, each checked as `sha256:<64 hex>`), one
+     `actions/attest` step per subject (the provenance of each image's
+     index, the SBOM of each platform manifest, every release asset), and
+     `release`'s tag, release and cleanup steps. Their `if` and
+     `working-directory` are part of the step. So these jobs run no
+     third-party action, no `curl | sh`, no `GITHUB_ENV` write and nothing
+     from the bundle;
    - **P7:** no `continue-on-error`, job `container`, `services`,
      `concurrency`, `defaults` or `env` (the bake jobs' `BAKE_TARGET`,
      `PLATFORM`, `VERSION` and `BAKE_SET` aside), no workflow `env`, and
      `release`, `attest` and `attest-assets` run no repository code (no
      checkout, local action, `shell:`, code path or runtime; step env only
-     `GH_TOKEN`, `TAG`, `VERSION`, `BASE`; design-system's rule);
+     `GH_TOKEN`, `TAG`, `VERSION`, `BASE`, `INDEX_DIGESTS`; design-system's
+     rule);
    - **P8:** `on:` is only `workflow_dispatch` with `dry_run` (boolean,
      default `true`) and `version` (string, default `""`); the
      workflow-level `concurrency` is exactly `{group: release,
@@ -735,16 +751,31 @@ lives, also under a skipped path.
      job on `main` wrote (#71 review B: such a cache runs its code inside
      `check-image-pins`, after `docker login`); `-verify-pushed`,
      `-publish-index`, `-move-latest`, `docker login` and
-     `docker/login-action` appear only in the exact jobs.
+     `docker/login-action` appear only in the exact jobs. A mode counts in
+     any spelling: its name anywhere in the run text once quotes and
+     backslashes are gone (`-move-latest=true`, `--publish-index`, inside a
+     `bash -c '…'` text), and `docker login` wherever its words stand in a
+     command, an `sh -c` text included (#71 delta reviews A N1, B D2).
+     Action names are compared without case (`Actions/Setup-Go@…` is
+     `actions/setup-go`); `actions/cache` (and its `restore` and `save`
+     actions), a `docker://` step and any `anchore/` action are reported in
+     every job; a container run (`docker`, `podman` or `nerdctl` `run`,
+     `create`, `container run`) is reported unless the step is exactly the
+     build row's package-list line of the verified image; and every
+     `docker/setup-buildx-action` has exactly CI's mirror and the pinned
+     BuildKit image (A N2, N3; B D1).
 
    With the cache off, the tool's modules come fresh from the module proxy
    and are checked against `go.sum`; nothing earlier in an exact job runs
    code that could change them, so no `go mod verify` line is needed.
 
    In other workflows a `release-` cache scope in `BAKE_SET` is reported.
-   Its tests are `TestReleaseSurface` (the `fail-27-*` cases, each one
-   change to `testdata/repos/pass-27-release`), `TestReleaseBuildMode` and
-   `TestBuildRefusesPushedTar`.
+   Its tests are `TestReleaseWorkflow` (the repository's own `release.yml`
+   is clean), `TestReleaseSurface` (the `fail-27-*` cases, each one change
+   to the repository's `release.yml` in the tree
+   `testdata/repos/pass-27-release`), `TestReleaseBuildMode` and
+   `TestBuildRefusesPushedTar`. `make image-pins` checks the real
+   `release.yml` in the repository.
 
 **The release modes** run in `release.yml`'s write-token jobs, as the
 fixed lines above, and take no argument and no tag name:
@@ -833,6 +864,59 @@ line, `# want-lines: N`), and whole trees in `testdata/repos/` with the
 expected findings in `WANT`. The trees with a bake file need buildx: they
 skip locally without it and fail in CI (`CI` set).
 
+## Releases
+
+[`.github/workflows/release.yml`](../../.github/workflows/release.yml)
+publishes a release from `main`, started by hand; the runbook is in
+[process.md, "Releases"](process.md#releases). The default is a dry run.
+
+| Job | Runs in | Does |
+|---|---|---|
+| `version` | both | started on main; the pull requests since the last release, the version (`scripts/version-policy.sh LAST INPUT < prs.tsv`); the tag and release do not exist yet; the images and their tags |
+| `build` | both | each image × amd64/arm64, cold: CI's build row (check, bake, verify, image tests, the saved and checked tar), `packages.txt`, syft v1.57.1 on the tar, `tools/release-sources row`; writes the release cache (`mode=max`) |
+| `push-rehearsal` | dry run | `push` without the login and with `push=false` |
+| `push` | real run | rebuilds from the release cache and pushes by digest; `-verify-pushed`: the pushed config is the tested config |
+| `index` | real run | `-publish-index`: `ghcr.io/keepia/mail[-<name>]:X.Y.Z` with both platforms |
+| `bundle` | both | `tools/release-sources release` (10 SBOMs, `sources.json`, `SOURCES.md`), the bundle, the notes head, `SHA256SUMS`; a dry run pins the placeholder digest `sha256:0…0`, a real run asserts that none is left |
+| `attest` | real run | provenance of each image index, the SBOM of each platform manifest (`actions/attest`, GitHub's attestation API) |
+| `attest-assets` | real run | provenance of every release asset |
+| `release` | real run | the tag `vX.Y.Z` on the built commit and the GitHub release; removes its own tag and draft after a failure |
+| `latest` | real run | `-move-latest`: `latest` to `X.Y.Z`, last and forward only |
+
+**Tags.** `X.Y.Z` never changes. `latest` is the only tag that moves: it
+follows every release, and **before 1.0 it follows every 0.x release, so
+it can include breaking changes**. Pin `X.Y.Z` or a digest; the bundle
+always pins every image by digest. No other tag exists.
+
+**Verify** an image's provenance and a platform image's SBOM:
+
+```sh
+gh attestation verify oci://ghcr.io/keepia/mail-postfix:0.1.0 --owner keepia
+gh attestation verify oci://ghcr.io/keepia/mail-postfix@<platform digest> --owner keepia \
+  --predicate-type https://spdx.dev/Document/v2.3
+```
+
+**Labels.** Each own image carries its own `org.opencontainers.image.licenses`
+(`docker-bake.hcl`; `tools/release-sources` fails on a target without
+one) and `io.github.keepia.sources`, the URL of the release's
+`SOURCES.md`.
+
+**Pinned by hand.** The actions of `release.yml` are pinned in the tool too
+(`actionPins` in `tools/check-image-pins/release.go`): a Dependabot pull
+request that bumps an action there fails `make image-pins` until the same
+pull request bumps `actionPins` (one line per action). The BuildKit image
+of every builder (`driver-opts: image=moby/buildkit:vX.Y.Z@sha256:…` in
+`ci.yml` and `release.yml`, `buildkitImage` in the tool) is not seen by
+Dependabot: bump the three together by hand, to the release that
+`moby/buildkit:buildx-stable-1` names.
+
+**The release cache.** `build` writes `release-<image>-<arch>` scopes with
+`mode=max` to the 10 GB Actions cache; `push` and `push-rehearsal` read
+them. SOGo's build stage is the largest: the PR of #27 part 4b measured it
+(its body has the number). When the cache is full, GitHub evicts the
+oldest entries, CI's first; an evicted `release-` entry makes the push
+row's rebuild differ, and `-verify-pushed` stops the release.
+
 ## Security checks
 
 The required checks are `secret-scan`, `links` and `workflows`. Each runs on
@@ -915,6 +999,10 @@ external service and needs the maintainer's OK.
 - Dependabot does not update tools that the Makefile installs with
   `go install pkg@version` (gitleaks, actionlint): bump them by hand in the
   Makefile.
+- A Dependabot bump of an action that `release.yml` uses needs the same
+  bump of `actionPins` in `tools/check-image-pins/release.go`, in the same
+  pull request, and the BuildKit image is bumped by hand
+  ([Releases](#releases), "Pinned by hand").
 
 ### Secret scanning
 

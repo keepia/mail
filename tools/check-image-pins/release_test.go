@@ -9,19 +9,37 @@ import (
 	"testing"
 )
 
-// The release fixture: testdata/repos/pass-27-release, a tree with a
-// release.yml of the planned shape (#27). TestRepos checks it is clean;
-// TestReleaseSurface runs each fail-27-* case on a copy with one change.
+// The release fixture: the repository's own .github/workflows/release.yml
+// (#27 part 4b; part 4a had a copy of the planned shape here), in the
+// tree testdata/repos/pass-27-release (its Dockerfile and the scripts its
+// build job runs). TestReleaseWorkflow checks it is clean there;
+// TestReleaseSurface runs each fail-27-* case on a copy with one change,
+// so every red fixture is a change to the workflow that runs.
 
-const releaseFixtureDir = "testdata/repos/pass-27-release"
+const (
+	releaseFixtureDir = "testdata/repos/pass-27-release"
+	releaseWorkflow   = "../../.github/workflows/release.yml"
+)
 
 func releaseFixture(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(releaseFixtureDir, ".github", "workflows", "release.yml"))
+	b, err := os.ReadFile(releaseWorkflow)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// TestReleaseWorkflow: the repository's release.yml is clean in the
+// fixture tree (make image-pins checks it in the repository itself).
+func TestReleaseWorkflow(t *testing.T) {
+	root := t.TempDir()
+	copyTree(t, releaseFixtureDir, root)
+	write(t, root, ".github/workflows/release.yml", releaseFixture(t))
+	var out, errOut bytes.Buffer
+	if code := run([]string{root}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d, want 0:\n%s%s", code, out.String(), errOut.String())
+	}
 }
 
 // jobBlock returns the start and end of a job's block in the fixture.
@@ -172,17 +190,19 @@ var releaseCases = []struct {
 	// P7: no continue-on-error, container, services, env; no repository
 	// code in release, attest and attest-assets.
 	{"fail-27-p7-continue-on-error", inJob("push", pushedStep, pushedStep+"        continue-on-error: true\n"), nil, []string{"job push: step 9 has continue-on-error: a failed step must stop the release (P7)", "job push: step 9 has continue-on-error: a step of this job has no if"}},
-	{"fail-27-p7-checkout-in-release", inJob("release", "    steps:\n", "    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"), nil, []string{"job release: step 1 checks out the repository"}},
-	{"fail-27-p7-script-in-attest", inJob("attest-assets", "        run: sha256sum -c SHA256SUMS\n", "        run: sh scripts/release-sources.sh\n"), nil, []string{"job attest-assets: step 2 runs repository or dependency code (scripts/)"}},
+	{"fail-27-p7-checkout-in-release", inJob("release", "    steps:\n", "    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"), nil,
+		[]string{"job release: step 1 checks out the repository", "job release: step 1 uses actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1, which is not one of this job's actions", "job release has 6 steps; the release policy has exactly 5"}},
+	{"fail-27-p7-script-in-attest", inJob("attest-assets", "        run: sha256sum -c SHA256SUMS\n", "        run: sh scripts/release-sources.sh\n"), nil,
+		[]string{"job attest-assets: step 2 runs repository or dependency code (scripts/)", "job attest-assets: step 2 runs a text that is not one of this job's lines"}},
 	{"fail-27-p7-workflow-env", inWorkflow("permissions: {}\n", "permissions: {}\nenv:\n  X: y\n"), nil, []string{"release.yml has no workflow env",
 		"job build: workflow env X is not allowed", "job push-rehearsal: workflow env X is not allowed", "job push: workflow env X is not allowed"}},
 	// P8: trigger, inputs, run texts, VERSION.
 	{"fail-27-p8-on-push", inWorkflow("on:\n  workflow_dispatch:\n", "on:\n  push:\n  workflow_dispatch:\n"), nil, []string{"on: must be exactly workflow_dispatch"}},
 	{"fail-27-p8-workflow-call", inWorkflow("on:\n  workflow_dispatch:\n", "on:\n  workflow_call:\n  workflow_dispatch:\n"), nil, []string{"on: must be exactly workflow_dispatch"}},
 	{"fail-27-p8-dry-run-default", inWorkflow("        type: boolean\n        default: true\n", "        type: boolean\n        default: false\n"), nil, []string{"input dry_run must be type boolean with default true"}},
-	{"fail-27-p8-input-in-run", inJob("version", "        run: sh scripts/version-policy.sh \"$INPUT\"\n", "        run: sh scripts/version-policy.sh \"${{ inputs.version }}\"\n"), nil, []string{"job version: step 3 has ${{ }} in its run text"}},
+	{"fail-27-p8-input-in-run", inJob("version", `sh scripts/version-policy.sh "$last" "$INPUT" <"$prs"`, `sh scripts/version-policy.sh "$last" "${{ inputs.version }}" <"$prs"`), nil, []string{"job version: step 4 has ${{ }} in its run text"}},
 	{"fail-27-p8-version-from-event", inJob("build", "      VERSION: ${{ needs.version.outputs.version }}\n", "      VERSION: ${{ github.event.inputs.version }}\n"), nil, []string{"job build: env VERSION must be exactly", "job build: job env VERSION must be exactly"}},
-	{"fail-27-p8-step-version", inJob("bundle", "          VERSION: ${{ needs.version.outputs.version }}\n", "          VERSION: ${{ inputs.version }}\n"), nil, []string{"release.yml: job bundle step 2 env VERSION must be exactly"}},
+	{"fail-27-p8-step-version", inJob("bundle", "          VERSION: ${{ needs.version.outputs.version }}\n", "          VERSION: ${{ inputs.version }}\n"), nil, []string{"release.yml: job bundle step 6 env VERSION must be exactly"}},
 	// P9: exact actions; push and push-rehearsal step for step.
 	{"fail-27-p9-other-action-in-index", inJob("index", "      - id: index\n", "      - uses: other/push@"+sha40+"\n      - id: index\n"), nil, []string{"job index has 7 steps", "step 6 uses other/push@" + sha40 + ", which is not one of this job's actions"}},
 	{"fail-27-p9-login-action", inJob("push", pushedStep, "      - uses: docker/login-action@"+sha40+"\n"+pushedStep), nil, []string{"job push has 11 steps", "uses docker/login-action@" + sha40 + ", which is not one of this job's actions"}},
@@ -211,7 +231,7 @@ var releaseCases = []struct {
 	{"fail-27-p4-env-expression", inJob("push", "      - name: Commit time\n", "      - name: Commit time\n        env: ${{ fromJSON('{\"BASH_ENV\":\"scripts/image-test.sh\"}') }}\n"),
 		nil, []string{"job push: step 5: env is not a mapping", "job push: step 5 must be exactly run: " + lineEpoch}},
 	{"fail-27-p7-env-expression", inJob("release", "        working-directory: dist\n        run: sha256sum -c SHA256SUMS\n", "        working-directory: dist\n        env: ${{ fromJSON('{\"BASH_ENV\":\"x\"}') }}\n        run: sha256sum -c SHA256SUMS\n"),
-		nil, []string{"job release: step 2: env is not a mapping"}},
+		nil, []string{"job release: step 2: env is not a mapping", "job release: step 2 must be exactly run: sha256sum -c SHA256SUMS"}},
 	{"fail-27-bake-env-expression", inJob("build", "    env:\n      BAKE_TARGET: ${{ matrix.image }}\n      PLATFORM: linux/${{ matrix.arch }}\n      VERSION: ${{ needs.version.outputs.version }}\n", "    env: ${{ fromJSON('{}') }}\n    x-env:\n      BAKE_TARGET: ${{ matrix.image }}\n      PLATFORM: linux/${{ matrix.arch }}\n      VERSION: ${{ needs.version.outputs.version }}\n"),
 		nil, []string{"job build: the job env is not a mapping (${{ fromJSON('{}') }})", "job build: the job env is not a mapping\n", "job build: key x-env is not in the release policy"}},
 	// Review A, B2: the syft rule matches a command that runs syft.
@@ -219,10 +239,10 @@ var releaseCases = []struct {
 	{"fail-27-syft-binary", inJob("build", "        run: go run github.com/anchore/syft/cmd/syft@v1.57.1 scan", "        run: syft scan"), nil, []string{"job build: step 14 runs syft other than as"}},
 	// Review A, B3: the release modes and the login only in the exact jobs.
 	{"fail-27-latest-in-bundle", inJob("bundle", "      - uses: actions/upload-artifact", "      - env:\n          VERSION: ${{ needs.version.outputs.version }}\n          INDEX_DIGESTS: ${{ needs.index.outputs.digests }}\n        run: "+lineMoveLatest+"\n      - uses: actions/upload-artifact"),
-		nil, []string{"job bundle: step 3 runs -move-latest: the release modes run only in push, push-rehearsal, index and latest"}},
+		nil, []string{"job bundle: step 10 runs -move-latest: the release modes run only in push, push-rehearsal, index and latest"}},
 	{"fail-27-verify-pushed-in-build", inJob("build", "      - name: SBOM\n", "      - run: "+lineVerifyPushed+"\n      - name: SBOM\n"), nil, []string{"job build: step 14 runs -verify-pushed: the release modes run only in"}},
 	{"fail-27-login-in-bundle", inJob("bundle", "      - uses: actions/upload-artifact", "      - env:\n          TOKEN: ${{ secrets.GITHUB_TOKEN }}\n        run: "+lineLogin+"\n      - uses: actions/upload-artifact"),
-		nil, []string{"job bundle: step 3 runs docker login: only push, index and latest log in to GHCR"}},
+		nil, []string{"job bundle: step 10 runs docker login: only push, index and latest log in to GHCR"}},
 	// Review B, N1: the policy's pin, not any commit of the action.
 	{"fail-27-p9-other-pin", inJob("push", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "actions/checkout@"+sha40), nil, []string{"job push: step 1 uses actions/checkout at " + sha40 + ", not at the policy's pin"}},
 	// Revision 5 (B6): the concurrency that serialises the moves.
@@ -230,6 +250,63 @@ var releaseCases = []struct {
 	{"fail-27-concurrency-cancel", inWorkflow("  cancel-in-progress: false\n", "  cancel-in-progress: true\n"), nil, []string{"the workflow-level concurrency must be exactly"}},
 	{"fail-27-concurrency-group", inWorkflow("  group: release\n", "  group: release-${{ github.run_id }}\n"), nil, []string{"the workflow-level concurrency must be exactly"}},
 	{"fail-27-concurrency-job", inJob("latest", "    permissions:\n", "    concurrency: latest\n    permissions:\n"), nil, []string{"job latest: concurrency is not allowed: only the workflow-level concurrency group release serialises the runs (B6)"}},
+	// #27 part 4b, #71 review B N2: attest, attest-assets and release have
+	// exact steps.
+	{"fail-27-4b-release-curl-sh", inJob("release", "SOURCES.md SHA256SUMS\n", "SOURCES.md SHA256SUMS\n          curl -sSf https://example.org/install | sh\n"),
+		nil, []string{"job release: step 4 runs a text that is not one of this job's lines"}},
+	{"fail-27-4b-attest-third-party", inJob("attest", "      - name: Checksum\n", "      - uses: other/sign@"+sha40+"\n      - name: Checksum\n"),
+		nil, []string{"job attest: step 3 uses other/sign@" + sha40 + ", which is not one of this job's actions", "job attest has 20 steps; the release policy has exactly 19"}},
+	{"fail-27-4b-attest-assets-github-env", inJob("attest-assets", "      - uses: actions/attest@", "      - run: echo \"BASH_ENV=$PWD/x\" >>\"$GITHUB_ENV\"\n      - uses: actions/attest@"),
+		nil, []string{"job attest-assets: step 3 runs a text that is not one of this job's lines", "job attest-assets has 4 steps; the release policy has exactly 3"}},
+	{"fail-27-4b-release-km", inJob("release", "      - name: Create the tag\n", "      - run: ./keepia-mail/km migrate\n      - name: Create the tag\n"),
+		nil, []string{"job release: step 3 runs a repository-relative command", "job release: step 3 runs a text that is not one of this job's lines", "job release has 6 steps"}},
+	{"fail-27-4b-sbom-subject", inJob("attest", "subject-digest: ${{ steps.subjects.outputs.postfix-amd64 }}", "subject-digest: ${{ steps.subjects.outputs.postfix }}"),
+		nil, []string{"job attest: step 9 must be exactly uses actions/attest@" + actionPins["actions/attest"]}},
+	{"fail-27-4b-notes-start-tag", inJob("release", `--generate-notes "${start[@]}"`, `--generate-notes --notes-start-tag "$BASE"`),
+		nil, []string{"job release: step 4 runs a text that is not one of this job's lines"}},
+	{"fail-27-4b-cleanup-if", inJob("release", "        if: (failure() || cancelled()) && steps.tag.outcome == 'success'\n", "        if: failure()\n"),
+		nil, []string{`, if "(failure() || cancelled()) && steps.tag.outcome == 'success'"): if "failure()", want "(failure() || cancelled()) && steps.tag.outcome == 'success'"`}},
+	{"fail-27-4b-attest-push-to-registry", inJob("attest-assets", "          subject-path: dist/*\n", "          subject-path: dist/*\n          push-to-registry: true\n"),
+		nil, []string{"job attest-assets: step 3 must be exactly uses actions/attest@"}},
+	// #71 delta reviews A N1, B D2: a release mode in any spelling.
+	{"fail-27-4b-mode-equals", inJob("bundle", "      - uses: actions/upload-artifact", "      - run: GOENV=off GOFLAGS=-mod=readonly GOWORK=off go run ./tools/check-image-pins -move-latest=true\n      - uses: actions/upload-artifact"),
+		nil, []string{"job bundle: step 10 runs -move-latest: the release modes run only in"}},
+	{"fail-27-4b-mode-bash-c", inJob("version", "      - name: Images\n", "      - run: bash -c 'go run ./tools/check-image-pins -publish-index=1'\n      - name: Images\n"),
+		nil, []string{"job version: step 6 runs -publish-index: the release modes run only in"}},
+	{"fail-27-4b-mode-quoted", inJob("build", "      - name: SBOM\n", "      - run: go run ./tools/check-image-pins \"-verify-\"pushed\n      - name: SBOM\n"),
+		nil, []string{"job build: step 14 runs -verify-pushed: the release modes run only in"}},
+	{"fail-27-4b-login-bash-c", inJob("bundle", "      - uses: actions/upload-artifact", "      - run: bash -c 'echo \"$T\" | docker login ghcr.io -u x --password-stdin'\n      - uses: actions/upload-artifact"),
+		nil, []string{"job bundle: step 10 runs docker login: only push, index and latest log in to GHCR"}},
+	// #71 delta review A N2: no other syft, no other container.
+	{"fail-27-4b-docker-run-syft", inJob("build", "      - name: SBOM\n", "      - run: docker run --rm anchore/syft:latest scan \"docker-archive:$RUNNER_TEMP/image.tar\"\n      - name: SBOM\n"),
+		nil, []string{"job build: step 14 runs a container (docker run): in release.yml only the build row's package-list line does"}},
+	{"fail-27-4b-docker-run-unpinned", inJob("version", "      - name: Images\n", "      - run: docker run --rm alpine:latest true\n      - name: Images\n"),
+		nil, []string{"job version: step 6 runs a container (docker run)"}},
+	{"fail-27-4b-podman-container-run", inJob("bundle", "      - uses: actions/upload-artifact", "      - run: podman container run --rm docker.io/library/busybox true\n      - uses: actions/upload-artifact"),
+		nil, []string{"job bundle: step 10 runs a container (podman run)"}},
+	{"fail-27-4b-sbom-action", inJob("build", "      - name: SBOM\n", "      - uses: anchore/sbom-action@"+sha40+"\n      - name: SBOM\n"),
+		nil, []string{"job build: step 14 uses anchore/sbom-action@" + sha40 + ": syft runs only as"}},
+	{"fail-27-4b-docker-uses", inJob("bundle", "      - uses: actions/upload-artifact", "      - uses: docker://anchore/syft:latest\n      - uses: actions/upload-artifact"),
+		nil, []string{"job bundle: step 10 uses docker://anchore/syft:latest: a step of release.yml runs no image"}},
+	// #71 delta reviews A N3, B D1: action names without case; no cache.
+	{"fail-27-4b-setup-go-case", inJob("build", "uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n        with:\n          go-version-file: go.mod\n          cache: false\n",
+		"uses: Actions/Setup-Go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n        with:\n          go-version-file: go.mod\n"),
+		nil, []string{"job build: step 2 uses actions/setup-go without cache: false"}},
+	{"fail-27-4b-actions-cache", inJob("build", "      - name: Commit time\n", "      - uses: actions/cache@"+sha40+"\n        with:\n          path: ~/go/pkg/mod\n          key: go\n      - name: Commit time\n"),
+		nil, []string{"job build: step 5 uses actions/cache@" + sha40 + ": release.yml restores and saves no cache"}},
+	{"fail-27-4b-actions-cache-restore-case", inJob("bundle", "      - uses: actions/upload-artifact", "      - uses: Actions/Cache/restore@"+sha40+"\n        with:\n          path: ~/go/pkg/mod\n          key: go\n      - uses: actions/upload-artifact"),
+		nil, []string{"job bundle: step 10 uses Actions/Cache/restore@" + sha40 + ": release.yml restores and saves no cache"}},
+	// #71 delta review B, D3: a string "false" reads apart from false.
+	{"fail-27-4b-setup-go-cache-string", inJob("index", "          cache: false\n", "          cache: \"false\"\n"),
+		nil, []string{`job index: step 2 must be exactly uses actions/setup-go@` + actionPins["actions/setup-go"] + ` with map[string]interface {}{"cache":false, "go-version-file":"go.mod"}: with map[string]interface {}{"cache":"false", "go-version-file":"go.mod"}`}},
+	// #71 review B, N6: the BuildKit image is pinned, in release.yml and
+	// in every other workflow.
+	{"fail-27-4b-buildx-floating", inJob("build", "          driver-opts: image="+buildkitImage+"\n", ""),
+		nil, []string{"job build: step 4 uses docker/setup-buildx-action with", "job build: step 4: docker/setup-buildx-action starts BuildKit from the floating moby/buildkit:buildx-stable-1"}},
+	{"fail-27-4b-buildx-unpinned", inJob("push", "          driver-opts: image="+buildkitImage+"\n", "          driver-opts: image=moby/buildkit:latest\n"),
+		nil, []string{"job push: step 3 must be exactly uses docker/setup-buildx-action@", `job push: step 3: BuildKit image (driver-opts) "moby/buildkit:latest" is not pinned`}},
+	{"fail-27-4b-ci-buildx-floating", unchanged, map[string]string{".github/workflows/other.yml": "permissions:\n  contents: read\njobs:\n  x:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1\n"},
+		[]string{"other.yml:4: job x: step 1: docker/setup-buildx-action starts BuildKit from the floating moby/buildkit:buildx-stable-1"}},
 }
 
 // copyTree copies the fixture tree to dir.

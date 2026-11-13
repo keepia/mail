@@ -31,11 +31,18 @@ target "_common" {
   args = {
     VERSION = VERSION
   }
+  # The licences label is per target (#27 plan, finding 5): Keepia's MIT
+  # covers only Keepia's own files. The per-package licences of the Debian
+  # base and of every other component are in the release's SBOMs.
+  # io.github.keepia.sources points to the release's SOURCES.md, the
+  # directions to the sources next to the object code (GPLv3 section 6(d),
+  # the licence decision 6835095391); a dev build names a URL that does
+  # not resolve, which is right for an unreleased build.
   labels = {
-    "org.opencontainers.image.source"   = "https://github.com/keepia/mail"
-    "org.opencontainers.image.version"  = VERSION
-    "org.opencontainers.image.licenses" = "MIT"
-    "org.opencontainers.image.vendor"   = "Keepia"
+    "org.opencontainers.image.source"  = "https://github.com/keepia/mail"
+    "org.opencontainers.image.version" = VERSION
+    "org.opencontainers.image.vendor"  = "Keepia"
+    "io.github.keepia.sources"         = "https://github.com/keepia/mail/releases/download/v${VERSION}/SOURCES.md"
   }
 }
 
@@ -47,9 +54,16 @@ target "keepia" {
   labels = {
     "org.opencontainers.image.title"       = "Keepia Mail"
     "org.opencontainers.image.description" = "Keepia Mail service and command-line tool"
+    # Keepia's own binary. The Go modules it is built from and the
+    # distroless base packages are listed with their licences in the SBOM.
+    "org.opencontainers.image.licenses" = "MIT"
   }
 }
 
+# Postfix (Debian's package): "dual-licensed under both the Eclipse Public
+# License version 2.0 and the IBM Public License version 1.0", as
+# /usr/share/doc/postfix/copyright in the built image says (#27 part 4b);
+# MIT for Keepia's own scripts.
 target "postfix" {
   inherits   = ["_common"]
   context    = "images"
@@ -58,9 +72,14 @@ target "postfix" {
   labels = {
     "org.opencontainers.image.title"       = "Keepia Mail Postfix"
     "org.opencontainers.image.description" = "Postfix for the Keepia Mail edge role"
+    "org.opencontainers.image.licenses"    = "MIT AND (IPL-1.0 OR EPL-2.0)"
   }
 }
 
+# Unbound (Debian's package): BSD-3-Clause, NLnet Labs' licence of
+# "Files: *" in /usr/share/doc/unbound/copyright in the built image (#27
+# part 4b; a few compat files are ISC or other BSD texts, listed there and
+# in the SBOM); MIT for Keepia's own scripts.
 target "unbound" {
   inherits   = ["_common"]
   context    = "images"
@@ -69,6 +88,7 @@ target "unbound" {
   labels = {
     "org.opencontainers.image.title"       = "Keepia Mail Unbound"
     "org.opencontainers.image.description" = "Unbound resolver for the Keepia Mail roles"
+    "org.opencontainers.image.licenses"    = "MIT AND BSD-3-Clause"
   }
 }
 
