@@ -291,6 +291,8 @@ func TestKmFailureCause(t *testing.T) {
 			execOut: `error: connect to database: failed SASL auth: FATAL: password authentication failed for user "keepia" (SQLSTATE 28P01)`}, true},
 		{"migrate failed for another reason", fakeDocker{execExit: "1",
 			execOut: "error: connect to database: dial tcp 172.29.1.11:5432: connect: connection refused"}, false},
+		{"keepia-mail crashed", fakeDocker{execExit: "2",
+			execOut: "panic: runtime error: invalid memory address or nil pointer dereference\n\ngoroutine 1 [running]:"}, false},
 		{"km succeeded", fakeDocker{}, false},
 		{"no daemon", fakeDocker{noDaemon: true}, false},
 		{"image missing", fakeDocker{missing: []string{testDep}}, false},

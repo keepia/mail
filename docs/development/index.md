@@ -393,9 +393,13 @@ in CI, to put the edge addresses on loopback.
   password (it must fail at its exec, and `scripts/km-failure-cause.sh`
   names why: the exec found the recreated keepia restarting, met a run of
   it as that run exited, or migrate's own login failed with SQLSTATE
-  28P01; a failure before the exec or any other keepia-mail error fails
-  the step. That keepia is still running or restarting, has restarted,
-  and its log has SQLSTATE 28P01), and `docker
+  28P01; a failure before the exec, a crash of keepia-mail (exit 2, a
+  Go panic or fatal error) or any other keepia-mail error fails the step.
+  Any other failure at the exec counts as the restart loop, so an
+  intermittent Docker or Compose exec failure would pass too; a
+  systematic one fails the `./km migrate` step before. That keepia is
+  still running or restarting, has restarted, and its log has SQLSTATE
+  28P01), and `docker
   compose down --volumes`. The step
   summary lists each container's health, memory and CPU.
 

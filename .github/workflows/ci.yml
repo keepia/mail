@@ -102,8 +102,9 @@ jobs:
       # The Go toolchain check that the Dockerfile runs, with its own tests
       # (scripts/check-go-toolchain.sh, byte-identical with mail-archive).
       - run: sh scripts/check-go-toolchain-test.sh
-      # The images' shell scripts that run without Docker: check-source with
-      # source-listing.sh, and the SOGo stop wrapper keepia-sogod (#55).
+      # The shell scripts that are tested without Docker: check-source with
+      # source-listing.sh, the SOGo stop wrapper keepia-sogod (#55), the
+      # edge address guard (#61) and test 7's km failure cause (#69).
       - run: make image-scripts-test
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
@@ -359,8 +360,9 @@ jobs:
       # the step asserts each link of that chain, in the new keepia
       # container only. How the exec fails depends on where it lands in
       # the loop (#69), so scripts/km-failure-cause.sh decides by what
-      # does not: km reached its exec (its sh -x trace), and keepia-mail's
-      # own error, if it printed one, is SQLSTATE 28P01.
+      # does not: km reached its exec (its sh -x trace), keepia-mail did
+      # not crash (exit 2, panic), and its own error, if it printed one,
+      # is SQLSTATE 28P01. Any other exec failure counts as the loop.
       - name: ./km with a wrong database password fails (test 7)
         env:
           KEEPIA_IMAGE: ${{ steps.keepia.outputs.image }}

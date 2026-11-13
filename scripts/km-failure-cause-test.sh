@@ -75,6 +75,8 @@ exec_case ok 1 "failed to open stdin fifo: error creating fifo /run/docker/conta
 Error response from daemon: No such exec instance: $id"
 exec_case ok 127 'OCI runtime exec failed: exec failed: unable to start container process: error executing setns process: exit status 1; runc init error(s): nsexec-1[6564]: failed to open /proc/6512/ns/ipc: No such file or directory; nsexec-0[6563]: failed to sync with stage-1: next state (got 0 of 4 bytes)'
 exec_case ok 128 "FailedPrecondition: container $id init process is not running: failed precondition"
+# Seen by Review B in its own loop (14 of 230 runs; message abridged there).
+exec_case ok 127 'OCI runtime exec failed: exec failed: unable to create new parent process: namespace path …'
 
 # ---- Part 1: refused, every other reason ----
 # km succeeded.
@@ -86,6 +88,22 @@ exec_case fail 1 'error: connect to database: failed to connect to `user=keepia 
 exec_case fail 1 'error: migrate: relation "goose_db_version" does not exist (SQLSTATE 42P01)'
 exec_case fail 137 'error: unknown command "migrate" for "keepia-mail"
 OCI runtime exec failed: exec failed: cannot exec in a stopped container'
+# keepia-mail crashed (#70, B1): the Go runtime exits 2 on a panic or a
+# fatal error and prints no "error:" line; keepia-mail's main exits only 0
+# or 1, and no runtime answer to the restart loop exits 2.
+exec_case fail 2 'panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x6a2f1c]
+
+goroutine 1 [running]:
+main.runMigrate(...)'
+exec_case fail 2 'fatal error: concurrent map writes'
+exec_case fail 2 ''
+exec_case fail 137 'goroutine 7 [chan receive]:'
+# A traced line after km's exec line (#70, N1): km's exec is its last
+# command, so such a line can only come from a traced value with a
+# newline in it.
+exec_case fail 1 "+ docker compose --progress quiet up -d --no-build --pull never keepia
+Error response from daemon: Container $id is restarting, wait until the container is running"
 # km stopped before its exec: no traced exec line, whatever the message,
 # even one that names a restarting container or the wrong password.
 check fail 1 "+ cd .

@@ -24,16 +24,26 @@
 #   ones (scripts/km-failure-cause-test.sh), among them "cannot exec in a
 #   stopped container" and exit 137 with no output at all, so no list of
 #   messages is complete.
-# Two things do not depend on that timing, and decide here:
+# What does not depend on that timing decides here:
 # 1. km reached its exec: km runs with set -eu, so the shell traces the
 #    exec line only after every earlier step (daemon, images, postgres
 #    healthy, keepia up) has succeeded. Without that line km failed
-#    before its exec, and that fails the test whatever the message.
-# 2. migrate ran to its end: keepia-mail then printed "error: ..." (main.go),
+#    before its exec, and that fails the test whatever the message. The
+#    exec is km's last command, so a traced line after it can only come
+#    from a traced value with a newline in it: that fails too (#70, N1).
+# 2. keepia-mail did not crash: its main exits only 0 or 1, and the Go
+#    runtime exits 2 on a panic or a fatal error, with a "panic: ",
+#    "fatal error: " or "goroutine N [" line. Exit 2 or such a line fails
+#    the test (#70, B1); no runtime answer to the loop exits 2.
+# 3. migrate ran to its end: keepia-mail then printed "error: ..." (main.go),
 #    and that error must be the wrong password (SQLSTATE 28P01). Any other
 #    error of keepia-mail fails the test.
-# Otherwise the exec failed before migrate could answer: refused while
-# keepia was restarting, or cut off by the exit of the run it entered.
+# Any other failure at the exec is taken as the restart loop: refused
+# while keepia was restarting, or cut off by the exit of the run it
+# entered. That fallback also takes a Docker or Compose exec failure that
+# is not the loop (a stopped service, a missing executable, the socket);
+# a systematic one fails the positive step `./km migrate (test 7)` just
+# before, which uses the same exec, so only an intermittent one passes.
 set -u
 
 if [ $# -ne 2 ]; then
@@ -67,6 +77,18 @@ case $after in
 *) execout= ;;
 esac
 
+# A traced line after the exec line.
+if printf '%s\n' "$execout" | grep -q '^+ '; then
+	echo "a traced line follows km's exec line (exit $rc)"
+	exit 1
+fi
+
+# keepia-mail's own crash.
+if [ "$rc" = 2 ] || printf '%s\n' "$execout" | grep -Eq '^(panic: |fatal error: |goroutine [0-9]+ \[)'; then
+	echo "keepia-mail crashed (exit $rc)"
+	exit 1
+fi
+
 # keepia-mail's own errors: lines starting with "error: ".
 errors=$(printf '%s\n' "$execout" | grep '^error: ')
 if [ -n "$errors" ]; then
@@ -83,7 +105,7 @@ case $execout in
 	echo "cause: km's exec found keepia restarting"
 	;;
 *)
-	first=$(printf '%s\n' "$execout" | grep -m1 . | cut -c1-200)
+	first=$(printf '%s\n' "$execout" | tr -d '\r' | grep -m1 . | cut -c1-200)
 	echo "cause: km's exec met keepia as that run of it exited (exit $rc: ${first:-no output})"
 	;;
 esac
