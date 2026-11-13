@@ -21,7 +21,9 @@
 // --network=none must be exactly `sh /tmp/keepia-apt-install
 // <package>...` with the helper's bind mount (and the optional ca
 // secret), read as the instruction joined over its continuation lines
-// (R1; the root Dockerfile's Go build stage is the one named exception);
+// (R1; the one named exception is the `go mod download` RUN of the root
+// Dockerfile's Go build stage, exactly goModDownload, once: every other
+// RUN of that stage needs --network=none as well);
 // each image must have its requiredComponents; and the target must have
 // an org.opencontainers.image.licenses label and an
 // io.github.keepia.sources label naming this release's SOURCES.md.
@@ -33,9 +35,14 @@
 // holds covers it:
 //  1. a deb package of the SBOM owns it: syft's ownership-by-file-overlap
 //     relationship from that deb, and every location in the deb's file
-//     list. This is by path, not by content: it holds because the only
-//     networked RUN is keepia-apt-install and pip installs only the pinned
-//     wheels, into /usr/local, so nothing writes over a deb's files;
+//     list (only a deb's file list is read: syft gives other package
+//     types' files in other shapes). This is by path, not by content: it
+//     holds because nothing but keepia-apt-install writes under
+//     /usr/lib/python3. The only networked RUN is keepia-apt-install, pip
+//     installs only the pinned wheels, into /usr/local, and the COPYs from
+//     build stages write nothing there (olefy's script and licence go to
+//     /usr/local/bin and /usr/share/doc; SOGo's build tree, SOPE and SOGo
+//     installed into /out, has no /usr/lib/python3);
 //  2. it is a pinned wheel: a python package whose name (PEP 503) and
 //     version are those of a PyPI-wheel ADD, and whose direct_url.json
 //     origin is a file:/// URL with that ADD's file name;
@@ -418,18 +425,34 @@ type syftArtifact struct {
 	MetadataType string     `json:"metadataType"`
 	Locations    []syftPath `json:"locations"`
 	Metadata     struct {
-		Package           string     `json:"package"`
-		Source            string     `json:"source"`
-		SourceVersion     string     `json:"sourceVersion"`
-		Architecture      string     `json:"architecture"`
-		Files             []syftPath `json:"files"` // a deb's file list
-		H1Digest          string     `json:"h1Digest"`
-		GoCompiledVersion string     `json:"goCompiledVersion"`
-		MainModule        string     `json:"mainModule"`
+		Package       string `json:"package"`
+		Source        string `json:"source"`
+		SourceVersion string `json:"sourceVersion"`
+		Architecture  string `json:"architecture"`
+		// Files is read only for a deb (debFiles): syft gives other types'
+		// files in other shapes, such as plain strings (java, ruby, perl,
+		// conda, nix, bitnami).
+		Files             json.RawMessage `json:"files"`
+		H1Digest          string          `json:"h1Digest"`
+		GoCompiledVersion string          `json:"goCompiledVersion"`
+		MainModule        string          `json:"mainModule"`
 		DirectURLOrigin   *struct {
 			URL string `json:"url"`
 		} `json:"directUrlOrigin"` // a python package's direct_url.json
 	} `json:"metadata"`
+}
+
+// debFiles is a deb's file list. A list that does not decode is an error,
+// which buildRow reports naming the deb; such a deb owns nothing.
+func (a syftArtifact) debFiles() ([]syftPath, error) {
+	var files []syftPath
+	if len(a.Metadata.Files) == 0 {
+		return nil, nil
+	}
+	if err := json.Unmarshal(a.Metadata.Files, &files); err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
 // syftDoc is what the tool reads of syft's syft-json.
@@ -519,6 +542,9 @@ func buildRowWith(in rowInput, table map[string][]vendoredPath) ([]byte, rowSour
 				c.SourceVersion = c.Version
 			}
 			c.URL = "https://snapshot.debian.org/package/" + snapshotEscape(c.Source) + "/" + snapshotEscape(c.SourceVersion) + "/"
+			if _, err := a.debFiles(); err != nil {
+				bad("the SBOM's deb package %s %s %s has a file list that does not parse, so it owns nothing: %v", c.Name, c.Version, c.Arch, err)
+			}
 			if _, dup := debs[debKey(c.Name, c.Version, c.Arch)]; dup {
 				continue
 			}
@@ -693,8 +719,12 @@ func attribute(a syftArtifact, ev evidence, table []vendoredPath) (attribution, 
 			if !ok {
 				continue
 			}
+			list, err := d.debFiles()
+			if err != nil {
+				continue // reported with the deb (buildRow)
+			}
 			files := map[string]bool{}
-			for _, f := range d.Metadata.Files {
+			for _, f := range list {
 				files[path.Clean(f.Path)] = true
 			}
 			all := true
@@ -830,6 +860,14 @@ func instructions(src []byte) []instruction {
 const aptMount = "--mount=type=bind,source=common/keepia-apt-install,target=/tmp/keepia-apt-install"
 const caMount = "--mount=type=secret,id=ca,required=false,mode=0444"
 
+// goModDownload is the one networked RUN of the root Dockerfile's Go build
+// stage (its words after RUN, joined by one space): go.sum-pinned modules
+// only, with the optional ca secret. Every other RUN of that stage, the go
+// build included, needs --network=none (#66 item 2).
+const goModDownload = "--mount=type=secret,id=ca,required=false" +
+	" if [ -s /run/secrets/ca ]; then export SSL_CERT_FILE=/run/secrets/ca; fi" +
+	" && sh scripts/check-go-toolchain.sh go.mod && go mod download && go mod verify"
+
 // checkDockerfile returns the ADD components of a Dockerfile and its
 // findings (ADD forms, networked RUNs).
 func checkDockerfile(rel string, src []byte) ([]component, []string) {
@@ -839,6 +877,7 @@ func checkDockerfile(rel string, src []byte) ([]component, []string) {
 		findings = append(findings, fmt.Sprintf("%s:%d: %s", rel, line, fmt.Sprintf(format, a...)))
 	}
 	stage, stageImage := "", ""
+	goModSeen := false
 	for _, in := range instructions(src) {
 		words := strings.Fields(in.text)
 		switch strings.ToUpper(words[0]) {
@@ -875,8 +914,10 @@ func checkDockerfile(rel string, src []byte) ([]component, []string) {
 			}
 			comps = append(comps, c)
 		case "RUN":
-			if rel == "Dockerfile" && stage == "build" && strings.HasPrefix(stageImage, "golang:") {
-				continue // the root Dockerfile's Go build: go.sum-pinned modules only
+			if rel == "Dockerfile" && stage == "build" && strings.HasPrefix(stageImage, "golang:") &&
+				!goModSeen && strings.Join(words[1:], " ") == goModDownload {
+				goModSeen = true
+				continue // the root Dockerfile's go mod download: go.sum-pinned modules only
 			}
 			if msg := runProblem(words[1:]); msg != "" {
 				bad(in.line, "%s", msg)

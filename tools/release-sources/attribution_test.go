@@ -184,11 +184,28 @@ func TestAttributionRefused(t *testing.T) {
 			[]string{ac + " at " + autoMeta}},
 		{"an owner that is not a deb", "olefy", "amd64", func(d map[string]any) { ownerOf(d, autoID)["parent"] = oleID }, nil,
 			[]string{ac + " at " + autoMeta}},
+		// Only the type differs from the real owner (#51 item 14): name,
+		// version, architecture and file list are python3-autocommand's.
+		{"an owner that is a deb in all but its type", "olefy", "amd64", func(d map[string]any) {
+			owner := art(d, "python3-autocommand", "2.2.2-3")
+			d["artifacts"] = append(d["artifacts"].([]any), map[string]any{"id": "0123456789abcdef", "type": "binary",
+				"name": owner["name"], "version": owner["version"], "metadata": owner["metadata"]})
+			ownerOf(d, autoID)["parent"] = "0123456789abcdef"
+		}, nil, []string{"binary package python3-autocommand 2.2.2-3 with no location", ac + " at " + autoMeta}},
 		{"an owner that is not in the SBOM", "olefy", "amd64", func(d map[string]any) { ownerOf(d, autoID)["parent"] = "0000000000000000" }, nil,
 			[]string{ac + " at " + autoMeta}},
 		{"an owner whose files lack a location", "olefy", "amd64", func(d map[string]any) {
 			art(d, "python3-autocommand", "2.2.2-3")["metadata"].(map[string]any)["files"] = locs(autoMeta)
 		}, nil, []string{ac + " at " + autoMeta}},
+		// File lists (#51 item 15): only a deb's is read, and one that does
+		// not decode is a finding naming that deb, not a parse failure.
+		{"a java-archive package with its files as strings", "olefy", "amd64", func(d map[string]any) {
+			d["artifacts"] = append(d["artifacts"].([]any), map[string]any{"id": "0123456789abcdef", "type": "java-archive", "name": "x", "version": "1.0",
+				"locations": locs("/usr/share/java/x.jar"), "metadata": map[string]any{"files": []any{"/a", "/b"}}})
+		}, nil, []string{"java-archive package x 1.0 at /usr/share/java/x.jar, " + noOwner}},
+		{"an owner whose file list does not decode", "olefy", "amd64", func(d map[string]any) {
+			art(d, "python3-autocommand", "2.2.2-3")["metadata"].(map[string]any)["files"] = []any{autoMeta}
+		}, nil, []string{"the SBOM's deb package python3-autocommand 2.2.2-3 all has a file list that does not parse", ac + " at " + autoMeta}},
 		// Rule 2.
 		{"a wheel of another version", "olefy", "amd64", func(d map[string]any) { art(d, "oletools", "0.60.2")["version"] = "0.60.1" }, nil,
 			[]string{"python package oletools 0.60.1 at"}},
