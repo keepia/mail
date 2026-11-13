@@ -293,6 +293,51 @@ func TestRepositoryDockerfiles(t *testing.T) {
 	}
 }
 
+// TestGoBuildStage (#66 item 2): in the root Dockerfile's Go build stage
+// only the go mod download RUN, exactly and once, may have network; each
+// change of the real Dockerfile below is one finding.
+func TestGoBuildStage(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := string(src)
+	const (
+		build    = "RUN --network=none CGO_ENABLED=0"
+		copyCode = "COPY internal ./internal\n"
+		download = " && go mod download \\\n"
+	)
+	for _, s := range []string{build, copyCode, download} {
+		if strings.Count(root, s) != 1 {
+			t.Fatalf("the root Dockerfile has %q %d times, want once", s, strings.Count(root, s))
+		}
+	}
+	modRUN := root[strings.Index(root, "RUN --mount=type=secret,id=ca,required=false"):strings.Index(root, "COPY cmd ./cmd\n")]
+	if !strings.HasSuffix(modRUN, "go mod verify\n") {
+		t.Fatalf("the go mod download RUN is not where the test expects it: %q", modRUN)
+	}
+	t.Run("the real Dockerfile", func(t *testing.T) {
+		if _, f := checkDockerfile("Dockerfile", src); len(f) > 0 {
+			t.Fatalf("findings %q", f)
+		}
+	})
+	cases := []struct{ name, dockerfile string }{
+		{"go build without --network=none", strings.Replace(root, build, "RUN CGO_ENABLED=0", 1)},
+		{"a second networked RUN in the stage", strings.Replace(root, copyCode, copyCode+"RUN go generate ./...\n", 1)},
+		{"a changed go mod download RUN", strings.Replace(root, download, " && go mod download \\\n && go install example.org/x@latest \\\n", 1)},
+		{"the go mod download RUN twice", strings.Replace(root, copyCode, copyCode+modRUN, 1)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.dockerfile == root {
+				t.Fatal("the case changes nothing")
+			}
+			_, f := checkDockerfile("Dockerfile", []byte(c.dockerfile))
+			assertFindings(t, f, []string{"a RUN without --network=none must be exactly"})
+		})
+	}
+}
+
 // TestRelease: exactly one SBOM and source list per image and arch, each
 // for the config the push row proved.
 func TestRelease(t *testing.T) {

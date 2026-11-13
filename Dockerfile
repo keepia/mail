@@ -23,7 +23,8 @@ RUN --mount=type=secret,id=ca,required=false \
  && go mod verify
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+# The build reads only the modules downloaded above: no network (#66).
+RUN --network=none CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
       -o /out/keepia-mail ./cmd/keepia-mail
 
