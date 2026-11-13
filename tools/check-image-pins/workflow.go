@@ -140,7 +140,12 @@ func checkJobImages(line int, job string, j map[string]any, add func(int, string
 // image=, or from the floating moby/buildkit:buildx-stable-1 when none is
 // given. The push bake step hands that container the GHCR credentials,
 // so the image is pinned like every other: exactly one image= entry,
-// name:tag@sha256:<64 hex>.
+// name:tag@sha256:<64 hex>, and no input but driver-opts,
+// buildkitd-config-inline and driver (docker-container only).
+// builderInputs are the docker/setup-buildx-action inputs a workflow may
+// set.
+var builderInputs = map[string]bool{"driver-opts": true, "buildkitd-config-inline": true, "driver": true}
+
 func checkBuilderImages(line int, job string, j map[string]any, add func(int, string, ...any)) {
 	steps, _ := j["steps"].([]any)
 	for i, s := range steps {
@@ -150,6 +155,14 @@ func checkBuilderImages(line int, job string, j map[string]any, add func(int, st
 			continue
 		}
 		with, _ := asMap(step["with"])
+		// Only these inputs (#72 review B, N2): append adds nodes with
+		// their own image, endpoint a remote builder, version an unpinned
+		// buildx download.
+		for _, k := range sortedKeys(with) {
+			if !builderInputs[k] {
+				add(line, "job %s: step %d: docker/setup-buildx-action input %s is not allowed: only driver-opts, buildkitd-config-inline and driver: docker-container", job, i+1, k)
+			}
+		}
 		if d, ok := with["driver"]; ok && d != "docker-container" {
 			add(line, "job %s: step %d: docker/setup-buildx-action with driver %v: only the docker-container driver, with a pinned BuildKit image", job, i+1, d)
 			continue

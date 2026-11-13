@@ -6,8 +6,8 @@ name: Release
 # linux/arm64, scans it (syft), rehearses the push without a token
 # (push-rehearsal: push=false, the pushed config must equal the tested
 # one), writes the SBOMs, the source list, the bundle and the notes, and
-# releases nothing. A real run (dry_run unticked, only with the
-# maintainer's OK) pushes every row by digest (push), publishes the image
+# releases nothing. A real run (dry_run unticked, as the runbook below
+# allows) pushes every row by digest (push), publishes the image
 # indexes ghcr.io/keepia/mail[-<name>]:X.Y.Z (index), attests them and the
 # release assets, creates the tag vX.Y.Z and the GitHub release, and moves
 # `latest` last, forward only (latest). X.Y.Z never changes.
@@ -22,7 +22,9 @@ name: Release
 # holds contents: write.
 #
 # Runbook (docs/development/process.md, "Releases", has the full text):
-# - Dry run first; a real run only with the maintainer's OK.
+# - Dry run first. v0.1.0 is pre-approved after a green dry run on main on
+#   the same commit (6845990778); every later real release needs the
+#   maintainer's OK.
 # - The concurrency group `release` runs one release at a time. GitHub
 #   keeps at most one pending run per group: a third dispatch while one is
 #   pending cancels the pending one, which has done nothing. Start it again
@@ -620,6 +622,14 @@ jobs:
             exit 1
           fi
           sha256sum -- * >SHA256SUMS
+          # release uploads every file of dist: SHA256SUMS must name exactly
+          # the other files, so `sha256sum -c` passes on the downloaded assets.
+          if [ "$(cut -c67- SHA256SUMS | sort)" != "$(ls -A | grep -vxF SHA256SUMS | sort)" ] ||
+            [ "$(cut -c67- SHA256SUMS | sort)" != "$(sort <<<"$want")" ]; then
+            echo "::error::SHA256SUMS does not name exactly the release assets:"
+            cat SHA256SUMS
+            exit 1
+          fi
           {
             echo "### Release assets"
             echo
@@ -822,8 +832,10 @@ jobs:
       - name: Checksum
         working-directory: dist
         run: sha256sum -c SHA256SUMS
-      # Creating a ref fails when it exists, so a tag pushed since the
-      # version job's check is never reused.
+      # No release of the tag may exist, a draft included (the version job
+      # cannot see drafts), so the cleanup below only ever finds this run's
+      # draft. Creating a ref fails when it exists, so a tag pushed since
+      # the version job's check is never reused.
       - name: Create the tag
         id: tag
         env:
@@ -834,13 +846,22 @@ jobs:
             echo "::error::not a release version: '$VERSION'"
             exit 1
           fi
+          if out=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>&1); then
+            echo "::error::a release v$VERSION exists (draft: $out); delete it if it is a leftover, then run again"
+            exit 1
+          elif [ "$out" != "release not found" ]; then
+            echo "::error::could not check for the release v$VERSION: $out"
+            exit 1
+          fi
           if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$GITHUB_SHA" --silent; then
             echo "::error::could not create the tag v$VERSION on $GITHUB_SHA; does it exist?"
             exit 1
           fi
       # The notes: the head from release-notes.sh, then the list generated
       # from the pull requests since BASE (.github/release.yml). The first
-      # release has no BASE and no --notes-start-tag.
+      # release has no BASE and no --notes-start-tag. The assets are every
+      # file of dist, exactly the files SHA256SUMS lists (bundle checks it),
+      # notes.md included.
       - name: Create the release
         working-directory: dist
         env:
@@ -853,8 +874,7 @@ jobs:
             start=(--notes-start-tag "$BASE")
           fi
           gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "Keepia Mail $VERSION" --notes-file notes.md --generate-notes "${start[@]}" \
-            "keepia-mail-$VERSION.tar.gz" sbom-*.spdx.json sources.json SOURCES.md SHA256SUMS
+            --title "Keepia Mail $VERSION" --notes-file notes.md --generate-notes "${start[@]}" ./*
       # Removes the tag this run created, and the draft gh leaves when an
       # upload fails, so the next run can start over; also when the job is
       # cancelled or times out. A published release and its tag stay.

@@ -179,18 +179,28 @@ package setting.
    source table (10 of 10), the bundle listing and the notes head. A dry
    run holds no write token and publishes nothing. The version must equal
    the milestone title (the version check above).
-3. **A real release needs the maintainer's OK.** The coordinator asks
-   through AskUserQuestion, with the version, the link to the green dry
-   run, the image list, for 0.x the line "X.Y.Z is not a working mail
-   server", and anything new since the last release. The OK is noted on
-   the issue. Only then does the coordinator start the workflow with
-   `dry_run` unticked, on the same commit as the dry run. The `version`
-   input is used only as the version check allows; 1.0.0 only with the
-   OK.
+3. **The real release.**
+   - **`v0.1.0` is pre-approved** (maintainer decision 6845990778 on #27):
+     the coordinator starts it with no further confirmation once the dry
+     run on `main` is green, on the same commit as that dry run, with every
+     image built (all ten build and push-rehearsal rows) and the sums and
+     SBOMs complete (10 of 10, the exact asset list, `SHA256SUMS`). If
+     anything differs from what is expected (another version, a missing
+     row or SBOM, a red or skipped job, another commit), the coordinator
+     stops and reports to the maintainer instead.
+   - **Every later real release needs the maintainer's OK.** The
+     coordinator asks through AskUserQuestion, with the version, the link
+     to the green dry run, the image list, for 0.x the line "X.Y.Z is not
+     a working mail server", and anything new since the last release. The
+     OK is noted on the issue. Only then does the coordinator start the
+     workflow with `dry_run` unticked, on the same commit as the dry run.
+   - The `version` input is used only as the version check allows; 1.0.0
+     only with the OK.
 4. **After the release:**
-   - check the release page: the notes, the bundle
+   - check the release page: the notes, and the assets: the bundle
      `keepia-mail-X.Y.Z.tar.gz`, the ten `sbom-<image>-<arch>.spdx.json`,
-     `sources.json`, `SOURCES.md` and `SHA256SUMS`;
+     `sources.json`, `SOURCES.md`, `notes.md` and `SHA256SUMS`;
+     `sha256sum -c SHA256SUMS` passes on the downloaded assets;
    - for each of the five images, `gh attestation verify
      oci://ghcr.io/keepia/mail-<name>:X.Y.Z --owner keepia`, and for one
      platform digest the SBOM (`--predicate-type
@@ -235,14 +245,19 @@ package setting.
      answers that way twice could let it write over an existing tag; the
      `version` job's check that `vX.Y.Z` and its release do not exist keeps
      an existing `X.Y.Z` to the leftover of a failed run of the same
-     version. And that exact text was measured on `registry:3` only: the
-     first real release checks it on GHCR. Another text fails closed (an
-     inspect error, nothing created); the coordinator reports it, and the
-     fix is a reviewed change to `inspectError`.
+     version. And that exact text was measured on `registry:3` and, read
+     only and anonymously, on GHCR through buildx 0.38.1 (#72 review A:
+     `ERROR: <ref>: not found`); the first real release confirms it with
+     the token. Another text fails closed (an inspect error, nothing
+     created); the coordinator reports it, and the fix is a reviewed change
+     to `inspectError`.
    - `attest` or `attest-assets` failed: `X.Y.Z` is in GHCR, but there is
      no release and `latest` has not moved. "Re-run failed jobs".
    - `release` failed: its last step removes the tag and the draft this
-     run created. "Re-run failed jobs".
+     run created. "Re-run failed jobs". Its tag step refuses to start
+     while any release of the tag exists, a draft included, so that step
+     never deletes a draft it did not create; a leftover draft from
+     elsewhere is deleted by hand first.
    - `latest` failed: the release is published, and `latest` may still
      point at the previous release for some images. Fix the cause, then
      "Re-run failed jobs": the moves are idempotent and only go forward.

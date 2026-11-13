@@ -681,7 +681,9 @@ lives, also under a skipped path.
    included, each job's `container` and `services` image is
    `name:tag@sha256:<64 hex>`, and so is the BuildKit image of every
    `docker/setup-buildx-action` step (`driver-opts: image=…`, the
-   docker-container driver only): without it the builder runs the floating
+   docker-container driver only, and no input but `driver-opts`,
+   `buildkitd-config-inline` and `driver`, so no `append`, `endpoint` or
+   `version`): without it the builder runs the floating
    `moby/buildkit:buildx-stable-1`, and in `push` that container holds the
    GHCR credentials (#71 review B, N6);
 7. **the release surface** (#27,
@@ -877,10 +879,10 @@ publishes a release from `main`, started by hand; the runbook is in
 | `push-rehearsal` | dry run | `push` without the login and with `push=false` |
 | `push` | real run | rebuilds from the release cache and pushes by digest; `-verify-pushed`: the pushed config is the tested config |
 | `index` | real run | `-publish-index`: `ghcr.io/keepia/mail[-<name>]:X.Y.Z` with both platforms |
-| `bundle` | both | `tools/release-sources release` (10 SBOMs, `sources.json`, `SOURCES.md`), the bundle, the notes head, `SHA256SUMS`; a dry run pins the placeholder digest `sha256:0…0`, a real run asserts that none is left |
+| `bundle` | both | `tools/release-sources release` (10 SBOMs, `sources.json`, `SOURCES.md`), the bundle, the notes head `notes.md`, and `SHA256SUMS`, which names exactly the other files; a dry run pins the placeholder digest `sha256:0…0`, a real run asserts that none is left |
 | `attest` | real run | provenance of each image index, the SBOM of each platform manifest (`actions/attest`, GitHub's attestation API) |
 | `attest-assets` | real run | provenance of every release asset |
-| `release` | real run | the tag `vX.Y.Z` on the built commit and the GitHub release; removes its own tag and draft after a failure |
+| `release` | real run | refuses if any release of the tag exists (a draft too); the tag `vX.Y.Z` on the built commit and the GitHub release with every file of `dist` as an asset, so `sha256sum -c SHA256SUMS` passes on the downloads; removes its own tag and draft after a failure |
 | `latest` | real run | `-move-latest`: `latest` to `X.Y.Z`, last and forward only |
 
 **Tags.** `X.Y.Z` never changes. `latest` is the only tag that moves: it
@@ -922,6 +924,15 @@ image. When the cache is full, GitHub evicts the least recently used
 entries, CI's first; that costs CI cache hits only. An evicted `release-`
 entry between `build` and `push` makes the push row's rebuild differ, and
 `-verify-pushed` stops the release (process.md, "Releases").
+
+**The containerd image store.** `-verify-built` needs the build
+metadata's `containerimage.config.digest` (the tested config the push is
+compared with). A `--load` into a Docker daemon with the containerd image
+store exports in OCI format, and that metadata has no config digest
+(measured on Docker 29.9.2 in #71). The hosted runners use Docker 28 with
+overlay2 today. If they move to the containerd store, `-verify-built`
+fails closed in CI's `docker-build` and in the release's `build` rows,
+and nothing is released until the check is reworked.
 
 ## Security checks
 

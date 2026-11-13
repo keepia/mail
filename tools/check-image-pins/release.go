@@ -140,9 +140,19 @@ done`
 
 	// lineCreateTag creates the tag on the built commit through the API
 	// (design-system's release job). Creating a ref fails when it exists,
-	// so a tag pushed since the version job's check is never reused.
+	// so a tag pushed since the version job's check is never reused. Before
+	// it, no release of that tag may exist, a draft included (the version
+	// job cannot see drafts with contents: read): so any draft the cleanup
+	// step finds is this run's (#72 review B, N1).
 	lineCreateTag = `if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
   echo "::error::not a release version: '$VERSION'"
+  exit 1
+fi
+if out=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>&1); then
+  echo "::error::a release v$VERSION exists (draft: $out); delete it if it is a leftover, then run again"
+  exit 1
+elif [ "$out" != "release not found" ]; then
+  echo "::error::could not check for the release v$VERSION: $out"
   exit 1
 fi
 if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$GITHUB_SHA" --silent; then
@@ -155,14 +165,15 @@ fi`
 	// release-notes.sh and the list generated from the pull requests
 	// since BASE; the first release has no BASE and no --notes-start-tag
 	// (plan revision 2, N9). gh fails if the release exists, so published
-	// assets are never replaced.
+	// assets are never replaced. The assets are every file of dist, the
+	// one SHA256SUMS covers (bundle checks that list), so `sha256sum -c
+	// SHA256SUMS` passes on the downloaded assets (#72 review A, B1).
 	lineCreateRelease = `start=()
 if [ -n "$BASE" ]; then
   start=(--notes-start-tag "$BASE")
 fi
 gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
-  --title "Keepia Mail $VERSION" --notes-file notes.md --generate-notes "${start[@]}" \
-  "keepia-mail-$VERSION.tar.gz" sbom-*.spdx.json sources.json SOURCES.md SHA256SUMS`
+  --title "Keepia Mail $VERSION" --notes-file notes.md --generate-notes "${start[@]}" ./*`
 
 	// lineRemoveTag removes the tag this run created, and the draft gh
 	// leaves when an upload fails, so the next run can start over; also

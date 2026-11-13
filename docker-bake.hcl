@@ -116,8 +116,9 @@ target "olefy" {
   }
 }
 
-# SOGo and SOPE built from Alinto's release tags (#25). Their licences, not
-# Keepia's MIT, apply to the image's content.
+# SOGo and SOPE built from Alinto's release tags (#25). Their licences
+# apply to the image's content; MIT covers Keepia's own keepia-health and
+# keepia-sogod (#72 review B, N3; olefy's expression already names MIT).
 target "sogo" {
   inherits   = ["_common"]
   context    = "images"
@@ -126,6 +127,6 @@ target "sogo" {
   labels = {
     "org.opencontainers.image.title"       = "Keepia Mail SOGo"
     "org.opencontainers.image.description" = "SOGo groupware for the Keepia Mail groupware role"
-    "org.opencontainers.image.licenses"    = "GPL-2.0-or-later AND LGPL-2.0-or-later"
+    "org.opencontainers.image.licenses"    = "MIT AND GPL-2.0-or-later AND LGPL-2.0-or-later"
   }
 }
