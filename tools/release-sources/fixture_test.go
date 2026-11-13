@@ -45,8 +45,9 @@ const (
 
 // fixtureRow is the row input of a real image: target olefy or sogo, arch
 // amd64 or arm64. The arm64 variant is the amd64 fixture with the triplet
-// of the npm locations rewritten; its debs and packages.txt stay as they
-// are, because it only tests the path table.
+// of sogo's npm locations rewritten; its debs and packages.txt stay as
+// they are, because it only tests the path table (olefy's python paths
+// have no triplet, so its arm64 variant is the amd64 fixture as it is).
 func fixtureRow(t *testing.T, target, arch string) rowInput {
 	t.Helper()
 	syft, err := os.ReadFile(filepath.Join("testdata", target+"-amd64.syft.json"))
@@ -66,7 +67,7 @@ func fixtureRow(t *testing.T, target, arch string) rowInput {
 	if err := json.Unmarshal(syft, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if arch == "arm64" {
+	if arch == "arm64" && target == "sogo" {
 		syft = rewriteNPM(t, doc, tripletAMD64, tripletARM64)
 	}
 	config, _ := doc["source"].(map[string]any)["metadata"].(map[string]any)["imageID"].(string)
