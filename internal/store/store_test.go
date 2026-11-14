@@ -51,58 +51,98 @@ func open(t *testing.T, dbURL string, opts ...store.Option) *store.Store {
 	return st
 }
 
+// migrations are the embedded migrations in order, as goose lists them.
+// 00002 is #95's (CD-C1); goose accepts the gap.
+var migrations = []string{baseline, "00003_control_secrets.sql"}
+
 // checkStatus fails the test unless MigrationStatus lists exactly the
-// baseline, applied as want says.
-func checkStatus(t *testing.T, st *store.Store, step string, want bool) {
+// migrations, the first applied of them applied and the rest pending.
+func checkStatus(t *testing.T, st *store.Store, step string, applied int) {
 	t.Helper()
 	statuses, err := st.MigrationStatus(context.Background())
 	if err != nil {
 		t.Fatalf("%s: status: %v", step, err)
 	}
-	if len(statuses) != 1 || statuses[0].Path != baseline || statuses[0].Applied != want {
-		t.Fatalf("%s: status %+v, want %s applied=%v", step, statuses, baseline, want)
+	if len(statuses) != len(migrations) {
+		t.Fatalf("%s: status %+v, want %v", step, statuses, migrations)
 	}
-	if want && statuses[0].AppliedAt.IsZero() {
-		t.Errorf("%s: applied without a time", step)
+	for i, s := range statuses {
+		want := i < applied
+		if s.Path != migrations[i] || s.Applied != want {
+			t.Fatalf("%s: status %+v, want %s applied=%v", step, s, migrations[i], want)
+		}
+		if want && s.AppliedAt.IsZero() {
+			t.Errorf("%s: %s applied without a time", step, s.Path)
+		}
 	}
 }
 
+// tables lists the public tables of the database at dbURL.
+func tables(t *testing.T, dbURL string) []string {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	rows, err := conn.Query(ctx, `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> 'goose_db_version' ORDER BY 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return names
+}
+
+// Every migration goes up, down one at a time, and up again; each Down
+// leaves the tables as they were before its Up.
 func TestMigrateUpDownUp(t *testing.T) {
 	ctx := context.Background()
 	dbURL := storetest.NewUnmigrated(t)
 	st := open(t, dbURL, store.ForMigrations())
 
-	checkStatus(t, st, "fresh", false)
+	checkStatus(t, st, "fresh", 0)
 
 	applied, err := st.Migrate(ctx)
-	if err != nil || len(applied) != 1 || applied[0] != baseline {
+	if err != nil || strings.Join(applied, " ") != strings.Join(migrations, " ") {
 		t.Fatalf("first migrate: applied %v, err %v", applied, err)
 	}
-	checkStatus(t, st, "after migrate", true)
+	checkStatus(t, st, "after migrate", len(migrations))
 	if n := versionRows(t, dbURL, 1); n != 1 {
 		t.Fatalf("after migrate: %d rows for version 1", n)
+	}
+	if got := strings.Join(tables(t, dbURL), " "); got != "control_secrets secret_keyring" {
+		t.Fatalf("after migrate: tables [%s]", got)
 	}
 
 	if applied, err = st.Migrate(ctx); err != nil || len(applied) != 0 {
 		t.Fatalf("second migrate: applied %v, err %v", applied, err)
 	}
 
-	down, err := st.MigrateDown(ctx)
-	if err != nil || down != baseline {
-		t.Fatalf("migrate down: %q, %v", down, err)
+	for i := len(migrations) - 1; i >= 0; i-- {
+		down, err := st.MigrateDown(ctx)
+		if err != nil || down != migrations[i] {
+			t.Fatalf("migrate down: %q, %v, want %s", down, err, migrations[i])
+		}
+		checkStatus(t, st, "after down of "+down, i)
 	}
-	checkStatus(t, st, "after down", false)
+	if got := tables(t, dbURL); len(got) != 0 {
+		t.Fatalf("after every down: tables %v", got)
+	}
 	if n := versionRows(t, dbURL, 1); n != 0 {
 		t.Fatalf("after down: %d rows for version 1", n)
 	}
 	if _, err := st.MigrateDown(ctx); err == nil {
-		t.Error("a second down succeeded with nothing to roll back")
+		t.Error("a down succeeded with nothing to roll back")
 	}
 
-	if applied, err = st.Migrate(ctx); err != nil || len(applied) != 1 {
+	if applied, err = st.Migrate(ctx); err != nil || len(applied) != len(migrations) {
 		t.Fatalf("migrate after down: applied %v, err %v", applied, err)
 	}
-	checkStatus(t, st, "after migrate again", true)
+	checkStatus(t, st, "after migrate again", len(migrations))
 }
 
 // downSection is goose's Down annotation on a line of its own.
