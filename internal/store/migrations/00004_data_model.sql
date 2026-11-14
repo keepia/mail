@@ -264,7 +264,7 @@ CREATE TRIGGER domains_t1_name BEFORE INSERT ON domains
 CREATE TRIGGER alias_domains_t1_name BEFORE INSERT ON alias_domains
 	FOR EACH ROW EXECUTE FUNCTION keepia_t1_domain_name();
 
--- A row that T2, T3, T4, T7 or T8 looks up and does not see is refused
+-- A row that T2, T3, T4, T5, T7 or T8 looks up and does not see is refused
 -- with the foreign key's SQLSTATE and name, never left to the foreign key:
 -- a row committed between the trigger's snapshot and the foreign key's
 -- check would otherwise skip the trigger's rule (Review A, N1).
@@ -370,6 +370,14 @@ BEGIN
 	PERFORM keepia_require_read_committed();
 	IF NEW.local_part IS NULL THEN
 		RETURN NEW;
+	END IF;
+	-- A domain this trigger does not see would skip the length rule
+	-- (Review A N5, Review B D2); the name is mailboxes_domain_id_fkey or
+	-- aliases_domain_id_fkey.
+	PERFORM 1 FROM domains WHERE id = NEW.domain_id;
+	IF NOT FOUND THEN
+		RAISE EXCEPTION 'the referenced row does not exist'
+			USING ERRCODE = '23503', CONSTRAINT = TG_TABLE_NAME || '_domain_id_fkey';
 	END IF;
 	IF char_length(NEW.local_part) + 1 + (SELECT char_length(name) FROM domains WHERE id = NEW.domain_id) > 254 THEN
 		RAISE EXCEPTION 'the address is longer than 254 characters'

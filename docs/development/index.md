@@ -89,6 +89,16 @@ tokens (#96 part 2), with foreign keys to `servers`.
   arrives after a higher one is applied, so the pull request that merges
   second renumbers its migration above main's highest (#95, cross-plan
   decision CD-C1).
+- The Compose `postgres` service runs with `log_error_verbosity=terse`, so
+  its log has no DETAIL, which for a refused `mailboxes` row would quote the
+  password hash. For an investigation an operator can temporarily run
+  `ALTER DATABASE keepia SET log_error_verbosity = default`, which overrides
+  the flag for new connections, and must reset it afterwards
+  (`ALTER DATABASE keepia RESET log_error_verbosity`): while it is set, the
+  log may contain row contents, password hashes included. `keepia-mail`
+  refuses a `default_query_exec_mode` other than `cache_statement` in the
+  database URL, so values reach PostgreSQL as bound parameters, never as
+  statement text that it would log.
 
 - `keepia-mail migrate` applies the pending migrations; `keepia-mail migrate
   status` lists them.
