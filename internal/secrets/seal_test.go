@@ -2,6 +2,8 @@ package secrets
 
 import (
 	"bytes"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"errors"
 	"strings"
 	"testing"
@@ -109,5 +111,14 @@ func TestKEKID(t *testing.T) {
 	}
 	if bytes.Contains(k.key[:], k.id[:]) {
 		t.Error("the id is part of the key")
+	}
+	// The id has its own HKDF label (CD2, CD3): it is not the start of
+	// the derived sealing key, so publishing the id reveals no key byte.
+	sealing, err := hkdf.Key(sha256.New, k.key[:], nil, labelSecrets, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(k.id[:], sealing[:len(k.id)]) {
+		t.Error("the KEK id is the derived sealing key's first 16 bytes")
 	}
 }

@@ -1,8 +1,11 @@
 // Package pki is Keepia Mail's certificate library (#96, CD11–CD17): the
 // four trust anchors, the leaf profiles, issuing a leaf for a public key,
 // the revocation lists, and the checks that listeners and callers run on a
-// peer's certificate. It is pure: it holds no keys of its own and reads no
-// database; internal/secrets keeps the anchor keys.
+// peer's certificate. It holds no keys of its own: internal/secrets keeps
+// the anchor keys and hands them in (Anchors). The library part is pure;
+// issuer.go, crlissuer.go and controlgate.go (#96 part 2) record what is
+// issued and revoked in the database, in the transactions of
+// store.PKIWrite and store.PKITransaction.
 //
 // Every key is ECDSA P-256 and every signature ECDSA with SHA-256 (CD11).
 package pki

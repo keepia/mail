@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -37,6 +38,9 @@ type options struct {
 	ready func(net.Addr)
 	// storeOptions are added to every store.Open.
 	storeOptions []store.Option
+	// gateTicks, when set, replaces serve's hourly ticker of the gate
+	// writer.
+	gateTicks <-chan time.Time
 }
 
 func newRootCmd(o options) *cobra.Command {
@@ -51,6 +55,8 @@ func newRootCmd(o options) *cobra.Command {
 		newServeCmd(o),
 		newMigrateCmd(o),
 		newHealthcheckCmd(),
+		newServerCmd(o),
+		newSecretsCmd(o),
 	)
 	return root
 }

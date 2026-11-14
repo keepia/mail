@@ -24,19 +24,21 @@ RUN --mount=type=secret,id=ca,required=false \
 COPY cmd ./cmd
 COPY internal ./internal
 # The build reads only the modules downloaded above: no network (#66).
-# /out/keepia/kek is the empty mount point of the volume keepia-kek.
+# /out/keepia/kek and /out/keepia/control-gate are the empty mount points
+# of the volumes keepia-kek and control-gate-pki.
 RUN --network=none CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
       -o /out/keepia-mail ./cmd/keepia-mail \
- && mkdir -p /out/keepia/kek
+ && mkdir -p /out/keepia/kek /out/keepia/control-gate
 
 # distroless static, nonroot (65532): no shell, no package manager.
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
 COPY --from=build /out/keepia-mail /usr/local/bin/keepia-mail
-# The key-encryption key's directory (#96, CD1): owned by 65532 with mode
-# 0700. Docker copies a mount point's owner and mode into a new, empty
-# named volume, so keepia-kek starts that way and serve can create the KEK
-# there at its first start.
+# The key-encryption key's directory (#96, CD1) and the control gate's
+# material directory (#96, CD34): owned by 65532 with mode 0700. Docker
+# copies a mount point's owner and mode into a new, empty named volume, so
+# keepia-kek and control-gate-pki start that way and serve can create the
+# KEK and the gate bundle there at its first start.
 COPY --from=build --chown=65532:65532 --chmod=0700 /out/keepia /var/lib/keepia
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/keepia-mail"]

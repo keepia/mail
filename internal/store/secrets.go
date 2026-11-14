@@ -117,6 +117,38 @@ func (ss *SecretsSession) Secrets(ctx context.Context) ([]SecretRow, error) {
 	return out, nil
 }
 
+// AllSecrets returns every row of control_secrets as stored, every
+// version, by name and version (`secrets export`).
+func (ss *SecretsSession) AllSecrets(ctx context.Context) ([]SecretRow, error) {
+	rows, err := ss.conn.Query(ctx,
+		`SELECT name, version, public, kek_id, sealed FROM control_secrets ORDER BY name, version`)
+	if err != nil {
+		return nil, fmt.Errorf("read the control secrets: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (SecretRow, error) {
+		var s SecretRow
+		err := r.Scan(&s.Name, &s.Version, &s.Public, &s.KEKID, &s.Sealed)
+		return s, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read the control secrets: %w", err)
+	}
+	return out, nil
+}
+
+// SetLastExport sets the keyring's last_export_at to at (`secrets export`,
+// #96 CD25).
+func (ss *SecretsSession) SetLastExport(ctx context.Context, at time.Time) error {
+	tag, err := ss.conn.Exec(ctx, `UPDATE secret_keyring SET last_export_at = $1`, at)
+	if err != nil {
+		return fmt.Errorf("record the export: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("record the export: no keyring row")
+	}
+	return nil
+}
+
 // CreateSecrets inserts the keyring row and the sealed secrets in one
 // transaction. beforeCommit, when not nil, runs inside the transaction
 // right before the commit; its error rolls everything back (a test seam

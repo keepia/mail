@@ -66,6 +66,11 @@
 #     without its DETAIL ("Failing row contains", which would quote the
 #     password hash): postgres runs with log_error_verbosity=terse. The
 #     hash, sent as a bound parameter, is nowhere in the log.
+# 17  the control gate's material (#96, CD34): the volume control-gate-pki
+#     is mounted only into keepia, read-write at
+#     /var/lib/keepia/control-gate; serve wrote bundle.pem (0400) and
+#     generation (0444), uid 65532, in a 0700 directory, and logged its
+#     first bundle (generation 1).
 #
 # Every test runs, also after a failure, and names what failed; the exit
 # status is 1 if any failed. Every wait is `--wait` or bounded by a timeout.
@@ -979,6 +984,49 @@ elif grep -qF "$probe_hash" <<<"$logs"; then
 	fail "test 16: the PostgreSQL log contains the probe's password hash"
 else
 	pass "test 16: the refusal is logged without the row and without the hash (log_error_verbosity=terse, bound parameter)"
+fi
+
+# ---- test 17: the control gate's material ----------------------------------
+
+# The volume control-gate-pki (#96, CD34): only keepia mounts it, read-write
+# (#97 part 2 adds control-gate's read-only mount and extends this test);
+# serve wrote bundle.pem (0400) and generation (0444), both uid 65532, in
+# a 0700 directory, before it listened.
+echo "---- test 17: the control gate's material"
+gate_volume="${project}_control-gate-pki"
+mounted_by=()
+for s in "${expected_services[@]}" "${oneshot_services[@]}"; do
+	c=$(container "$s")
+	[ -n "$c" ] || continue
+	if docker inspect "$c" | jq -e --arg v "$gate_volume" '.[0].Mounts[] | select(.Type == "volume" and .Name == $v)' >/dev/null; then
+		mounted_by+=("$s")
+	fi
+done
+if [ "${mounted_by[*]}" = keepia ]; then
+	pass "test 17: $gate_volume is mounted only into keepia"
+else
+	fail "test 17: $gate_volume is mounted into [${mounted_by[*]}], want [keepia]"
+fi
+c=$(container keepia)
+dest=$(docker inspect "$c" | jq -r --arg v "$gate_volume" '.[0].Mounts[] | select(.Name == $v) | "\(.Destination) rw=\(.RW)"')
+if [ "$dest" = "/var/lib/keepia/control-gate rw=true" ]; then
+	pass "test 17: keepia mounts it at $dest"
+else
+	fail "test 17: keepia mounts $gate_volume as '$dest', want '/var/lib/keepia/control-gate rw=true'"
+fi
+modes=$(helper --network none --user 65532:65532 --entrypoint stat -v "$gate_volume:/g:ro" "$helper_image" \
+	-c '%n %F %a %u' /g /g/bundle.pem /g/generation 2>&1 || true)
+want_modes=$'/g directory 700 65532\n/g/bundle.pem regular file 400 65532\n/g/generation regular file 444 65532'
+if [ "$modes" = "$want_modes" ]; then
+	pass "test 17: $(tr '\n' ';' <<<"$modes")"
+else
+	fail "test 17: the gate volume holds [$(tr '\n' ';' <<<"$modes")], want [$(tr '\n' ';' <<<"$want_modes")]"
+fi
+written=$(docker logs "$c" 2>&1 | grep -m1 'control gate bundle written' || true)
+if [[ $written == *"generation=1 "* ]]; then
+	pass "test 17: keepia wrote the bundle at its first start: ${written:0:160}"
+else
+	fail "test 17: keepia's log has no first bundle (generation 1): ${written:0:300}"
 fi
 
 # ---- resources ----------------------------------------------------------------

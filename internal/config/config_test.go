@@ -12,16 +12,19 @@ func env(m map[string]string) func(string) string {
 
 func TestLoadDefaults(t *testing.T) {
 	c := Load(env(nil))
-	if c.Listen != DefaultListen || c.LogLevel != DefaultLogLevel || c.DatabaseURL != "" || c.KEKFile != "/var/lib/keepia/kek/kek" {
+	if c.Listen != DefaultListen || c.LogLevel != DefaultLogLevel || c.DatabaseURL != "" || c.KEKFile != "/var/lib/keepia/kek/kek" ||
+		c.ControlGateDir != "/var/lib/keepia/control-gate" {
 		t.Errorf("defaults: %+v", c)
 	}
 	c = Load(env(map[string]string{
-		EnvDatabaseURL: "postgres://db/keepia",
-		EnvListen:      "0.0.0.0:9000",
-		EnvLogLevel:    "debug",
-		EnvKEKFile:     "/k/kek",
+		EnvDatabaseURL:    "postgres://db/keepia",
+		EnvListen:         "0.0.0.0:9000",
+		EnvLogLevel:       "debug",
+		EnvKEKFile:        "/k/kek",
+		EnvControlGateDir: "/k/gate",
 	}))
-	if c.Listen != "0.0.0.0:9000" || c.LogLevel != "debug" || c.DatabaseURL != "postgres://db/keepia" || c.KEKFile != "/k/kek" {
+	if c.Listen != "0.0.0.0:9000" || c.LogLevel != "debug" || c.DatabaseURL != "postgres://db/keepia" || c.KEKFile != "/k/kek" ||
+		c.ControlGateDir != "/k/gate" {
 		t.Errorf("from the environment: %+v", c)
 	}
 }

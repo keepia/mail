@@ -738,11 +738,12 @@ maintainer (M1, [6816994463][mdec]).
     volume is mounted read-write only in `keepia` and read-only only in
     `control-gate`.
   - **The files:** one `bundle.pem` and one `generation` file, under #45's
-    contract: write, fsync, rename, and only a strictly greater generation is
-    applied.
+    contract: write, fsync, rename. The writer always writes a generation
+    strictly greater than the last one; a reader applies any valid value
+    that differs from the one it holds (#97 CD-N3-3).
   - **When it rewrites:** at the first start before it listens, at renewal,
-    after every list reissue (`NOTIFY`), and at every start and hourly tick
-    when the bundle is stale.
+    after every list reissue (`NOTIFY`), and at every start, hourly tick and
+    reconnect of its LISTEN connection when the bundle is stale.
   - So the control gate gets fresh lists from `serve` directly, including
     after a long control outage. No agent can obtain the control name,
     because `IssueForServer` refuses it.

@@ -26,6 +26,10 @@ const (
 	// DefaultKEKFile. serve creates it at its first start; its kek.new
 	// lives next to it.
 	EnvKEKFile = "KEEPIA_KEK_FILE"
+	// EnvControlGateDir is the control gate's material directory (#96,
+	// CD34), default DefaultControlGateDir: serve writes bundle.pem and
+	// generation there.
+	EnvControlGateDir = "KEEPIA_CONTROL_GATE_DIR"
 )
 
 // Defaults.
@@ -34,14 +38,18 @@ const (
 	DefaultLogLevel = "info"
 	// DefaultKEKFile is the KEK file on the volume keepia-kek.
 	DefaultKEKFile = "/var/lib/keepia/kek/kek"
+	// DefaultControlGateDir is the mount point of the volume
+	// control-gate-pki.
+	DefaultControlGateDir = "/var/lib/keepia/control-gate"
 )
 
 // Config is Keepia Mail's configuration.
 type Config struct {
-	DatabaseURL string
-	Listen      string
-	LogLevel    string
-	KEKFile     string
+	DatabaseURL    string
+	Listen         string
+	LogLevel       string
+	KEKFile        string
+	ControlGateDir string
 }
 
 // Load reads the configuration with getenv (os.Getenv outside tests) and
@@ -49,13 +57,17 @@ type Config struct {
 // CheckListen and ParseLogLevel.
 func Load(getenv func(string) string) Config {
 	c := Config{
-		DatabaseURL: getenv(EnvDatabaseURL),
-		Listen:      getenv(EnvListen),
-		LogLevel:    getenv(EnvLogLevel),
-		KEKFile:     getenv(EnvKEKFile),
+		DatabaseURL:    getenv(EnvDatabaseURL),
+		Listen:         getenv(EnvListen),
+		LogLevel:       getenv(EnvLogLevel),
+		KEKFile:        getenv(EnvKEKFile),
+		ControlGateDir: getenv(EnvControlGateDir),
 	}
 	if c.KEKFile == "" {
 		c.KEKFile = DefaultKEKFile
+	}
+	if c.ControlGateDir == "" {
+		c.ControlGateDir = DefaultControlGateDir
 	}
 	if c.Listen == "" {
 		c.Listen = DefaultListen

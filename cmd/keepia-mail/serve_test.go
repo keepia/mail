@@ -71,6 +71,9 @@ func startServeLog(t *testing.T) (addr string, stop func() error, log *syncBuffe
 	if os.Getenv(config.EnvKEKFile) == "" {
 		t.Setenv(config.EnvKEKFile, filepath.Join(t.TempDir(), "kek"))
 	}
+	if os.Getenv(config.EnvControlGateDir) == "" {
+		t.Setenv(config.EnvControlGateDir, t.TempDir())
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	addrc := make(chan net.Addr, 1)
