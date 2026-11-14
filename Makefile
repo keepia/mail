@@ -11,6 +11,8 @@ GOLANGCI_LINT_VERSION := v2.14.0
 GOLANGCI_LINT := bin/golangci-lint-$(GOLANGCI_LINT_VERSION)/golangci-lint
 # govulncheck version for `make vuln`; bump it here by hand as well.
 GOVULNCHECK_VERSION := v1.8.0
+# sqlc version for `make sqlc`; bump it here by hand as well.
+SQLC_VERSION := v1.31.1
 # gitleaks version for secret scanning. Dependabot cannot update
 # `go install pkg@version`, so bump it here by hand and rescan the full
 # history (`make secrets`) after a bump.
@@ -24,7 +26,7 @@ SECRETS_SOURCE ?= .
 ACTIONLINT_VERSION := v1.7.12
 ACTIONLINT := bin/actionlint-$(ACTIONLINT_VERSION)/actionlint
 
-.PHONY: build test test-unit lint vuln tidy secrets secrets-test links links-test workflows workflows-test \
+.PHONY: build test test-unit lint vuln sqlc sqlc-check tidy secrets secrets-test links links-test workflows workflows-test \
 	images image-test image-pins image-pins-test image-scripts-test
 
 ## build: the keepia-mail binary in bin/
@@ -54,6 +56,17 @@ lint: $(GOLANGCI_LINT)
 # packages that require it.
 vuln:
 	GOTOOLCHAIN=$$($(GO) env GOVERSION) $(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+## sqlc: generate internal/store/db from internal/store/queries and the migrations (sqlc.yaml)
+# sqlc is built with the project's toolchain and verified through the Go
+# checksum database, like govulncheck; CGO_ENABLED=0 selects its wasm
+# parser.
+sqlc:
+	GOTOOLCHAIN=$$($(GO) env GOVERSION) CGO_ENABLED=0 $(GO) run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION) generate
+
+## sqlc-check: internal/store/db is what sqlc generates (fails on any difference)
+sqlc-check:
+	GOTOOLCHAIN=$$($(GO) env GOVERSION) CGO_ENABLED=0 $(GO) run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION) diff
 
 ## tidy: go mod tidy
 tidy:

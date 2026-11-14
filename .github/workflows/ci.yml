@@ -109,6 +109,10 @@ jobs:
       # The release scripts (#27 tests 14 and 15): scripts/version-policy.sh
       # over the shared next-version.sh, and the bundle and notes scripts.
       - run: make release-scripts-test
+      # internal/store/db is what sqlc (pinned in the Makefile, verified
+      # through the Go checksum database) generates from the queries and
+      # migrations.
+      - run: make sqlc-check
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.14.0

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -305,23 +306,61 @@ func TestConfigErrors(t *testing.T) {
 	}
 }
 
-// migrate applies the baseline once; migrate status shows it.
+// embeddedMigrations lists the migrations that the store embeds
+// (internal/store/migrations/*.sql) in version order.
+func embeddedMigrations(t *testing.T) []string {
+	t.Helper()
+	paths, err := filepath.Glob("../../internal/store/migrations/*.sql")
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("no migrations found: %v", err)
+	}
+	files := make([]string, 0, len(paths))
+	for _, p := range paths {
+		files = append(files, filepath.Base(p))
+	}
+	return files
+}
+
+// migrate applies every embedded migration once, in order; migrate status
+// shows them.
 func TestMigrateCommand(t *testing.T) {
+	files := embeddedMigrations(t)
 	dbURL := storetest.NewUnmigrated(t)
 	t.Setenv(config.EnvDatabaseURL, dbURL)
 
 	out, _, err := execute(t.Context(), options{}, "migrate", "status")
-	if err != nil || !strings.Contains(out, "00001_baseline.sql  pending") {
+	if err != nil {
 		t.Fatalf("status before: %v\n%s", err, out)
 	}
-	if out, _, err = execute(t.Context(), options{}, "migrate"); err != nil || out != "applied 00001_baseline.sql\n" {
-		t.Fatalf("migrate: %v\n%s", err, out)
+	checkStates(t, "status before", out, files, "pending")
+	want := ""
+	for _, f := range files {
+		want += "applied " + f + "\n"
+	}
+	if out, _, err = execute(t.Context(), options{}, "migrate"); err != nil || out != want {
+		t.Fatalf("migrate: %v\n%s, want\n%s", err, out, want)
 	}
 	if out, _, err = execute(t.Context(), options{}, "migrate"); err != nil || out != "database schema is up to date\n" {
 		t.Fatalf("second migrate: %v\n%s", err, out)
 	}
-	if out, _, err = execute(t.Context(), options{}, "migrate", "status"); err != nil || !strings.Contains(out, "00001_baseline.sql  applied") {
+	if out, _, err = execute(t.Context(), options{}, "migrate", "status"); err != nil {
 		t.Fatalf("status after: %v\n%s", err, out)
+	}
+	checkStates(t, "status after", out, files, "applied")
+}
+
+// checkStates fails the test unless the table of migrate status lists
+// exactly files, in order, each in state.
+func checkStates(t *testing.T, step, out string, files []string, state string) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != len(files)+1 || strings.Join(strings.Fields(lines[0]), " ") != "MIGRATION STATE APPLIED AT" {
+		t.Fatalf("%s: want a header and %d rows\n%s", step, len(files), out)
+	}
+	for i, f := range files {
+		if fields := strings.Fields(lines[i+1]); len(fields) < 2 || fields[0] != f || fields[1] != state {
+			t.Fatalf("%s: row %d is %q, want %s %s", step, i+1, lines[i+1], f, state)
+		}
 	}
 }
 

@@ -1,0 +1,14 @@
+# sqlc (make sqlc, make sqlc-check): typed Go for internal/store/queries,
+# against the schema of the goose migrations (sqlc reads only their Up
+# sections). The generated package is internal/store/db; do not edit it.
+version: "2"
+sql:
+  - engine: postgresql
+    schema: internal/store/migrations
+    queries: internal/store/queries
+    gen:
+      go:
+        package: db
+        out: internal/store/db
+        sql_package: pgx/v5
+        emit_pointers_for_null_types: true

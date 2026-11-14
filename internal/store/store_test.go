@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -15,6 +16,37 @@ import (
 )
 
 const baseline = "00001_baseline.sql"
+
+// migrationFiles lists the embedded migrations (migrations/*.sql, the
+// files store.go embeds) in version order, so that a new migration needs
+// no test edit.
+func migrationFiles(t *testing.T) []string {
+	t.Helper()
+	paths, err := filepath.Glob("migrations/*.sql")
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("no migrations found: %v", err)
+	}
+	files := make([]string, 0, len(paths))
+	for _, p := range paths {
+		files = append(files, filepath.Base(p))
+	}
+	if files[0] != baseline {
+		t.Fatalf("first migration %s, want %s", files[0], baseline)
+	}
+	return files // Glob sorts, and the names start with the zero-padded version
+}
+
+// migrationVersion is the version of a migration file, its number before
+// the first '_'.
+func migrationVersion(t *testing.T, file string) int64 {
+	t.Helper()
+	num, _, _ := strings.Cut(file, "_")
+	v, err := strconv.ParseInt(num, 10, 64)
+	if err != nil {
+		t.Fatalf("migration %s: %v", file, err)
+	}
+	return v
+}
 
 // versionRows is the number of applied rows for version in the database's
 // goose_db_version table, 0 when the table does not exist.
@@ -52,35 +84,46 @@ func open(t *testing.T, dbURL string, opts ...store.Option) *store.Store {
 }
 
 // checkStatus fails the test unless MigrationStatus lists exactly the
-// baseline, applied as want says.
-func checkStatus(t *testing.T, st *store.Store, step string, want bool) {
+// embedded migrations in order, the first applied of them applied.
+func checkStatus(t *testing.T, st *store.Store, step string, files []string, applied int) {
 	t.Helper()
 	statuses, err := st.MigrationStatus(context.Background())
 	if err != nil {
 		t.Fatalf("%s: status: %v", step, err)
 	}
-	if len(statuses) != 1 || statuses[0].Path != baseline || statuses[0].Applied != want {
-		t.Fatalf("%s: status %+v, want %s applied=%v", step, statuses, baseline, want)
+	if len(statuses) != len(files) {
+		t.Fatalf("%s: status %+v, want %v", step, statuses, files)
 	}
-	if want && statuses[0].AppliedAt.IsZero() {
-		t.Errorf("%s: applied without a time", step)
+	for i, s := range statuses {
+		want := i < applied
+		if s.Path != files[i] || s.Applied != want {
+			t.Fatalf("%s: status %+v, want %s applied=%v", step, s, files[i], want)
+		}
+		if want && s.AppliedAt.IsZero() {
+			t.Errorf("%s: %s applied without a time", step, s.Path)
+		}
 	}
 }
 
+// Every migration applies, the last one rolls back, every one rolls back
+// down to none, and all apply again. Down restoring the exact schema is
+// TestMigrationDownRestoresSchema.
 func TestMigrateUpDownUp(t *testing.T) {
 	ctx := context.Background()
+	files := migrationFiles(t)
+	last := migrationVersion(t, files[len(files)-1])
 	dbURL := storetest.NewUnmigrated(t)
 	st := open(t, dbURL, store.ForMigrations())
 
-	checkStatus(t, st, "fresh", false)
+	checkStatus(t, st, "fresh", files, 0)
 
 	applied, err := st.Migrate(ctx)
-	if err != nil || len(applied) != 1 || applied[0] != baseline {
-		t.Fatalf("first migrate: applied %v, err %v", applied, err)
+	if err != nil || strings.Join(applied, " ") != strings.Join(files, " ") {
+		t.Fatalf("first migrate: applied %v, err %v, want %v", applied, err, files)
 	}
-	checkStatus(t, st, "after migrate", true)
-	if n := versionRows(t, dbURL, 1); n != 1 {
-		t.Fatalf("after migrate: %d rows for version 1", n)
+	checkStatus(t, st, "after migrate", files, len(files))
+	if n := versionRows(t, dbURL, last); n != 1 {
+		t.Fatalf("after migrate: %d rows for version %d", n, last)
 	}
 
 	if applied, err = st.Migrate(ctx); err != nil || len(applied) != 0 {
@@ -88,21 +131,27 @@ func TestMigrateUpDownUp(t *testing.T) {
 	}
 
 	down, err := st.MigrateDown(ctx)
-	if err != nil || down != baseline {
+	if err != nil || down != files[len(files)-1] {
 		t.Fatalf("migrate down: %q, %v", down, err)
 	}
-	checkStatus(t, st, "after down", false)
-	if n := versionRows(t, dbURL, 1); n != 0 {
-		t.Fatalf("after down: %d rows for version 1", n)
+	checkStatus(t, st, "after down", files, len(files)-1)
+	if n := versionRows(t, dbURL, last); n != 0 {
+		t.Fatalf("after down: %d rows for version %d", n, last)
 	}
+	for i := len(files) - 2; i >= 0; i-- {
+		if down, err := st.MigrateDown(ctx); err != nil || down != files[i] {
+			t.Fatalf("migrate down to %d: %q, %v", i, down, err)
+		}
+	}
+	checkStatus(t, st, "after down to none", files, 0)
 	if _, err := st.MigrateDown(ctx); err == nil {
-		t.Error("a second down succeeded with nothing to roll back")
+		t.Error("a down succeeded with nothing to roll back")
 	}
 
-	if applied, err = st.Migrate(ctx); err != nil || len(applied) != 1 {
+	if applied, err = st.Migrate(ctx); err != nil || len(applied) != len(files) {
 		t.Fatalf("migrate after down: applied %v, err %v", applied, err)
 	}
-	checkStatus(t, st, "after migrate again", true)
+	checkStatus(t, st, "after migrate again", files, len(files))
 }
 
 // downSection is goose's Down annotation on a line of its own.

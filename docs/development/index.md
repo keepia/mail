@@ -41,6 +41,8 @@ make test       # all tests, -race -shuffle=on -count=1, with TEST_DATABASE_URL
 make test-unit  # the tests that need no database; the database tests skip
 make lint       # golangci-lint (.golangci.yml), version pinned in the Makefile
 make vuln       # govulncheck, version pinned in the Makefile
+make sqlc       # regenerate internal/store/db (sqlc, version pinned in the Makefile)
+make sqlc-check # fail if internal/store/db differs from what sqlc generates
 ```
 
 `make test` uses `TEST_DATABASE_URL` (default
@@ -57,7 +59,21 @@ CI runs the jobs `test` (against a `postgres:18` service), `lint` and
 
 Migrations are SQL files for [goose](https://github.com/pressly/goose) in
 `internal/store/migrations/`, embedded in the binary. `00001_baseline.sql`
-is a no-op; the first tables come with the data model (#2).
+is a no-op. `00002_data_model.sql` holds the data model (#95): customer
+groups, domains, alias domains, servers, stores, mailboxes, aliases with
+their targets, send-as grants and the audit log, with the triggers that
+keep groups apart and addresses unique.
+
+- The queries are in `internal/store/queries/`; sqlc (version pinned in the
+  Makefile) generates typed Go from them into `internal/store/db/`, reading
+  the schema from the migrations' Up sections. `make sqlc` regenerates the
+  code after a change to a query or a migration; `make sqlc-check` fails
+  when the generated code differs, and CI's `lint` job runs it. Never edit
+  `internal/store/db/` by hand.
+- Every write of the store API runs in one READ COMMITTED transaction with
+  a lock timeout and adds one `audit_log` row; the triggers refuse other
+  isolation levels. The advisory lock classes and the global lock order
+  are in `internal/store/locks.go`.
 
 - `keepia-mail migrate` applies the pending migrations; `keepia-mail migrate
   status` lists them.
