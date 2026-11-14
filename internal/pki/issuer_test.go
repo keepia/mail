@@ -509,6 +509,43 @@ func TestFirstReissuesSerialize(t *testing.T) {
 	}
 }
 
+// X3: a mailbox insert that holds the server row (T7's FOR SHARE) when
+// `server remove` starts commits while the removal waits; the removal's
+// count, a fresh READ COMMITTED snapshot after its row lock, then sees
+// it and refuses.
+func TestRemoveCountsAMailboxCommittedWhileItWaited(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.addServer(t, "s1", pki.RoleStore)
+	mailboxStore(t, e, "s1")
+	adder, err := pgx.Connect(ctx, e.url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = adder.Close(ctx) }()
+	tx, err := adder.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `INSERT INTO mailboxes (domain_id, local_part, password_hash, quota_bytes, store_id)
+		SELECT d.id, 'alice', $1, 0, $2 FROM domains d WHERE d.name = 'example.org'`, placeholderHash, storeID(t, e, "s1")); err != nil {
+		t.Fatal(err)
+	}
+	removeDone := make(chan error, 1)
+	go func() { _, err := pki.RevokeServer(ctx, e.st, e.keys, "s1", dbNow); removeDone <- err }()
+	storetest.WaitFor(t, e.obs, removeDone, "the removal waiting for the server row", storetest.LockWaitQuery)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-removeDone; !errors.Is(err, pki.ErrStoreHoldsMailboxes) {
+		t.Errorf("remove: %v, want ErrStoreHoldsMailboxes", err)
+	}
+	if n := e.scalar(t, "SELECT count(*) FROM servers WHERE removed_at IS NOT NULL"); n != 0 {
+		t.Error("the server was removed with a mailbox on it")
+	}
+}
+
 // C13: `server remove` cannot race a mailbox onto the store it removes.
 // The removal holds the server row after its count; a mailbox insert
 // then waits for that row (T7's FOR SHARE), and after the removal's
