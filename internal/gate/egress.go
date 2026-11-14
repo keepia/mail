@@ -12,7 +12,7 @@ import (
 // tempfails (R-TEMPFAIL).
 func (g *Gate) serveEgress(grp *group, c net.Conn) {
 	defer g.wg.Done()
-	defer g.conns.release()
+	defer g.release()
 	start := g.clock.Now()
 	peer := c.RemoteAddr().String()
 	p := &proxied{grp: grp, raw: c}

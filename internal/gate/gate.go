@@ -106,6 +106,11 @@ type Gate struct {
 		events func(dir string) (eventSource, error)
 		// retryArmed reports each armed retry delay.
 		retryArmed func(time.Duration)
+		// released runs after a connection's cap slot is freed.
+		released func()
+		// waitHandled runs after the watcher handled the hourly waiting
+		// timer.
+		waitHandled func()
 	}
 }
 

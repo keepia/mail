@@ -20,6 +20,17 @@ import (
 // errNoMaterial refuses a handshake that has no material to use.
 var errNoMaterial = errors.New("no material for this listener")
 
+// errHandshakeTimeout is the cause of a handshake cut at handshakeTimeout.
+var errHandshakeTimeout = errors.New("handshake timeout")
+
+// release frees a connection's slot of the cap.
+func (g *Gate) release() {
+	g.conns.release()
+	if h := g.hooks.released; h != nil {
+		h()
+	}
+}
+
 // proxied is one forwarded connection.
 type proxied struct {
 	grp *group
@@ -175,19 +186,22 @@ func (h *handshake) forClient(*tls.ClientHelloInfo) (*tls.Config, error) {
 }
 
 // reason classifies a refused handshake for the log (G14).
-func (h *handshake) reason(err error) string {
+func (h *handshake) reason(err, cause error) string {
 	if h.verified && h.err != nil {
 		return refusalClass(h.err)
 	}
 	switch s := err.Error(); {
+	case errors.Is(cause, errHandshakeTimeout):
+		return "handshake timeout"
+	case cause != nil:
+		// Run's context ended: the gate stops.
+		return "gate stopping"
 	case errors.Is(err, errNoMaterial):
 		return "no material"
 	case strings.Contains(s, "didn't provide a certificate"):
 		return "no certificate"
 	case strings.Contains(s, "unsupported versions") || strings.Contains(s, "protocol version"):
 		return "TLS version"
-	case errors.Is(err, context.Canceled):
-		return "handshake timeout"
 	default:
 		return "handshake failed: " + s
 	}
@@ -208,19 +222,21 @@ func refusalClass(err error) string {
 // serveIngress terminates mTLS on raw and forwards the session (G4).
 func (g *Gate) serveIngress(grp *group, raw net.Conn) {
 	defer g.wg.Done()
-	defer g.conns.release()
+	defer g.release()
 	start := g.clock.Now()
 	peer := raw.RemoteAddr().String()
 	h := &handshake{g: g, spec: grp.spec}
 	tc := tls.Server(raw, h.config())
-	ctx, cancel := context.WithCancel(g.ctx)
-	t := g.clock.AfterFunc(handshakeTimeout, cancel)
+	// The cause tells the handshake bound from the end of Run.
+	ctx, cancel := context.WithCancelCause(g.ctx)
+	t := g.clock.AfterFunc(handshakeTimeout, func() { cancel(errHandshakeTimeout) })
 	err := tc.HandshakeContext(ctx)
 	t.Stop()
-	cancel()
+	cause := context.Cause(ctx)
+	cancel(nil)
 	if err != nil {
 		_ = raw.Close()
-		g.rate.warn(grp.spec.Name, "handshake refused", "peer", peer, "reason", h.reason(err))
+		g.rate.warn(grp.spec.Name, "handshake refused", "peer", peer, "reason", h.reason(err, cause))
 		return
 	}
 	p := &proxied{grp: grp, raw: raw, chain: h.chain, id: h.id}

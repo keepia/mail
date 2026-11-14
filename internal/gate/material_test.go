@@ -105,6 +105,9 @@ func TestSwapIsAtomic(t *testing.T) {
 	}
 	verified := make(chan error, 4)
 	h.g.hooks.verified = func(_ string, err error) { verified <- err }
+	// A target, so that a session can only end by the gate's own check,
+	// not by a failed dial.
+	tg := h.target(143)
 	h.startWith()
 	oldLeaf := h.f.gate.cert
 	client := h.f.edgeDovecot(7, h.fc.Now())
@@ -139,8 +142,13 @@ func TestSwapIsAtomic(t *testing.T) {
 	}
 	unblock()
 	h.log.waitFor(t, `msg="applied generation 2"`, 1)
-	// The session that verified against the old list is checked again.
+	// The session that verified against the old list is checked again at
+	// its registration (G6) and never reaches the target.
 	closed(t, tc)
+	h.log.waitLine(t, `msg="connection refused"`, "reason=revoked")
+	if tg.count() != 0 {
+		t.Fatalf("the target saw %d connections", tg.count())
+	}
 	tc2, err := h.dialTLS(h.addr(h.mesh, PortIMAP), sendCert(h.clientConfig(nil), client.tlsCert()))
 	if err != nil {
 		t.Fatal(err)
@@ -156,6 +164,16 @@ func TestSwapIsAtomic(t *testing.T) {
 // (V4).
 func TestWaitingForMaterial(t *testing.T) {
 	h := newHarness(t, RoleStore)
+	handled := make(chan struct{}, 2)
+	h.g.hooks.waitHandled = func() { handled <- struct{}{} }
+	waitHandled := func() {
+		t.Helper()
+		select {
+		case <-handled:
+		case <-time.After(testwait.Limit(t)):
+			t.Fatal("the watcher did not handle the hourly timer")
+		}
+	}
 	h.start()
 	warn := fmt.Sprintf(`msg="waiting for material in %s: no generation file"`, h.dir)
 	h.log.waitFor(t, warn, 1)
@@ -174,13 +192,16 @@ func TestWaitingForMaterial(t *testing.T) {
 		t.Error("the bundle was loaded without a generation")
 	}
 	h.fc.Advance(time.Hour)
+	waitHandled()
 	h.log.waitFor(t, warn, 2)
 
-	// The first generation ends the waiting.
+	// The first generation ends the waiting: the next hourly timer is
+	// handled without a WARN.
 	h.provide(1, h.f.bundle(RoleStore, h.f.lists(RoleStore, 1, h.fc.Now())))
 	h.log.waitFor(t, `msg="applied generation 1"`, 1)
 	h.health(http.StatusOK, "ready")
 	h.fc.Advance(time.Hour)
+	waitHandled()
 	if h.log.count(warn) != 2 {
 		t.Error("the WARN repeats after material arrived")
 	}

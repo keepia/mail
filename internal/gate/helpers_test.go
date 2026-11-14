@@ -166,6 +166,23 @@ func (l *logCapture) waitFor(t testing.TB, s string, n int) {
 	testwait.Until(t, &l.sig, fmt.Sprintf("%d× %q in the log", n, s), func() bool { return l.count(s) >= n })
 }
 
+// waitLine waits until one log line holds every one of parts.
+func (l *logCapture) waitLine(t testing.TB, parts ...string) {
+	t.Helper()
+	testwait.Until(t, &l.sig, fmt.Sprintf("a log line with %q", parts), func() bool {
+		for _, line := range strings.Split(l.String(), "\n") {
+			all := true
+			for _, p := range parts {
+				all = all && strings.Contains(line, p)
+			}
+			if all {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 // registry is what U21 scans after every test of the package: all
 // captured logs, and every key, certificate and list the tests made, and
 // the markers in refused files.

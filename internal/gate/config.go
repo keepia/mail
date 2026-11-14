@@ -62,7 +62,8 @@ func ParseFlags(args []string) (Config, error) {
 	control := fs.String("control", "", "the control gate's mesh IP address (store, edge)")
 	meshNet := fs.String("mesh-net", "", "the mesh subnets, comma-separated CIDR prefixes")
 	dir := fs.String("dir", "", "the material directory")
-	maxConns := fs.String("max-conns", "", "the cap of open connections (default: control 128, store 256, edge 512)")
+	maxConns := fs.String("max-conns", "", fmt.Sprintf("the cap of open connections (default: control %d, store %d, edge %d)",
+		DefaultMaxConns[RoleControl], DefaultMaxConns[RoleStore], DefaultMaxConns[RoleEdge]))
 	if err := fs.Parse(args); err != nil {
 		return Config{}, fmt.Errorf("gate flags: %w", err)
 	}

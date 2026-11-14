@@ -221,6 +221,9 @@ func (g *Gate) watch(ctx context.Context) error {
 				g.warnWaiting()
 				waiting = g.clock.AfterFunc(waitingEvery, func() { waitC <- struct{}{} })
 			}
+			if h := g.hooks.waitHandled; h != nil {
+				h()
+			}
 		}
 	}
 }
