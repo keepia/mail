@@ -64,6 +64,14 @@ func TestImageUses49(t *testing.T) {
 // TestCheckMakefile49: the Makefile forms of point 8 are reported; the
 // repository's own forms are not. The GO rule of #51 item 4 has its own
 // table, TestCheckMakefileGO51.
+//
+// The include rule is an allowlist on the line before quote removal
+// (#92): only a relative path of letters, digits, `.`, `_`, `-` and `/`
+// ending in .mk passes. Quotes and backslashes (make reads them as part
+// of the name), a ~ (make expands it to a home directory) and a #
+// (make strips a comment, so `evil.cfg#.mk` includes `evil.cfg`) are
+// reported. `SHE""LL := x` guards the other side: the SHELL, GO* and
+// computed-name rules still read the line after quote removal.
 func TestCheckMakefile49(t *testing.T) {
 	cases := map[string]bool{
 		"SHELL := ./evil-sh":                   true,
@@ -81,8 +89,23 @@ func TestCheckMakefile49(t *testing.T) {
 		"export PA$(E)TH := x":                 true,
 		"$(eval PA$(E)TH := x)":                true,
 		"export PA$(E)TH":                      true,
+		"include `x`.mk":                       true,
+		`include "x.mk"`:                       true,
+		"-include 'tools/lint.mk'":             true,
+		`include x.m\k`:                        true,
+		"include ~/x.mk":                       true,
+		"include ./~/x.mk":                     true,
+		`SHE""LL := x`:                         true,
+		"include evil.cfg#.mk":                 true,
+		"-include evil.cfg#.mk":                true,
+		"sinclude evil.cfg#x.mk":               true,
+		"include x.mk evil.cfg#.mk":            true,
+		"include evil.cfg#$(X).mk":             true,
+		"include ../x.mk":                      true,
+		"include /etc/x.mk":                    true,
 		"GO ?= go":                             false,
 		"include tools/lint.mk":                false,
+		"include tools/x/y.mk":                 false,
 		"\t$(GO) run ./tools/check-image-pins": false,
 		"\tGOTOOLCHAIN=$$($(GO) env GOVERSION) GOBIN=$(CURDIR)/$(dir $(X)) $(GO) install x@v1": false,
 		"LOCAL_BUILD_OPTIONS = $(if $(CA),-ca \"$(CA)\" -https-proxy \"$(HTTPS_PROXY)\")":      false,
@@ -91,6 +114,29 @@ func TestCheckMakefile49(t *testing.T) {
 	for line, want := range cases {
 		if got := len(CheckMakefile([]byte(line+"\n"))) > 0; got != want {
 			t.Errorf("CheckMakefile(%q) reported %v, want %v", line, got, want)
+		}
+	}
+}
+
+// TestReadMakeInclude92: a step that runs make and includes a path that
+// literalInclude does not allow is a problem (#92). Make expands a
+// leading ~ to a home directory, so ~/x.mk is a problem even when the
+// repository has a file ~/x.mk the check could read instead (coordinator
+// decision 6874322252). Make strips a # comment, so
+// `-include evil.cfg#.mk` includes evil.cfg, which the check would
+// otherwise skip as missing (round 2).
+func TestReadMakeInclude92(t *testing.T) {
+	cases := []struct{ include, file, want string }{
+		{"include ~/x.mk", "~/x.mk", "it runs make, but Makefile includes ~/x.mk, which the check cannot resolve"},
+		{"-include evil.cfg#.mk", "evil.cfg", "it runs make, but Makefile includes evil.cfg#.mk, which the check cannot resolve"},
+	}
+	for _, c := range cases {
+		root := t.TempDir()
+		write(t, root, "Makefile", c.include+"\nall:\n\t@echo ok\n")
+		write(t, root, c.file, "x:\n\t@echo x\n")
+		_, problems := referencedTexts(root, "make", "", true)
+		if !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, c.want) }) {
+			t.Errorf("%q: referencedTexts(make) problems %q, want one with %q", c.include, problems, c.want)
 		}
 	}
 }

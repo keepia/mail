@@ -295,9 +295,20 @@ func isBuildAction(uses string) bool {
 // -bake-local` itself or hides lines from this rule (#49 point 8): SHELL
 // or .SHELLFLAGS set; GOFLAGS, GOENV or GOWORK set or exported (CI fixes
 // them in the check steps' prefix); any text that sets GO outside the
-// allowlisted lines of checkMakeGo (#51 item 4); an
-// include of a file that is not a literal *.mk path the walk reads; and a
-// variable name that is computed (`export PA$(E)TH`).
+// allowlisted lines of checkMakeGo (#51 item 4); an include of anything
+// but a relative path of letters, digits, `.`, `_`, `-` and `/` ending
+// in .mk, not under ../ and not in a skipped directory (literalInclude,
+// #92); and a variable name that is computed (`export PA$(E)TH`).
+//
+// The include rule reads the line before quote removal, and it is an
+// allowlist, not a model of how make reads an include path: quotes,
+// `\`, `~`, `#`, `$` and glob characters each change the file make
+// includes (`include "x.mk"` reads a file named `"x.mk"`,
+// `-include evil.cfg#.mk` reads `evil.cfg`), and after three review
+// rounds with new forms (#91, #92) every character outside the set is
+// reported. A file whose name does not end in .mk is not classified as a
+// Makefile by the walk, so this function's rules would never run on it
+// (readMake still reads its text when a job runs make).
 //
 // These rules are a fast filter that fails closed on the forms they
 // know, not a proof that a Makefile is safe (see checkMakeGo and
@@ -319,7 +330,7 @@ func CheckMakefile(src []byte) []Finding {
 			out = append(out, Finding{l.line, "a Makefile may not set or export " + m[1] + m[2] + ": `check-image-pins -bake-local` passes it to docker"})
 			continue
 		}
-		if msg := makeToolInputs(raw); msg != "" {
+		if msg := makeToolInputs(raw, l.text); msg != "" {
 			out = append(out, Finding{l.line, msg})
 			continue
 		}
@@ -404,18 +415,21 @@ var (
 )
 
 // makeToolInputs returns the finding for one Makefile line under the
-// rules of #49 point 8, or "".
-func makeToolInputs(raw string) string {
+// rules of #49 point 8, or "". raw is the logical line with shell quoting
+// removed, so the SHELL, GO* and computed-name rules see `SHE""LL`; text
+// is the same line before quote removal, which the include rule reads
+// (#92).
+func makeToolInputs(raw, text string) string {
 	if m := makeShell.FindStringSubmatch(raw); m != nil {
 		return "a Makefile may not set " + m[1] + m[2] + ": every recipe, `check-image-pins -bake-local` included, would run through it"
 	}
 	if m := makeGoEnv.FindStringSubmatch(raw); m != nil {
 		return "a Makefile may not set or export " + m[1] + m[2] + ": it changes how `go run` builds `check-image-pins` itself"
 	}
-	if m := makeInclude.FindStringSubmatch(raw); m != nil {
+	if m := makeInclude.FindStringSubmatch(text); m != nil {
 		for _, f := range strings.Fields(m[1]) {
-			if strings.ContainsAny(f, "$`*?[") || !strings.HasSuffix(f, ".mk") || skippedPath(f) {
-				return "a Makefile may include only literal *.mk files the check reads (got " + strconv.Quote(f) + ")"
+			if !literalInclude(f) {
+				return "a Makefile may include only a relative path of letters, digits, ., _, - and / ending in .mk, not under ../ and not in a skipped directory (got " + strconv.Quote(f) + ")"
 			}
 		}
 	}
@@ -435,6 +449,18 @@ func makeToolInputs(raw string) string {
 		}
 	}
 	return ""
+}
+
+// makeIncludeField is the allowlist for one include path, matched on the
+// text as written (#92 round 2).
+var makeIncludeField = regexp.MustCompile(`^[A-Za-z0-9._/-]+\.mk$`)
+
+// literalInclude reports whether an include path, as written, is a
+// relative path of letters, digits, `.`, `_`, `-` and `/` ending in .mk,
+// not under ../ and not in a skipped directory. Every other path is
+// reported by CheckMakefile and readMake, whatever make would do with it.
+func literalInclude(f string) bool {
+	return makeIncludeField.MatchString(f) && !skippedPath(f)
 }
 
 // skippedPath reports whether a root-relative path is inside a directory
