@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // directive is a parser directive line at the top of a Dockerfile:
@@ -25,8 +27,11 @@ var platformVars = map[string]bool{
 }
 
 // instruction is one logical Dockerfile line: the physical lines joined at
-// their trailing backslashes, without the comment and empty lines that
-// BuildKit drops inside a continuation.
+// their trailing backslashes with no separator, without the comment and
+// empty lines that BuildKit drops inside a continuation. A backslash that
+// is itself escaped (`\\` at the line end) continues nothing, as in
+// BuildKit (frontend/dockerfile/parser/parser.go:175, v0.35.0). Keep in
+// step with tools/release-sources/main.go instructions.
 type instruction struct {
 	line  int      // first physical line
 	text  string   // the joined text
@@ -134,33 +139,50 @@ func CheckDockerfile(src []byte) []Finding {
 	return out
 }
 
+// continuation is BuildKit's line-continuation test for the backslash
+// escape (parser.go:175, v0.35.0): a trailing backslash, blanks after it
+// allowed, that is not itself escaped. So a line ending in `\\` (and, a
+// quirk of that regex, `\\\`) ends the instruction. Replacing the match by
+// $1 drops the backslash.
+var continuation = regexp.MustCompile(`([^\\])\\[ \t]*$|^\\[ \t]*$`)
+
 // instructions joins the physical lines from index start into logical
-// instructions. Comment and empty lines outside an instruction are skipped,
-// and so are those inside a continuation, as BuildKit does.
+// instructions as BuildKit v0.35.0 does (parser.go Parse): each line loses
+// its trailing CR and LF bytes (trimNewline); a line that is empty or a
+// comment once its leading unicode.IsSpace characters are gone is skipped,
+// outside an instruction and inside a continuation alike (isComment,
+// isEmptyContinuationLine); a line continues while continuation matches;
+// and the next line is written directly after it, with no separator
+// (buf.Write, parser.go:348 and :368), so `FR\` followed by `OM x` is a
+// FROM. An instruction with no text (a lone backslash at the end of the
+// file) is dropped.
 func instructions(lines []string, start int) []instruction {
 	var out []instruction
 	var cur *instruction
 	for i := start; i < len(lines); i++ {
-		raw := strings.TrimRight(lines[i], " \t")
-		trimmed := strings.TrimLeft(raw, " \t")
+		l := strings.TrimRight(lines[i], "\r\n")
+		trimmed := strings.TrimLeftFunc(l, unicode.IsSpace)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		cont := strings.HasSuffix(raw, `\`)
-		body := strings.TrimSuffix(raw, `\`)
+		cont := continuation.MatchString(l)
+		body := strings.TrimRight(l, " \t")
+		if cont {
+			body = continuation.ReplaceAllString(l, "$1")
+		}
 		if cur == nil {
 			out = append(out, instruction{line: i + 1})
 			cur = &out[len(out)-1]
 			cur.text = body
 		} else {
-			cur.text += " " + body
+			cur.text += body
 		}
 		cur.parts = append(cur.parts, body)
 		if !cont {
 			cur = nil
 		}
 	}
-	return out
+	return slices.DeleteFunc(out, func(in instruction) bool { return strings.TrimSpace(in.text) == "" })
 }
 
 // flagsContinue reports whether one of an instruction's --flags sits on a
@@ -169,20 +191,27 @@ func instructions(lines []string, start int) []instruction {
 // does, but the plan keeps every flag on the first line so a reader (and
 // a line-based tool such as scripts/ci-pull-images.sh) sees them there.
 // A first line that holds only flags, followed by the command, is fine.
+// The first line is the first one with a word: lone backslash lines before
+// the keyword hold nothing (#88, Review B N1 on PR #104).
 func flagsContinue(in instruction) bool {
-	for i, part := range in.parts {
+	first := true
+	for _, part := range in.parts {
 		words := strings.Fields(part)
-		if i == 0 {
-			words = words[1:]
+		if len(words) == 0 {
+			continue
+		}
+		if first {
+			words = words[1:] // the keyword
 		}
 		for _, w := range words {
 			if !strings.HasPrefix(w, "--") {
 				return false
 			}
-			if i > 0 {
+			if !first {
 				return true
 			}
 		}
+		first = false
 	}
 	return false
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -192,6 +193,28 @@ func TestRowRefused(t *testing.T) {
 		{"&& curl on a continuation line", func(in *rowInput) {
 			in.dockerfile = []byte(strings.Replace(unboundDockerfile, "tini inotify-tools\n", "tini inotify-tools \\\n      && curl https://example.org/x\n", 1))
 		}, "a RUN without --network=none must be exactly"},
+		// #88: BuildKit skips an empty continuation line and appends the
+		// next line to the RUN, so the && curl line is part of it.
+		{"&& curl after an empty continuation line", func(in *rowInput) {
+			in.dockerfile = []byte(strings.Replace(unboundDockerfile, "tini inotify-tools\n", "tini inotify-tools \\\n\n      && curl https://example.org/x\n", 1))
+		}, "a RUN without --network=none must be exactly"},
+		{"&& curl after a whitespace-only continuation line", func(in *rowInput) {
+			in.dockerfile = []byte(strings.Replace(unboundDockerfile, "tini inotify-tools\n", "tini inotify-tools \\\n  \t\n      && curl https://example.org/x\n", 1))
+		}, "a RUN without --network=none must be exactly"},
+		// #88: an escaped backslash at a line end is no continuation
+		// (BuildKit parser.go:175), so the next RUN stands alone.
+		{"a RUN after a line ending in an escaped backslash", func(in *rowInput) {
+			in.dockerfile = append(in.dockerfile, []byte("RUN --network=none echo \\\\\nRUN apt-get update\n")...)
+		}, "a RUN without --network=none must be exactly"},
+		// #88 (Review A B1 on PR #104): BuildKit writes a continuation line
+		// directly after the line before it, so a keyword or a flag split
+		// at the line break is one word again.
+		{"a RUN keyword split over a continuation", func(in *rowInput) {
+			in.dockerfile = append(in.dockerfile, []byte("RU\\\nN curl https://example.org/x\n")...)
+		}, "a RUN without --network=none must be exactly"},
+		{"--network=none glued to the flag before it", func(in *rowInput) {
+			in.dockerfile = append(in.dockerfile, []byte("RUN --mount=type=tmpfs,target=/a\\\n--network=none curl https://example.org/x\n")...)
+		}, "a RUN without --network=none must be exactly"},
 		{"a package name with $", func(in *rowInput) {
 			in.dockerfile = []byte(strings.Replace(unboundDockerfile, "dns-root-data", "$(curl example.org)", 1))
 		}, "a RUN without --network=none must be exactly"},
@@ -306,8 +329,9 @@ func TestGoBuildStage(t *testing.T) {
 		build    = "RUN --network=none CGO_ENABLED=0"
 		copyCode = "COPY internal ./internal\n"
 		download = " && go mod download \\\n"
+		verify   = " && go mod verify\n"
 	)
-	for _, s := range []string{build, copyCode, download} {
+	for _, s := range []string{build, copyCode, download, verify} {
 		if strings.Count(root, s) != 1 {
 			t.Fatalf("the root Dockerfile has %q %d times, want once", s, strings.Count(root, s))
 		}
@@ -326,6 +350,10 @@ func TestGoBuildStage(t *testing.T) {
 		{"a second networked RUN in the stage", strings.Replace(root, copyCode, copyCode+"RUN go generate ./...\n", 1)},
 		{"a changed go mod download RUN", strings.Replace(root, download, " && go mod download \\\n && go install example.org/x@latest \\\n", 1)},
 		{"the go mod download RUN twice", strings.Replace(root, copyCode, copyCode+modRUN, 1)},
+		// #88: the blank line comes after the RUN's last line; one placed
+		// earlier would already cut goModDownload short.
+		{"a line after an empty continuation line", strings.Replace(root, verify, " && go mod verify \\\n\n && go install example.org/x@latest\n", 1)},
+		{"a line after a form-feed continuation line", strings.Replace(root, verify, " && go mod verify \\\n\f\n && go install example.org/x@latest\n", 1)},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -335,6 +363,61 @@ func TestGoBuildStage(t *testing.T) {
 			_, f := checkDockerfile("Dockerfile", []byte(c.dockerfile))
 			assertFindings(t, f, []string{"a RUN without --network=none must be exactly"})
 		})
+	}
+}
+
+// TestInstructions (#88): instructions joins lines as BuildKit v0.35.0's
+// parser does (frontend/dockerfile/parser/parser.go): comment and empty
+// lines are skipped inside a continuation too, "empty" by unicode.IsSpace;
+// a line continues only when its backslash is not escaped; and a
+// continuation line is appended directly, with no separator, so a word
+// split at the line break is one word. The text is compared word by word,
+// as checkDockerfile reads it.
+func TestInstructions(t *testing.T) {
+	type in = instruction
+	const apt = "RUN --mount=type=bind,source=common/keepia-apt-install,target=/tmp/keepia-apt-install sh /tmp/keepia-apt-install"
+	cases := []struct {
+		name, src string
+		want      []instruction
+	}{
+		{"an empty line inside a continuation", "RUN a \\\n\nb\nRUN c\n", []in{{1, "RUN a b"}, {4, "RUN c"}}},
+		{"a whitespace-only line inside a continuation", "RUN a \\\n \t\nb\n", []in{{1, "RUN a b"}}},
+		{"a form-feed line inside a continuation", "RUN a \\\n\f\nb\n", []in{{1, "RUN a b"}}},
+		{"a no-break space line inside a continuation", "RUN a \\\n\xc2\xa0\nb\n", []in{{1, "RUN a b"}}},
+		{"a blank and a carriage return inside a continuation", "RUN a \\\n \r\nb\n", []in{{1, "RUN a b"}}},
+		{"a comment line inside a continuation", "RUN a \\\n  # c\nb\n", []in{{1, "RUN a b"}}},
+		{"a backslash followed by blanks", "RUN a \\ \t\nb\n", []in{{1, "RUN a b"}}},
+		{"CRLF line endings", "RUN a \\\r\nb\r\nRUN c\r\n", []in{{1, "RUN a b"}, {3, "RUN c"}}},
+		{"blank, form-feed and comment lines before an instruction", "\n\f\n# c\n \t\nRUN a\n", []in{{5, "RUN a"}}},
+		{"an escaped backslash at the line end", "RUN a \\\\\nRUN x\n", []in{{1, `RUN a \\`}, {2, "RUN x"}}},
+		{"an escaped backslash and blanks at the line end", "RUN a \\\\  \nRUN x\n", []in{{1, `RUN a \\`}, {2, "RUN x"}}},
+		{"three backslashes at the line end (BuildKit's quirk)", "RUN a \\\\\\\nRUN x\n", []in{{1, `RUN a \\\`}, {2, "RUN x"}}},
+		{"a lone backslash at the end of the file", "RUN a\n\\\n", []in{{1, "RUN a"}}},
+		{"a lone backslash before an instruction", "\\\nRUN a\n", []in{{1, "RUN a"}}},
+		{"an apt RUN with an empty line between package lines", apt + " a b \\\n\n    c d\n", []in{{1, apt + " a b c d"}}},
+		{"a FROM keyword split over a continuation", "FR\\\nOM alpine:latest\n", []in{{1, "FROM alpine:latest"}}},
+		{"a RUN keyword split over a continuation", "RU\\\nN curl https://example.org/x\n", []in{{1, "RUN curl https://example.org/x"}}},
+		{"a flag glued to the next line", "RUN --mount=type=tmpfs,target=/a\\\n--network=none curl\n", []in{{1, "RUN --mount=type=tmpfs,target=/a--network=none curl"}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var got []instruction
+			for _, i := range instructions([]byte(c.src)) {
+				got = append(got, instruction{i.line, strings.Join(strings.Fields(i.text), " ")})
+			}
+			if !slices.Equal(got, c.want) {
+				t.Fatalf("instructions(%q) = %+v, want %+v", c.src, got, c.want)
+			}
+		})
+	}
+	// The apt RUN above is one RUN, so R1 accepts it: BuildKit installs
+	// every package of it.
+	src := strings.Replace(unboundDockerfile, "unbound dns-root-data \\\n", "unbound dns-root-data \\\n\n", 1)
+	if src == unboundDockerfile {
+		t.Fatal("the edit changes nothing")
+	}
+	if _, f := checkDockerfile("images/unbound/Dockerfile", []byte(src)); len(f) > 0 {
+		t.Errorf("an empty line between package lines: findings %q", f)
 	}
 }
 
