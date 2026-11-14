@@ -8,7 +8,8 @@ import (
 )
 
 // The kinds of a refused write. Errors of the data model's API wrap one
-// of them; test with errors.Is.
+// of them, or ErrLockTimeout (locks.go) for a lock not granted within the
+// lock timeout (55P03, WithLockTimeout); test with errors.Is.
 var (
 	// ErrNotFound: a named row does not exist (also a foreign key, 23503).
 	ErrNotFound = errors.New("not found")
@@ -19,9 +20,6 @@ var (
 	// row that others reference (RESTRICT, 23001), or
 	// read_committed_required (25001).
 	ErrRefused = errors.New("refused")
-	// ErrLockTimeout: a lock was not granted within the lock timeout
-	// (55P03, WithLockTimeout).
-	ErrLockTimeout = errors.New("lock timeout")
 )
 
 // RuleError is a write refused by a constraint or trigger of the schema.

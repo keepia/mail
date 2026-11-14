@@ -105,6 +105,26 @@ func checkStatus(t *testing.T, st *store.Store, step string, files []string, app
 	}
 }
 
+// tables lists the public tables of the database at dbURL.
+func tables(t *testing.T, dbURL string) []string {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	rows, err := conn.Query(ctx, `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> 'goose_db_version' ORDER BY 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return names
+}
+
 // Every migration applies, the last one rolls back, every one rolls back
 // down to none, and all apply again. Down restoring the exact schema is
 // TestMigrationDownRestoresSchema.
@@ -144,6 +164,9 @@ func TestMigrateUpDownUp(t *testing.T) {
 		}
 	}
 	checkStatus(t, st, "after down to none", files, 0)
+	if got := tables(t, dbURL); len(got) != 0 {
+		t.Fatalf("after every down: tables %v", got)
+	}
 	if _, err := st.MigrateDown(ctx); err == nil {
 		t.Error("a down succeeded with nothing to roll back")
 	}

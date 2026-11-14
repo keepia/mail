@@ -41,6 +41,15 @@ type AuditLog struct {
 	Details []byte
 }
 
+type ControlSecret struct {
+	Name      string
+	Version   int32
+	Public    []byte
+	KekID     []byte
+	Sealed    []byte
+	CreatedAt pgtype.Timestamptz
+}
+
 type CustomerGroup struct {
 	ID        int64
 	Name      string
@@ -67,6 +76,14 @@ type Mailbox struct {
 	State        string
 	StoreID      int64
 	CreatedAt    pgtype.Timestamptz
+}
+
+type SecretKeyring struct {
+	ID           bool
+	KekID        []byte
+	DeploymentID []byte
+	CreatedAt    pgtype.Timestamptz
+	LastExportAt pgtype.Timestamptz
 }
 
 type SendA struct {

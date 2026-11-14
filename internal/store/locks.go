@@ -2,23 +2,34 @@ package store
 
 import (
 	"context"
+	"errors"
 	"runtime/debug"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/keepia/mail/internal/store/db"
 )
 
-// The advisory lock classes of Keepia Mail. Every lock uses PostgreSQL's
-// two-int4 form, pg_advisory_xact_lock(class, key), whose key space does
-// not overlap goose's single-bigint MigrationLockID. The values are fixed
-// once on main and are also written in the migrations (T1, T5); the lock
-// tests prove that both agree. N2 (#96, #107) adds its classes here.
+// PostgreSQL advisory locks of Keepia Mail, in the two-int4 form
+// pg_advisory_lock(class, key) and its variants. That key space does not
+// overlap goose's single-bigint migration lock (MigrationLockID): a lock
+// taken with two int4 keys is a different lock tag from one taken with a
+// bigint, whatever the numbers.
+//
+// A class is the issue number of the plan that introduced it times 100,
+// plus an index, so that plans written in parallel never pick the same
+// number. The key is the locked object, 0 for a global lock. N1's classes
+// (#95, 950201 to 950204) predate that rule and keep their values, which
+// the migration's T1 and T5 also use; the lock tests prove that both agree.
 //
 // # Lock order
 //
-// Every transaction takes its locks in this order, so no two of them wait
-// for each other in a cycle (plan review 6875754045, C1 and C5):
+// A transaction or session that takes more than one of these locks takes
+// them in this order, so that no two of them can wait for each other in a
+// cycle (#95 plan review 6875754045, C1 and C5; #96):
 //
-//   - N2's bootstrap lock before the hash lock, never the reverse.
+//   - LockClassBootstrap (serve's bootstrap, session-level; CLI reads take
+//     it shared) before the hash lock, never the reverse.
 //   - The hash lock is a leaf: WithHashLock's fn does no database work,
 //     and nothing is held while a caller waits for it.
 //   - Placement, then names or addresses (T1, T5), then the servers row
@@ -26,7 +37,9 @@ import (
 //   - An alias update locks the aliases row FOR UPDATE as its first
 //     statement, before any target is inserted or deleted (C1); T6 then
 //     takes the same lock again at commit.
-//   - The servers row, then N2's CRL lock, then certificate and token rows.
+//   - The servers row lock of `server remove` (SELECT … FOR UPDATE, #96
+//     part 2), then LockClassCRL, then certificate and token rows. No
+//     advisory lock is ever taken after the CRL lock.
 //   - Any transaction that locks both a server and a store row (N4's
 //     activation and heartbeat included) locks the server first.
 const (
@@ -36,14 +49,38 @@ const (
 	// LockClassAddresses serializes inserts of one mailbox or alias
 	// address (T5); the key is hashtext(domain_id || '/' || local_part).
 	LockClassAddresses int32 = 950202
-	// LockClassPlacement serializes mailbox placement (part 2); the key
-	// is 0.
+	// LockClassPlacement serializes mailbox placement (#95 part 2); the
+	// key is 0.
 	LockClassPlacement int32 = 950203
 	// LockClassHash lets one Argon2id computation run at a time across
 	// every keepia-mail process on the database (WithHashLock); the key
 	// is 0.
 	LockClassHash int32 = 950204
+	// LockClassBootstrap serializes the control secrets' bootstrap (#96,
+	// CD6 and C3): serve holds it exclusively, as a session lock on a
+	// connection of its own, from before it reads the KEK files until the
+	// KEK is linked into place and its directory synced; every command
+	// that reads the secrets takes it shared.
+	LockClassBootstrap int32 = 9601
+	// LockClassCRL serializes every read of a revocation list's number or
+	// revoked set with its reissue (#96 part 2, CD36).
+	LockClassCRL int32 = 9602
 )
+
+// ErrLockTimeout is wrapped by the error of an operation that waited
+// longer than its lock_timeout for a lock (SQLSTATE 55P03,
+// lock_not_available).
+var ErrLockTimeout = errors.New("lock timeout")
+
+// lockTimeoutErr wraps err with ErrLockTimeout when it is PostgreSQL's
+// lock_not_available, and returns it unchanged otherwise.
+func lockTimeoutErr(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+		return errors.Join(ErrLockTimeout, err)
+	}
+	return err
+}
 
 // freeOSMemory is debug.FreeOSMemory; tests replace it (export_test.go).
 var freeOSMemory = debug.FreeOSMemory

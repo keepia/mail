@@ -95,6 +95,11 @@ services:
       KEEPIA_LISTEN: ${KEEPIA_SUBNET4:-172.29}.1.10:8080
       # The password must be URL-safe (letters, digits, - . _ ~).
       KEEPIA_DATABASE_URL: postgres://keepia:${KEEPIA_POSTGRES_PASSWORD:-}@${KEEPIA_SUBNET4:-172.29}.1.11:5432/keepia?sslmode=disable
+    volumes:
+      # The key-encryption key (#96, CD1), mounted into keepia only: serve
+      # creates it at the first start and logs a warning. Losing it loses
+      # all mail; it is not in a database dump. Back up this volume.
+      - keepia-kek:/var/lib/keepia/kek
     depends_on:
       postgres:
         condition: service_healthy
@@ -605,6 +610,7 @@ networks:
         - subnet: ${KEEPIA_SUBNET6:-fd7c:3b9e:5a21}:7::/64
 
 volumes:
+  keepia-kek:
   postgres-data:
   valkey-data:
   postfix-spool:
