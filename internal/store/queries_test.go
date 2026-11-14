@@ -124,13 +124,16 @@ func TestServersAndStores(t *testing.T) {
 	if ms.State != store.StoreJoining || ms.GateIPv4.IsValid() || ms.EgressPort != 0 {
 		t.Errorf("new store %+v, want joining without address or port", ms)
 	}
-	wantKind(t, "activate without a port", d.st.UpdateStore(ctx, ms.GateName, store.MailStoreChange{State: ptr(store.StoreActive)}), store.ErrRefused, "stores_active_routable")
+	wantKind(t, "activate without routing", d.st.SetStoreState(ctx, ms.GateName, store.StoreActive), store.ErrRefused, "stores_active_routable")
 	v4, v6 := netip.MustParseAddr("192.0.2.4"), netip.MustParseAddr("2001:db8::4")
-	must(t, d.st.UpdateStore(ctx, ms.GateName, store.MailStoreChange{GateIPv4: &v4, GateIPv6: &v6, EgressPort: ptr[int32](2004), State: ptr(store.StoreActive)}))
-	wantKind(t, "a taken port", d.st.UpdateStore(ctx, f.joiningGate, store.MailStoreChange{EgressPort: ptr[int32](2004)}), store.ErrExists, "stores_egress_port_key")
-	must(t, d.st.UpdateStore(ctx, ms.GateName, store.MailStoreChange{GateIPv4: &netip.Addr{}}))
-	wantKind(t, "clear the last address of an active store", d.st.UpdateStore(ctx, ms.GateName, store.MailStoreChange{GateIPv6: &netip.Addr{}}), store.ErrRefused, "stores_active_routable")
-	wantKind(t, "update an unknown store", d.st.UpdateStore(ctx, "nowhere.store", store.MailStoreChange{State: ptr(store.StoreActive)}), store.ErrNotFound, "")
+	must(t, d.st.SetStoreRouting(ctx, ms.GateName, store.StoreRouting{GateIPv4: v4, GateIPv6: v6, EgressPort: 2004}))
+	must(t, d.st.SetStoreState(ctx, ms.GateName, store.StoreActive))
+	wantKind(t, "a taken port", d.st.SetStoreRouting(ctx, f.joiningGate, store.StoreRouting{EgressPort: 2004}), store.ErrExists, "stores_egress_port_key")
+	must(t, d.st.SetStoreRouting(ctx, ms.GateName, store.StoreRouting{GateIPv6: v6, EgressPort: 2004}))
+	wantKind(t, "clear the last address of an active store", d.st.SetStoreRouting(ctx, ms.GateName, store.StoreRouting{EgressPort: 2004}), store.ErrRefused, "stores_active_routable")
+	wantKind(t, "bad state", d.st.SetStoreState(ctx, f.joiningGate, "gone"), store.ErrRefused, "stores_state_valid")
+	wantKind(t, "state of an unknown store", d.st.SetStoreState(ctx, "nowhere.store", store.StoreActive), store.ErrNotFound, "")
+	wantKind(t, "routing of an unknown store", d.st.SetStoreRouting(ctx, "nowhere.store", store.StoreRouting{}), store.ErrNotFound, "")
 
 	stores, err := d.st.ListStores(ctx)
 	must(t, err)

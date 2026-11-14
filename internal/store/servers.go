@@ -128,43 +128,46 @@ func (s *Store) CreateStore(ctx context.Context, n NewStore) (MailStore, error) 
 	return ms, err
 }
 
-// MailStoreChange is the change of UpdateStore; a nil field is kept. A
-// pointer to the zero Addr or to port 0 clears the column.
-type MailStoreChange struct {
-	State              *string
-	GateIPv4, GateIPv6 *netip.Addr
-	EgressPort         *int32
-}
-
-// UpdateStore changes the store with the gate name gateName. For N4 and
-// tests.
-func (s *Store) UpdateStore(ctx context.Context, gateName string, c MailStoreChange) error {
+// SetStoreState sets the state of the store with the gate name gateName
+// (StoreJoining or StoreActive). An active store needs its routing
+// (SetStoreRouting) first. For N4 and tests.
+func (s *Store) SetStoreState(ctx context.Context, gateName, state string) error {
 	return s.write(ctx, "store.set", func(ctx context.Context, q *db.Queries) (audit, error) {
-		p := db.UpdateStoreParams{GateName: gateName, State: c.State}
-		details := map[string]any{}
-		if c.State != nil {
-			details["state"] = *c.State
-		}
-		if c.GateIPv4 != nil {
-			p.GateIpv4, p.ClearIpv4 = optionalAddr(*c.GateIPv4), !c.GateIPv4.IsValid()
-			details["gate_ipv4"] = addrText(*c.GateIPv4)
-		}
-		if c.GateIPv6 != nil {
-			p.GateIpv6, p.ClearIpv6 = optionalAddr(*c.GateIPv6), !c.GateIPv6.IsValid()
-			details["gate_ipv6"] = addrText(*c.GateIPv6)
-		}
-		if c.EgressPort != nil {
-			p.EgressPort, p.ClearPort = optionalPort(*c.EgressPort), *c.EgressPort == 0
-			details["egress_port"] = *c.EgressPort
-		}
-		n, err := q.UpdateStore(ctx, p)
+		n, err := q.SetStoreState(ctx, db.SetStoreStateParams{GateName: gateName, State: state})
 		if err != nil {
 			return audit{}, err
 		}
 		if n == 0 {
 			return audit{}, notFound("store", gateName)
 		}
-		return audit{object: gateName, details: details}, nil
+		return audit{object: gateName, details: map[string]any{"state": state}}, nil
+	})
+}
+
+// StoreRouting is where a store's gate is reached: its addresses (the
+// zero Addr is none) and its egress port (0 is none).
+type StoreRouting struct {
+	GateIPv4, GateIPv6 netip.Addr
+	EgressPort         int32
+}
+
+// SetStoreRouting replaces the routing of the store with the gate name
+// gateName. An active store keeps a port and at least one address
+// (stores_active_routable). For N4 and tests.
+func (s *Store) SetStoreRouting(ctx context.Context, gateName string, r StoreRouting) error {
+	return s.write(ctx, "store.set", func(ctx context.Context, q *db.Queries) (audit, error) {
+		n, err := q.SetStoreRouting(ctx, db.SetStoreRoutingParams{
+			GateName: gateName, GateIpv4: optionalAddr(r.GateIPv4), GateIpv6: optionalAddr(r.GateIPv6), EgressPort: optionalPort(r.EgressPort),
+		})
+		if err != nil {
+			return audit{}, err
+		}
+		if n == 0 {
+			return audit{}, notFound("store", gateName)
+		}
+		return audit{object: gateName, details: map[string]any{
+			"gate_ipv4": addrText(r.GateIPv4), "gate_ipv6": addrText(r.GateIPv6), "egress_port": r.EgressPort,
+		}}, nil
 	})
 }
 

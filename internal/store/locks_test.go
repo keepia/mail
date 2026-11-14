@@ -106,14 +106,14 @@ func TestRowShareLocks(t *testing.T) {
 	exec(t, shortConn, "SET lock_timeout = '50ms'")
 
 	rollback := openTx(t, d, "INSERT INTO mailboxes (domain_id, local_part, password_hash, quota_bytes, store_id) VALUES ($1, 'frank', $2, 0, $3)", f.org, testHash, f.active)
-	err := d.short.UpdateStore(ctx, f.activeGate, store.MailStoreChange{State: ptr(store.StoreJoining)})
+	err := d.short.SetStoreState(ctx, f.activeGate, store.StoreJoining)
 	wantLockTimeout(t, "store state change during a mailbox insert (T7's store FOR SHARE)", err)
 	_, err = shortConn.Exec(ctx, "UPDATE servers SET removed_at = now() WHERE id = $1", f.srv1)
 	if code, _ := pgRule(err); code != "55P03" {
 		t.Errorf("server remove during a mailbox insert (T7's server FOR SHARE): %v, want 55P03", err)
 	}
 	rollback()
-	if err := d.short.UpdateStore(ctx, f.activeGate, store.MailStoreChange{State: ptr(store.StoreJoining)}); err != nil {
+	if err := d.short.SetStoreState(ctx, f.activeGate, store.StoreJoining); err != nil {
 		t.Errorf("store state change after the rollback: %v", err)
 	}
 	if _, err := shortConn.Exec(ctx, "UPDATE servers SET removed_at = now() WHERE id = $1", f.srv1); err != nil {

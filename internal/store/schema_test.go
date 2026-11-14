@@ -119,14 +119,14 @@ func seed(t *testing.T, d *testDB) fixture {
 	ms, err := d.st.CreateStore(ctx, store.NewStore{Server: "srv1", GateName: f.activeGate, GateIPv4: netip.MustParseAddr("192.0.2.10"), EgressPort: 2001})
 	must(err)
 	f.active = ms.ID
-	must(d.st.UpdateStore(ctx, f.activeGate, store.MailStoreChange{State: ptr(store.StoreActive)}))
+	must(d.st.SetStoreState(ctx, f.activeGate, store.StoreActive))
 	ms, err = d.st.CreateStore(ctx, store.NewStore{Server: "srv1", GateName: f.joiningGate})
 	must(err)
 	f.joining = ms.ID
 	ms, err = d.st.CreateStore(ctx, store.NewStore{Server: "srv3", GateName: f.remGate, GateIPv6: netip.MustParseAddr("2001:db8::3"), EgressPort: 2003})
 	must(err)
 	f.removed = ms.ID
-	must(d.st.UpdateStore(ctx, f.remGate, store.MailStoreChange{State: ptr(store.StoreActive)}))
+	must(d.st.SetStoreState(ctx, f.remGate, store.StoreActive))
 	exec(t, d.conn, "UPDATE servers SET removed_at = now() WHERE id = $1", f.srv3)
 
 	for addr, id := range map[store.Address]*int64{

@@ -179,38 +179,45 @@ func (q *Queries) SetServerRoles(ctx context.Context, arg SetServerRolesParams) 
 	return result.RowsAffected(), nil
 }
 
-const updateStore = `-- name: UpdateStore :execrows
+const setStoreRouting = `-- name: SetStoreRouting :execrows
 UPDATE stores
-SET state = coalesce($1, state),
-	gate_ipv4 = CASE WHEN $2::boolean THEN NULL ELSE coalesce($3::inet, gate_ipv4) END,
-	gate_ipv6 = CASE WHEN $4::boolean THEN NULL ELSE coalesce($5::inet, gate_ipv6) END,
-	egress_port = CASE WHEN $6::boolean THEN NULL ELSE coalesce($7::integer, egress_port) END
-WHERE gate_name = $8
+SET gate_ipv4 = $1::inet, gate_ipv6 = $2::inet, egress_port = $3::integer
+WHERE gate_name = $4
 `
 
-type UpdateStoreParams struct {
-	State      *string
-	ClearIpv4  bool
+type SetStoreRoutingParams struct {
 	GateIpv4   *netip.Addr
-	ClearIpv6  bool
 	GateIpv6   *netip.Addr
-	ClearPort  bool
 	EgressPort *int32
 	GateName   string
 }
 
-// A NULL argument keeps the column; clear_* sets it to NULL.
-func (q *Queries) UpdateStore(ctx context.Context, arg UpdateStoreParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateStore,
-		arg.State,
-		arg.ClearIpv4,
+func (q *Queries) SetStoreRouting(ctx context.Context, arg SetStoreRoutingParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setStoreRouting,
 		arg.GateIpv4,
-		arg.ClearIpv6,
 		arg.GateIpv6,
-		arg.ClearPort,
 		arg.EgressPort,
 		arg.GateName,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const setStoreState = `-- name: SetStoreState :execrows
+UPDATE stores SET state = $1 WHERE gate_name = $2
+`
+
+type SetStoreStateParams struct {
+	State    string
+	GateName string
+}
+
+// Only the state: an UPDATE that sets no column of a unique index takes
+// FOR NO KEY UPDATE, which waits for T7's FOR SHARE of a mailbox insert.
+func (q *Queries) SetStoreState(ctx context.Context, arg SetStoreStateParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setStoreState, arg.State, arg.GateName)
 	if err != nil {
 		return 0, err
 	}

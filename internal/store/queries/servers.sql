@@ -16,13 +16,14 @@ SELECT sv.id, sqlc.arg(gate_name), sqlc.narg(gate_ipv4)::inet, sqlc.narg(gate_ip
 FROM servers sv WHERE sv.name = sqlc.arg(server_name)
 RETURNING id, gate_name, gate_ipv4, gate_ipv6, egress_port, state, created_at;
 
--- A NULL argument keeps the column; clear_* sets it to NULL.
--- name: UpdateStore :execrows
+-- Only the state: an UPDATE that sets no column of a unique index takes
+-- FOR NO KEY UPDATE, which waits for T7's FOR SHARE of a mailbox insert.
+-- name: SetStoreState :execrows
+UPDATE stores SET state = sqlc.arg(state) WHERE gate_name = sqlc.arg(gate_name);
+
+-- name: SetStoreRouting :execrows
 UPDATE stores
-SET state = coalesce(sqlc.narg(state), state),
-	gate_ipv4 = CASE WHEN sqlc.arg(clear_ipv4)::boolean THEN NULL ELSE coalesce(sqlc.narg(gate_ipv4)::inet, gate_ipv4) END,
-	gate_ipv6 = CASE WHEN sqlc.arg(clear_ipv6)::boolean THEN NULL ELSE coalesce(sqlc.narg(gate_ipv6)::inet, gate_ipv6) END,
-	egress_port = CASE WHEN sqlc.arg(clear_port)::boolean THEN NULL ELSE coalesce(sqlc.narg(egress_port)::integer, egress_port) END
+SET gate_ipv4 = sqlc.narg(gate_ipv4)::inet, gate_ipv6 = sqlc.narg(gate_ipv6)::inet, egress_port = sqlc.narg(egress_port)::integer
 WHERE gate_name = sqlc.arg(gate_name);
 
 -- name: ListStores :many
