@@ -22,12 +22,18 @@ const (
 	// EnvLogLevel is the log level (debug, info, warn, error), default
 	// DefaultLogLevel.
 	EnvLogLevel = "KEEPIA_LOG_LEVEL"
+	// EnvKEKFile is the key-encryption key's file (#96, CD1), default
+	// DefaultKEKFile. serve creates it at its first start; its kek.new
+	// lives next to it.
+	EnvKEKFile = "KEEPIA_KEK_FILE"
 )
 
 // Defaults.
 const (
 	DefaultListen   = "127.0.0.1:8080"
 	DefaultLogLevel = "info"
+	// DefaultKEKFile is the KEK file on the volume keepia-kek.
+	DefaultKEKFile = "/var/lib/keepia/kek/kek"
 )
 
 // Config is Keepia Mail's configuration.
@@ -35,6 +41,7 @@ type Config struct {
 	DatabaseURL string
 	Listen      string
 	LogLevel    string
+	KEKFile     string
 }
 
 // Load reads the configuration with getenv (os.Getenv outside tests) and
@@ -45,6 +52,10 @@ func Load(getenv func(string) string) Config {
 		DatabaseURL: getenv(EnvDatabaseURL),
 		Listen:      getenv(EnvListen),
 		LogLevel:    getenv(EnvLogLevel),
+		KEKFile:     getenv(EnvKEKFile),
+	}
+	if c.KEKFile == "" {
+		c.KEKFile = DefaultKEKFile
 	}
 	if c.Listen == "" {
 		c.Listen = DefaultListen

@@ -28,8 +28,10 @@ make build   # bin/keepia-mail
 | `KEEPIA_DATABASE_URL` | none (required) | `serve`, `migrate`; holds the password and is never logged. URL form only: it must start with exactly `postgres://` or `postgresql://`, without spaces around it (the keyword/value form `host=… password=…` is rejected). Percent-encode `@`, `/`, `?` and `#` in the user or password and `@` in a query value (`%40`, `%2F`, `%3F`, `%23`); a URL that breaks these rules is rejected without showing any part of it |
 | `KEEPIA_LISTEN` | `127.0.0.1:8080` | `serve` and `healthcheck`; flag `--listen` |
 | `KEEPIA_LOG_LEVEL` | `info` | `serve` (`debug`, `info`, `warn`, `error`) |
+| `KEEPIA_KEK_FILE` | `/var/lib/keepia/kek/kek` | `serve`: the key-encryption key ([Control secrets](#control-secrets)); its `kek.new` lives next to it |
 
-Commands: `serve` (migrate, then answer `GET /healthz`), `migrate`,
+Commands: `serve` (migrate, create or load the [control
+secrets](#control-secrets), then answer `GET /healthz`), `migrate`,
 `migrate status`, `healthcheck` and `--version`.
 
 ## Tests
@@ -57,7 +59,11 @@ CI runs the jobs `test` (against a `postgres:18` service), `lint` and
 
 Migrations are SQL files for [goose](https://github.com/pressly/goose) in
 `internal/store/migrations/`, embedded in the binary. `00001_baseline.sql`
-is a no-op; the first tables come with the data model (#2).
+is a no-op; `00003_control_secrets.sql` holds the control secrets (#96).
+`00002` is reserved for the data model (#95): goose orders by number and
+accepts the gap, but refuses a lower version that arrives after a higher
+one is applied, so the pull request that merges second renumbers its
+migration above main's highest (#95, cross-plan decision CD-C1).
 
 - `keepia-mail migrate` applies the pending migrations; `keepia-mail migrate
   status` lists them.
@@ -69,6 +75,78 @@ is a no-op; the first tables come with the data model (#2).
   with an error naming the lock, and `serve` never listens.
 - Never edit a migration that is on `main`; add a new one. `Down` must work
   and is tested. Rules: `.claude/rules/migrations.md`.
+
+## Control secrets
+
+`serve` creates the control secrets at its first start and loads them at
+every later one, after the migrations and before it listens (#96 part 1;
+`internal/secrets`, `internal/pki`):
+
+- **The key-encryption key (KEK)** is the file `KEEPIA_KEK_FILE`
+  (`/var/lib/keepia/kek/kek`) on the named volume `keepia-kek`, which only
+  `keepia` mounts. The file is one line, `keepia-kek-v1 <base64url of 32
+  random bytes>`, mode 0400, owner 65532, in a 0700 directory that the
+  image ships with that owner and mode (Docker copies them into a new,
+  empty volume). It is never in the database or in `.env`. `serve` opens
+  it with `O_NOFOLLOW|O_NONBLOCK` and checks type, mode and owner on the
+  opened file: a link, a FIFO, a directory, group or other permission
+  bits, another owner than the process, or any other content is refused,
+  and the error never quotes the file.
+- **The secrets** are six rows of `control_secrets` (the keys of the four
+  anchors `store-client`, `groupware-client`, `agent` and `service`, the
+  store master password, and the global mail_crypt key pair) and one
+  `secret_keyring` row with the KEK id and a random deployment id. Each
+  value is sealed with AES-256-GCM (random nonce) under a key derived from
+  the KEK with HKDF-SHA256; the additional data binds it to its name,
+  version, KEK id and public part, so a row copied to another name or
+  paired with another certificate does not open. The database holds only
+  ciphertext: a dump without the KEK reveals no secret.
+- **Losing the KEK loses all mail** (the mail_crypt key is sealed under it)
+  and every certificate, and it is not in a database dump. Back up the
+  volume `keepia-kek` apart from the server; `secrets export` follows with
+  #96 part 2. At the first start `serve` logs, at WARN, `control secrets
+  created: the key-encryption key is /var/lib/keepia/kek/kek on the volume
+  keepia-kek. …`; while the secrets have never been exported, every later
+  start logs the same text as `control secrets never exported: …`.
+- **The first start** writes `kek.new` (`O_EXCL`, fsync), commits the
+  keyring and the six secrets in one transaction, then links `kek.new` to
+  `kek` (never over an existing file), removes `kek.new` and syncs the
+  directory. It holds the bootstrap lock, a session-level advisory lock
+  (`internal/store/locks.go`, class 9601, key 0) on a connection of its
+  own, from before it reads anything until the link is synced. Commands
+  that read the secrets take the same lock shared, for at most 30 s.
+
+**Locked.** `serve` never generates over existing secrets. When the files
+and the database do not fit together, it logs one ERROR `control secrets
+locked: …`, keeps running and answers `/healthz` with 503 `secrets
+unavailable` (so `keepia` shows unhealthy, but `docker compose exec` still
+works). Fix the cause with `keepia` stopped, then start it again. There is
+no shell in the image: to look at or change the volume, use a one-shot
+container of an image the template already pulled, for example
+
+```sh
+docker compose stop keepia
+docker run --rm --pull never --network none --user 65532:65532 \
+  -v keepia-mail_keepia-kek:/kek --entrypoint ls <the memcached image of docker-compose.yml> -la /kek
+docker compose up -d --no-build --pull never keepia
+```
+
+| State | Message starts with | Recovery |
+|---|---|---|
+| No `kek`, secrets in the database | `KEK missing` | Restore `kek` from a backup of the volume `keepia-kek` (or, from #96 part 2 on, `./km secrets restore`), or restore the database that belongs to the lost KEK. |
+| No `kek`, a `kek.new` that is not the database's KEK (or does not load) | `stray kek.new` | It is kept. Restore the right `kek`; if `kek.new` is not a KEK you need (a partial write), remove it with `--entrypoint rm` as above. |
+| `kek` present, no secrets in the database | `KEK without secrets` | Restore the database that matches this KEK; for a fresh install, remove the volume `keepia-kek` (`docker volume rm keepia-mail_keepia-kek`). |
+| `kek` of another deployment (ids differ) | `wrong KEK`, naming both ids | Restore the `kek` whose id the database names, or the database that belongs to this `kek`. |
+| `kek` matches, `kek.new` differs | `stray kek.new` | It is kept: remove it once you know it is not needed. |
+| `kek` refused (mode, owner, link, format) | `KEK file refused` | Fix the file: mode 0400, owner 65532, one KEK line; or restore it from a backup. |
+| A sealed row does not open, or a secret is missing | `sealed secret does not open` or `control secrets incomplete` | The database was changed or mixed with another one: restore it from a backup that matches the KEK. |
+
+A `kek.new` is removed only when the keyring is empty and there is no
+`kek` (an interrupted first start, which then starts over), or when it is
+identical to `kek`. A `kek.new` that matches the database while `kek` is
+missing (a crash between the commit and the link) is linked into place at
+the next start; a command that meets this state reports `bootstrap in
+progress`.
 
 ## Wrapper
 
@@ -338,7 +416,9 @@ docker compose up -d --wait --no-build --pull never
 - **Static configuration** lives in [`deploy/`](../../deploy)
   (`deploy/<role>/<service>/`); the agent replaces it in 0.2.0.
 - **Volumes** are named; every image `VOLUME` is covered, so Compose
-  creates no anonymous volume. The nine are `postgres-data`,
+  creates no anonymous volume. The ten are `keepia-kek` (the
+  key-encryption key, mounted only into `keepia`; see [Control
+  secrets](#control-secrets)), `postgres-data`,
   `valkey-data`, `postfix-spool`, `edge-vmail` (stays empty),
   `store-mail`, `store-index`, `store-users`, `rspamd-data` and
   `sogo-spool`. Mail is in `store-mail` at exactly `/srv/vmail`, the

@@ -46,6 +46,16 @@ type okDB struct{}
 
 func (okDB) Ping(context.Context) error { return nil }
 
+// While the control secrets are locked, /healthz answers 503 "secrets
+// unavailable", also with the database up (#96, CD8).
+func TestHealthzSecretsUnavailable(t *testing.T) {
+	h := server.New(okDB{}, slog.New(slog.DiscardHandler), server.SecretsUnavailable()).Handler()
+	code, body, hdr := get(t, h, http.MethodGet, "/healthz")
+	if code != http.StatusServiceUnavailable || body != "secrets unavailable\n" || hdr.Get("Cache-Control") != "no-store" {
+		t.Fatalf("locked: %d %q %v", code, body, hdr)
+	}
+}
+
 func TestRoutes(t *testing.T) {
 	h := server.New(okDB{}, slog.New(slog.DiscardHandler)).Handler()
 	if code, _, _ := get(t, h, http.MethodPost, "/healthz"); code != http.StatusMethodNotAllowed {

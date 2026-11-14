@@ -56,6 +56,12 @@
 #     LOGIN gets NO [UNAVAILABLE].
 # 13  edge NAT: SNAT of edge-public to EDGE_IPV4 (and EDGE_IPV6) and a DNAT
 #     of port 25 to edge-postfix, in iptables or nftables.
+# 15  the key-encryption key (#96, CD1): the volume keepia-kek is mounted
+#     only into keepia, read-write at /var/lib/keepia/kek; serve created
+#     the KEK there, mode 0400 and uid 65532 in a 0700 directory (read by
+#     the helper image as uid 65532, the volume read-only); keepia logged
+#     the first-start warning once; after `docker compose restart keepia`
+#     it is healthy again, with no second "created" line.
 #
 # Every test runs, also after a failure, and names what failed; the exit
 # status is 1 if any failed. Every wait is `--wait` or bounded by a timeout.
@@ -875,6 +881,66 @@ for fam in $families; do
 done
 [ "$families" = 4 ] && echo "note test 13: edge-public has no IPv6 here; only IPv4 checked"
 
+# ---- test 15: the key-encryption key -----------------------------------------
+
+# The KEK volume (#96, CD1): only keepia mounts it; serve created the KEK
+# at its first start, mode 0400 and uid 65532 in a 0700 directory, and
+# logged the warning; a restart loads it without a second "created" line.
+echo "---- test 15: the key-encryption key"
+kek_volume="${project}_keepia-kek"
+mounted_by=()
+for s in "${expected_services[@]}" "${oneshot_services[@]}"; do
+	c=$(container "$s")
+	[ -n "$c" ] || continue
+	if docker inspect "$c" | jq -e --arg v "$kek_volume" '.[0].Mounts[] | select(.Type == "volume" and .Name == $v)' >/dev/null; then
+		mounted_by+=("$s")
+	fi
+done
+if [ "${mounted_by[*]}" = keepia ]; then
+	pass "test 15: $kek_volume is mounted only into keepia"
+else
+	fail "test 15: $kek_volume is mounted into [${mounted_by[*]}], want [keepia]"
+fi
+c=$(container keepia)
+dest=$(docker inspect "$c" | jq -r --arg v "$kek_volume" '.[0].Mounts[] | select(.Name == $v) | "\(.Destination) rw=\(.RW)"')
+if [ "$dest" = "/var/lib/keepia/kek rw=true" ]; then
+	pass "test 15: keepia mounts it at $dest"
+else
+	fail "test 15: keepia mounts $kek_volume as '$dest', want '/var/lib/keepia/kek rw=true'"
+fi
+# Read with the helper image (pinned, already in the store) as uid 65532,
+# the volume read-only and no network.
+modes=$(helper --network none --user 65532:65532 --entrypoint stat -v "$kek_volume:/k:ro" "$helper_image" \
+	-c '%n %F %a %u' /k /k/kek 2>&1 || true)
+want_modes=$'/k directory 700 65532\n/k/kek regular file 400 65532'
+if [ "$modes" = "$want_modes" ]; then
+	pass "test 15: $(tr '\n' ';' <<<"$modes")"
+else
+	fail "test 15: the KEK volume holds [$(tr '\n' ';' <<<"$modes")], want [$(tr '\n' ';' <<<"$want_modes")]"
+fi
+created=$(docker logs "$c" 2>&1 | grep -c 'control secrets created' || true)
+warning=$(docker logs "$c" 2>&1 | grep -m1 'control secrets created' || true)
+if [ "$created" = 1 ] && [[ $warning == *level=WARN*"/var/lib/keepia/kek/kek on the volume keepia-kek"* ]]; then
+	pass "test 15: keepia logged the warning once: ${warning:0:160}"
+else
+	fail "test 15: keepia logged 'control secrets created' $created times, want once at WARN naming the volume: ${warning:0:300}"
+fi
+reminders=$(docker logs "$c" 2>&1 | grep -c 'control secrets never exported' || true)
+if ! out=$(timeout 120 docker compose restart --timeout 30 keepia 2>&1); then
+	fail "test 15: docker compose restart keepia failed: $(tr '\n' ' ' <<<"$out" | tail -c 300)"
+elif ! out=$(timeout 180 docker compose up -d --wait --no-build --pull never keepia 2>&1); then
+	fail "test 15: keepia is not healthy after the restart: $(tr '\n' ' ' <<<"$out" | tail -c 300)"
+else
+	created=$(docker logs "$c" 2>&1 | grep -c 'control secrets created' || true)
+	reminder=$(docker logs "$c" 2>&1 | grep -c 'control secrets never exported' || true)
+	health=$(docker inspect -f '{{.State.Health.Status}}' "$c")
+	if [ "$created" = 1 ] && [ "$reminder" = $((reminders + 1)) ] && [ "$health" = healthy ]; then
+		pass "test 15: after a restart keepia is $health, with no second 'created' line and one more 'never exported' reminder"
+	else
+		fail "test 15: after a restart: health $health, 'created' $created times (want 1), 'never exported' $reminder times (want $((reminders + 1)))"
+	fi
+fi
+
 # ---- resources ----------------------------------------------------------------
 
 echo "---- resources (docker stats; image size in MB)"
@@ -936,4 +1002,4 @@ if [ "$failed" != 0 ]; then
 	echo "FAIL compose-test: $failed failure(s)" >&2
 	exit 1
 fi
-echo "ok   compose-test: tests 6, 8-13, 14 and 14b passed"
+echo "ok   compose-test: tests 6, 8-13, 14, 14b and 15 passed"

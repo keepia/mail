@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,22 +58,36 @@ func execute(ctx context.Context, o options, args ...string) (stdout, stderr str
 // startServe runs serve on 127.0.0.1:0 against the database in
 // KEEPIA_DATABASE_URL until the test ends, and returns its address once it
 // listens (the ready hook), and a function that stops it and returns its
-// error.
+// error. Without KEEPIA_KEK_FILE it sets one in a new directory.
 func startServe(t *testing.T) (addr string, stop func() error) {
 	t.Helper()
+	addr, stop, _ = startServeLog(t)
+	return addr, stop
+}
+
+// startServeLog is startServe that also returns serve's log.
+func startServeLog(t *testing.T) (addr string, stop func() error, log *syncBuffer) {
+	t.Helper()
+	if os.Getenv(config.EnvKEKFile) == "" {
+		t.Setenv(config.EnvKEKFile, filepath.Join(t.TempDir(), "kek"))
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	addrc := make(chan net.Addr, 1)
 	done := make(chan error, 1)
+	log = &syncBuffer{}
 	go func() {
-		_, _, err := execute(ctx, options{ready: func(a net.Addr) { addrc <- a }}, "serve", "--listen", "127.0.0.1:0")
-		done <- err
+		root := newRootCmd(options{ready: func(a net.Addr) { addrc <- a }})
+		root.SetArgs([]string{"serve", "--listen", "127.0.0.1:0"})
+		root.SetOut(io.Discard)
+		root.SetErr(log)
+		done <- root.ExecuteContext(ctx)
 	}()
 	select {
 	case a := <-addrc:
 		addr = a.String()
 	case err := <-done:
-		t.Fatalf("serve returned before it listened: %v", err)
+		t.Fatalf("serve returned before it listened: %v\n%s", err, log)
 	case <-time.After(testwait.Limit(t)):
 		t.Fatal("serve did not listen")
 	}
@@ -84,7 +100,7 @@ func startServe(t *testing.T) (addr string, stop func() error) {
 			t.Fatal("serve did not return after cancel")
 			return nil
 		}
-	}
+	}, log
 }
 
 // getHealthz is GET /healthz on addr: the status code and body.
@@ -305,22 +321,26 @@ func TestConfigErrors(t *testing.T) {
 	}
 }
 
-// migrate applies the baseline once; migrate status shows it.
+// migrate applies every migration once; migrate status shows them.
 func TestMigrateCommand(t *testing.T) {
 	dbURL := storetest.NewUnmigrated(t)
 	t.Setenv(config.EnvDatabaseURL, dbURL)
 
 	out, _, err := execute(t.Context(), options{}, "migrate", "status")
-	if err != nil || !strings.Contains(out, "00001_baseline.sql  pending") {
+	if err != nil || !strings.Contains(out, "00001_baseline.sql         pending") ||
+		!strings.Contains(out, "00003_control_secrets.sql  pending") {
 		t.Fatalf("status before: %v\n%s", err, out)
 	}
-	if out, _, err = execute(t.Context(), options{}, "migrate"); err != nil || out != "applied 00001_baseline.sql\n" {
+	if out, _, err = execute(t.Context(), options{}, "migrate"); err != nil ||
+		out != "applied 00001_baseline.sql\napplied 00003_control_secrets.sql\n" {
 		t.Fatalf("migrate: %v\n%s", err, out)
 	}
 	if out, _, err = execute(t.Context(), options{}, "migrate"); err != nil || out != "database schema is up to date\n" {
 		t.Fatalf("second migrate: %v\n%s", err, out)
 	}
-	if out, _, err = execute(t.Context(), options{}, "migrate", "status"); err != nil || !strings.Contains(out, "00001_baseline.sql  applied") {
+	if out, _, err = execute(t.Context(), options{}, "migrate", "status"); err != nil ||
+		!strings.Contains(out, "00001_baseline.sql         applied") ||
+		!strings.Contains(out, "00003_control_secrets.sql  applied") {
 		t.Fatalf("status after: %v\n%s", err, out)
 	}
 }

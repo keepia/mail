@@ -31,19 +31,38 @@ type Server struct {
 	// healthTimeout bounds the database check of /healthz (healthTimeout;
 	// tests shorten it).
 	healthTimeout time.Duration
+	// secretsLocked: the control secrets could not be opened (#96, CD8).
+	secretsLocked bool
+}
+
+// Option configures New.
+type Option func(*Server)
+
+// SecretsUnavailable marks the control secrets as locked (#96, CD8):
+// /healthz then answers 503 "secrets unavailable". serve keeps running
+// in that state, so that a restore can still run in its container.
+func SecretsUnavailable() Option {
+	return func(s *Server) { s.secretsLocked = true }
 }
 
 // New returns a server whose health endpoint checks db.
-func New(db Pinger, log *slog.Logger) *Server {
-	return &Server{db: db, log: log, healthTimeout: healthTimeout}
+func New(db Pinger, log *slog.Logger, opts ...Option) *Server {
+	s := &Server{db: db, log: log, healthTimeout: healthTimeout}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // Handler returns the routes:
 //
 //   - GET /healthz: "200 ok" when a query on the database succeeds within
-//     2 s, "503 database unavailable" otherwise. It reveals nothing else
-//     and needs no login. serve opens its listener only after the
-//     migrations, so a healthy answer also means the schema is current.
+//     2 s, "503 database unavailable" otherwise, and "503 secrets
+//     unavailable" while the control secrets are locked
+//     (SecretsUnavailable). It reveals nothing else and needs no login.
+//     serve opens its listener only after the migrations and the secrets'
+//     bootstrap, so a healthy answer also means the schema is current and
+//     the secrets are loaded.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -57,6 +76,12 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	h.Set("Content-Type", "text/plain; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Content-Type-Options", "nosniff")
+	if s.secretsLocked {
+		// serve logged the reason once at its start.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, "secrets unavailable\n")
+		return
+	}
 	if err := s.db.Ping(ctx); err != nil {
 		// The cause goes to the log only, never to the client.
 		s.log.Warn("health check: database unavailable", "err", err)
