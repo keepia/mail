@@ -206,6 +206,15 @@ func TestRowRefused(t *testing.T) {
 		{"a RUN after a line ending in an escaped backslash", func(in *rowInput) {
 			in.dockerfile = append(in.dockerfile, []byte("RUN --network=none echo \\\\\nRUN apt-get update\n")...)
 		}, "a RUN without --network=none must be exactly"},
+		// #88 (Review A B1 on PR #104): BuildKit writes a continuation line
+		// directly after the line before it, so a keyword or a flag split
+		// at the line break is one word again.
+		{"a RUN keyword split over a continuation", func(in *rowInput) {
+			in.dockerfile = append(in.dockerfile, []byte("RU\\\nN curl https://example.org/x\n")...)
+		}, "a RUN without --network=none must be exactly"},
+		{"--network=none glued to the flag before it", func(in *rowInput) {
+			in.dockerfile = append(in.dockerfile, []byte("RUN --mount=type=tmpfs,target=/a\\\n--network=none curl https://example.org/x\n")...)
+		}, "a RUN without --network=none must be exactly"},
 		{"a package name with $", func(in *rowInput) {
 			in.dockerfile = []byte(strings.Replace(unboundDockerfile, "dns-root-data", "$(curl example.org)", 1))
 		}, "a RUN without --network=none must be exactly"},
@@ -359,9 +368,11 @@ func TestGoBuildStage(t *testing.T) {
 
 // TestInstructions (#88): instructions joins lines as BuildKit v0.35.0's
 // parser does (frontend/dockerfile/parser/parser.go): comment and empty
-// lines are skipped inside a continuation too, "empty" by unicode.IsSpace,
-// and a line continues only when its backslash is not escaped. The text is
-// compared word by word, as checkDockerfile reads it.
+// lines are skipped inside a continuation too, "empty" by unicode.IsSpace;
+// a line continues only when its backslash is not escaped; and a
+// continuation line is appended directly, with no separator, so a word
+// split at the line break is one word. The text is compared word by word,
+// as checkDockerfile reads it.
 func TestInstructions(t *testing.T) {
 	type in = instruction
 	const apt = "RUN --mount=type=bind,source=common/keepia-apt-install,target=/tmp/keepia-apt-install sh /tmp/keepia-apt-install"
@@ -372,7 +383,7 @@ func TestInstructions(t *testing.T) {
 		{"an empty line inside a continuation", "RUN a \\\n\nb\nRUN c\n", []in{{1, "RUN a b"}, {4, "RUN c"}}},
 		{"a whitespace-only line inside a continuation", "RUN a \\\n \t\nb\n", []in{{1, "RUN a b"}}},
 		{"a form-feed line inside a continuation", "RUN a \\\n\f\nb\n", []in{{1, "RUN a b"}}},
-		{"a no-break space line inside a continuation", "RUN a \\\n \nb\n", []in{{1, "RUN a b"}}},
+		{"a no-break space line inside a continuation", "RUN a \\\n\xc2\xa0\nb\n", []in{{1, "RUN a b"}}},
 		{"a blank and a carriage return inside a continuation", "RUN a \\\n \r\nb\n", []in{{1, "RUN a b"}}},
 		{"a comment line inside a continuation", "RUN a \\\n  # c\nb\n", []in{{1, "RUN a b"}}},
 		{"a backslash followed by blanks", "RUN a \\ \t\nb\n", []in{{1, "RUN a b"}}},
@@ -384,6 +395,9 @@ func TestInstructions(t *testing.T) {
 		{"a lone backslash at the end of the file", "RUN a\n\\\n", []in{{1, "RUN a"}}},
 		{"a lone backslash before an instruction", "\\\nRUN a\n", []in{{1, "RUN a"}}},
 		{"an apt RUN with an empty line between package lines", apt + " a b \\\n\n    c d\n", []in{{1, apt + " a b c d"}}},
+		{"a FROM keyword split over a continuation", "FR\\\nOM alpine:latest\n", []in{{1, "FROM alpine:latest"}}},
+		{"a RUN keyword split over a continuation", "RU\\\nN curl https://example.org/x\n", []in{{1, "RUN curl https://example.org/x"}}},
+		{"a flag glued to the next line", "RUN --mount=type=tmpfs,target=/a\\\n--network=none curl\n", []in{{1, "RUN --mount=type=tmpfs,target=/a--network=none curl"}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

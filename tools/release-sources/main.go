@@ -843,10 +843,10 @@ var continuation = regexp.MustCompile(`([^\\])\\[ \t]*$|^\\[ \t]*$`)
 // (trimNewline); a line that is empty or a comment once its leading
 // unicode.IsSpace characters are gone is skipped, outside an instruction
 // and inside a continuation alike (isComment, isEmptyContinuationLine); a
-// line continues while continuation matches. BuildKit joins the lines
-// directly where this joins them with a space; only a line break inside a
-// word tells the two apart. An instruction with no text (a lone backslash
-// at the end of the file) is dropped.
+// line continues while continuation matches; and the next line is written
+// directly after it, with no separator (buf.Write, parser.go:348 and
+// :368), so `RU\` followed by `N curl …` is a RUN. An instruction with no
+// text (a lone backslash at the end of the file) is dropped.
 func instructions(src []byte) []instruction {
 	var out []instruction
 	var cur strings.Builder
@@ -870,7 +870,6 @@ func instructions(src []byte) []instruction {
 		}
 		if continuation.MatchString(l) {
 			cur.WriteString(continuation.ReplaceAllString(l, "$1"))
-			cur.WriteString(" ")
 			continue
 		}
 		cur.WriteString(l)

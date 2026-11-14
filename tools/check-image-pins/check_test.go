@@ -167,6 +167,20 @@ func TestDockerfileBlankForms(t *testing.T) {
 		// An escaped backslash ends the instruction, so the FROM is a stage.
 		{"an escaped backslash and blanks at the line end", "RUN --network=none echo \\\\  \nFROM alpine:latest\n", []int{4}},
 		{"three backslashes at the line end (BuildKit's quirk)", "RUN --network=none echo \\\\\\\nFROM alpine:latest\n", []int{4}},
+		// Review A B1 on PR #104: BuildKit writes a continuation line
+		// directly after the line before it, so a word split at the line
+		// break is one word again: a FROM, a RUN and a --mount flag.
+		{"a FROM keyword split over a continuation", "FR\\\nOM alpine:latest\n", []int{3}},
+		{"a RUN keyword split before a --mount", "RU\\\nN --mount=type=bind,from=alpine:latest,target=/x ls\n", []int{3}},
+		{"a --mount flag split over a continuation", "RUN --mo\\\nunt=type=bind,from=alpine:latest,target=/x ls\n", []int{3}},
+		// Review B N2: a lone backslash continues the line (the regex's
+		// second branch), so the --mount below belongs to the RUN.
+		{"a lone backslash inside a RUN", "RUN \\\n\\\n    --mount=type=bind,from=alpine:latest,target=/x ls\n", []int{3, 3}},
+		// Review B N1: lone backslash lines before the keyword hold no
+		// word; the keyword's line counts as the instruction's first.
+		{"a lone backslash before a RUN", "\\\nRUN --mount=type=bind,from=alpine:latest,target=/x ls\n", []int{3}},
+		{"a blank and a backslash before a RUN", " \\\nRUN --network=none true\n", nil},
+		{"two lone backslashes before a RUN", "\\\n\\\nRUN --network=none true\n", nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
