@@ -87,7 +87,9 @@ services:
     build: .
     user: "65532:65532"
     read_only: true
-    mem_limit: 128m
+    # serve plus one Argon2id (64 MiB) under the hash lock, and headroom for
+    # the 0.4.0 admin UI (architecture section 9; #95, #96 CD-C4).
+    mem_limit: 256m
     pids_limit: 128
     environment:
       KEEPIA_LISTEN: ${KEEPIA_SUBNET4:-172.29}.1.10:8080
