@@ -43,6 +43,8 @@ make test       # all tests, -race -shuffle=on -count=1, with TEST_DATABASE_URL
 make test-unit  # the tests that need no database; the database tests skip
 make lint       # golangci-lint (.golangci.yml), version pinned in the Makefile
 make vuln       # govulncheck, version pinned in the Makefile
+make sqlc       # regenerate internal/store/db (sqlc, version pinned in the Makefile)
+make sqlc-check # fail if internal/store/db differs from what sqlc generates
 ```
 
 `make test` uses `TEST_DATABASE_URL` (default
@@ -60,10 +62,36 @@ CI runs the jobs `test` (against a `postgres:18` service), `lint` and
 Migrations are SQL files for [goose](https://github.com/pressly/goose) in
 `internal/store/migrations/`, embedded in the binary. `00001_baseline.sql`
 is a no-op; `00003_control_secrets.sql` holds the control secrets (#96).
-`00002` is reserved for the data model (#95): goose orders by number and
-accepts the gap, but refuses a lower version that arrives after a higher
-one is applied, so the pull request that merges second renumbers its
-migration above main's highest (#95, cross-plan decision CD-C1).
+`00004_data_model.sql` holds the data model (#95; numbered after 00003,
+which merged first, so 00002 stays unused): customer groups,
+domains, alias domains, servers, stores, mailboxes, aliases with their
+targets, send-as grants and the audit log, with the triggers that keep
+groups apart and addresses unique.
+
+- The queries are in `internal/store/queries/`; sqlc (version pinned in the
+  Makefile) generates typed Go from them into `internal/store/db/`, reading
+  the schema from the migrations' Up sections. `make sqlc` regenerates the
+  code after a change to a query or a migration; `make sqlc-check` fails
+  when the generated code differs, and CI's `lint` job runs it. Never edit
+  `internal/store/db/` by hand.
+- Every write of the store API runs in one READ COMMITTED transaction with
+  a lock timeout and adds one `audit_log` row; the triggers refuse other
+  isolation levels. The advisory lock classes and the global lock order
+  are in `internal/store/locks.go`.
+- goose orders migrations by number, but refuses a lower version that
+  arrives after a higher one is applied, so the pull request that merges
+  second renumbers its migration above main's highest (#95, cross-plan
+  decision CD-C1).
+- The Compose `postgres` service runs with `log_error_verbosity=terse`, so
+  its log has no DETAIL, which for a refused `mailboxes` row would quote the
+  password hash. For an investigation an operator can temporarily run
+  `ALTER DATABASE keepia SET log_error_verbosity = default`, which overrides
+  the flag for new connections, and must reset it afterwards
+  (`ALTER DATABASE keepia RESET log_error_verbosity`): while it is set, the
+  log may contain row contents, password hashes included. `keepia-mail`
+  refuses a `default_query_exec_mode` other than `cache_statement` in the
+  database URL, so values reach PostgreSQL as bound parameters, never as
+  statement text that it would log.
 
 - `keepia-mail migrate` applies the pending migrations; `keepia-mail migrate
   status` lists them.

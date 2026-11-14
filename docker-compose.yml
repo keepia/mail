@@ -118,7 +118,10 @@ services:
     mem_limit: 384m
     # One process per connection (max_connections 100) plus its own.
     pids_limit: 256
-    command: ["postgres", "-c", "listen_addresses=${KEEPIA_SUBNET4:-172.29}.1.11"]
+    # log_error_verbosity=terse: no DETAIL in the server log, where a
+    # refused mailboxes row would be quoted with its password hash
+    # ("Failing row contains ..."; #95, compose test 16).
+    command: ["postgres", "-c", "listen_addresses=${KEEPIA_SUBNET4:-172.29}.1.11", "-c", "log_error_verbosity=terse"]
     environment:
       POSTGRES_USER: keepia
       POSTGRES_DB: keepia

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -15,6 +16,37 @@ import (
 )
 
 const baseline = "00001_baseline.sql"
+
+// migrationFiles lists the embedded migrations (migrations/*.sql, the
+// files store.go embeds) in version order, so that a new migration needs
+// no test edit.
+func migrationFiles(t *testing.T) []string {
+	t.Helper()
+	paths, err := filepath.Glob("migrations/*.sql")
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("no migrations found: %v", err)
+	}
+	files := make([]string, 0, len(paths))
+	for _, p := range paths {
+		files = append(files, filepath.Base(p))
+	}
+	if files[0] != baseline {
+		t.Fatalf("first migration %s, want %s", files[0], baseline)
+	}
+	return files // Glob sorts, and the names start with the zero-padded version
+}
+
+// migrationVersion is the version of a migration file, its number before
+// the first '_'.
+func migrationVersion(t *testing.T, file string) int64 {
+	t.Helper()
+	num, _, _ := strings.Cut(file, "_")
+	v, err := strconv.ParseInt(num, 10, 64)
+	if err != nil {
+		t.Fatalf("migration %s: %v", file, err)
+	}
+	return v
+}
 
 // versionRows is the number of applied rows for version in the database's
 // goose_db_version table, 0 when the table does not exist.
@@ -51,25 +83,21 @@ func open(t *testing.T, dbURL string, opts ...store.Option) *store.Store {
 	return st
 }
 
-// migrations are the embedded migrations in order, as goose lists them.
-// 00002 is #95's (CD-C1); goose accepts the gap.
-var migrations = []string{baseline, "00003_control_secrets.sql"}
-
 // checkStatus fails the test unless MigrationStatus lists exactly the
-// migrations, the first applied of them applied and the rest pending.
-func checkStatus(t *testing.T, st *store.Store, step string, applied int) {
+// embedded migrations in order, the first applied of them applied.
+func checkStatus(t *testing.T, st *store.Store, step string, files []string, applied int) {
 	t.Helper()
 	statuses, err := st.MigrationStatus(context.Background())
 	if err != nil {
 		t.Fatalf("%s: status: %v", step, err)
 	}
-	if len(statuses) != len(migrations) {
-		t.Fatalf("%s: status %+v, want %v", step, statuses, migrations)
+	if len(statuses) != len(files) {
+		t.Fatalf("%s: status %+v, want %v", step, statuses, files)
 	}
 	for i, s := range statuses {
 		want := i < applied
-		if s.Path != migrations[i] || s.Applied != want {
-			t.Fatalf("%s: status %+v, want %s applied=%v", step, s, migrations[i], want)
+		if s.Path != files[i] || s.Applied != want {
+			t.Fatalf("%s: status %+v, want %s applied=%v", step, s, files[i], want)
 		}
 		if want && s.AppliedAt.IsZero() {
 			t.Errorf("%s: %s applied without a time", step, s.Path)
@@ -97,52 +125,56 @@ func tables(t *testing.T, dbURL string) []string {
 	return names
 }
 
-// Every migration goes up, down one at a time, and up again; each Down
-// leaves the tables as they were before its Up.
+// Every migration applies, the last one rolls back, every one rolls back
+// down to none, and all apply again. Down restoring the exact schema is
+// TestMigrationDownRestoresSchema.
 func TestMigrateUpDownUp(t *testing.T) {
 	ctx := context.Background()
+	files := migrationFiles(t)
+	last := migrationVersion(t, files[len(files)-1])
 	dbURL := storetest.NewUnmigrated(t)
 	st := open(t, dbURL, store.ForMigrations())
 
-	checkStatus(t, st, "fresh", 0)
+	checkStatus(t, st, "fresh", files, 0)
 
 	applied, err := st.Migrate(ctx)
-	if err != nil || strings.Join(applied, " ") != strings.Join(migrations, " ") {
-		t.Fatalf("first migrate: applied %v, err %v", applied, err)
+	if err != nil || strings.Join(applied, " ") != strings.Join(files, " ") {
+		t.Fatalf("first migrate: applied %v, err %v, want %v", applied, err, files)
 	}
-	checkStatus(t, st, "after migrate", len(migrations))
-	if n := versionRows(t, dbURL, 1); n != 1 {
-		t.Fatalf("after migrate: %d rows for version 1", n)
-	}
-	if got := strings.Join(tables(t, dbURL), " "); got != "control_secrets secret_keyring" {
-		t.Fatalf("after migrate: tables [%s]", got)
+	checkStatus(t, st, "after migrate", files, len(files))
+	if n := versionRows(t, dbURL, last); n != 1 {
+		t.Fatalf("after migrate: %d rows for version %d", n, last)
 	}
 
 	if applied, err = st.Migrate(ctx); err != nil || len(applied) != 0 {
 		t.Fatalf("second migrate: applied %v, err %v", applied, err)
 	}
 
-	for i := len(migrations) - 1; i >= 0; i-- {
-		down, err := st.MigrateDown(ctx)
-		if err != nil || down != migrations[i] {
-			t.Fatalf("migrate down: %q, %v, want %s", down, err, migrations[i])
-		}
-		checkStatus(t, st, "after down of "+down, i)
+	down, err := st.MigrateDown(ctx)
+	if err != nil || down != files[len(files)-1] {
+		t.Fatalf("migrate down: %q, %v", down, err)
 	}
+	checkStatus(t, st, "after down", files, len(files)-1)
+	if n := versionRows(t, dbURL, last); n != 0 {
+		t.Fatalf("after down: %d rows for version %d", n, last)
+	}
+	for i := len(files) - 2; i >= 0; i-- {
+		if down, err := st.MigrateDown(ctx); err != nil || down != files[i] {
+			t.Fatalf("migrate down to %d: %q, %v", i, down, err)
+		}
+	}
+	checkStatus(t, st, "after down to none", files, 0)
 	if got := tables(t, dbURL); len(got) != 0 {
 		t.Fatalf("after every down: tables %v", got)
-	}
-	if n := versionRows(t, dbURL, 1); n != 0 {
-		t.Fatalf("after down: %d rows for version 1", n)
 	}
 	if _, err := st.MigrateDown(ctx); err == nil {
 		t.Error("a down succeeded with nothing to roll back")
 	}
 
-	if applied, err = st.Migrate(ctx); err != nil || len(applied) != len(migrations) {
+	if applied, err = st.Migrate(ctx); err != nil || len(applied) != len(files) {
 		t.Fatalf("migrate after down: applied %v, err %v", applied, err)
 	}
-	checkStatus(t, st, "after migrate again", len(migrations))
+	checkStatus(t, st, "after migrate again", files, len(files))
 }
 
 // downSection is goose's Down annotation on a line of its own.
@@ -189,6 +221,32 @@ func TestOpenRejectsUnsafeURL(t *testing.T) {
 				t.Errorf("error %q contains %q", err, s)
 			}
 		}
+	}
+}
+
+// Open refuses every default_query_exec_mode but pgx's default,
+// cache_statement, before it connects, with a text that names no part of
+// the URL: in simple_protocol mode pgx puts a query's values, password
+// hashes included, into the SQL text that PostgreSQL logs for a refused
+// write (#95, Review A). The default, also given explicitly, is accepted.
+func TestOpenRefusesQueryExecMode(t *testing.T) {
+	for _, mode := range []string{"simple_protocol", "exec", "describe_exec", "cache_describe"} {
+		dbURL := "postgres://keepia:sec-not-real@127.0.0.1:1/keepia?default_query_exec_mode=" + mode
+		_, err := store.Open(context.Background(), dbURL)
+		if err == nil || !strings.Contains(err.Error(), "default_query_exec_mode must be left at its default") {
+			t.Errorf("%s: %v, want the refusal of the mode", mode, err)
+			continue
+		}
+		for _, s := range []string{"sec-not-real", "127.0.0.1"} {
+			if strings.Contains(err.Error(), s) {
+				t.Errorf("%s: error %q contains %q", mode, err, s)
+			}
+		}
+	}
+	dbURL := storetest.NewUnmigrated(t)
+	st := open(t, dbURL+"&default_query_exec_mode=cache_statement")
+	if err := st.Ping(context.Background()); err != nil {
+		t.Errorf("explicit cache_statement: %v", err)
 	}
 }
 
