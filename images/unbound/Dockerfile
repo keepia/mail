@@ -26,8 +26,10 @@ RUN --network=none install -d -o unbound -g unbound -m 0750 /run/unbound \
  && unbound-checkconf /etc/unbound/unbound.conf
 
 # The reload watcher (C15): a new generation file runs
-# `unbound-control reload`.
+# `unbound-control reload`, the first time only once the control socket
+# answers (#45).
 ENV KEEPIA_RELOAD_COMMAND="unbound-control reload"
+ENV KEEPIA_READY_COMMAND="unbound-control status"
 USER 10053:10053
 EXPOSE 53/udp 53/tcp
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/keepia-reload-watch"]
