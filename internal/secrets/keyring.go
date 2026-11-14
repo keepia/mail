@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"os"
@@ -35,6 +36,17 @@ func (k *Keyring) CreatedAt() time.Time { return k.createdAt }
 // Exported tells whether the secrets have been exported at least once
 // (secret_keyring.last_export_at).
 func (k *Keyring) Exported() bool { return k.lastExportAt != nil }
+
+// LastExportAt is when the secrets were last exported, nil for never.
+func (k *Keyring) LastExportAt() *time.Time { return k.lastExportAt }
+
+// MailCryptPublicDER is the mail_crypt public key as DER (SPKI).
+func (k *Keyring) MailCryptPublicDER() ([]byte, error) {
+	return x509.MarshalPKIXPublicKey(k.m.mailCrypt.Public())
+}
+
+// HasMasterPassword tells whether the store master credential is present.
+func (k *Keyring) HasMasterPassword() bool { return k.m.master != "" }
 
 // Anchor is the trust anchor name, with its key.
 func (k *Keyring) Anchor(name pki.AnchorName) *pki.Anchor { return k.m.anchors[name] }
@@ -113,7 +125,8 @@ type Config struct {
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
 
-	// Test seams, set only through export_test.go.
+	// Test seams, set only by this package's own tests (the _test.go
+	// files of package secrets).
 	fs           *kekFS
 	beforeCommit func() error
 	afterCommit  func() error
@@ -245,17 +258,23 @@ func Read(ctx context.Context, st *store.Store, c Config) (*Keyring, error) {
 	if err != nil {
 		return nil, err
 	}
-	switch {
-	case s.kek == nil && s.kekErr == nil && s.keyring == nil:
-		return nil, locked(ErrNotInitialized, "the database holds no control secrets and %s does not exist; is keepia running?", c.KEKFile)
-	case s.kek == nil && s.kekErr == nil && s.newMatchesKeyring():
-		return nil, locked(ErrBootstrapInProgress,
-			"%s is not linked to %s yet; keepia serve finishes it at its next start", c.newPath(), c.KEKFile)
-	}
-	if err := s.lockedState(c); err != nil {
+	if err := s.readable(c); err != nil {
 		return nil, err
 	}
 	return loadKeyring(ctx, sess, s.keyring, s.kek)
+}
+
+// readable is Read's verdict on s: nil when the KEK file matches the
+// keyring, otherwise the locked state a command reports.
+func (s *state) readable(c Config) error {
+	switch {
+	case s.kek == nil && s.kekErr == nil && s.keyring == nil:
+		return locked(ErrNotInitialized, "the database holds no control secrets and %s does not exist; is keepia running?", c.KEKFile)
+	case s.kek == nil && s.kekErr == nil && s.newMatchesKeyring():
+		return locked(ErrBootstrapInProgress,
+			"%s is not linked to %s yet; keepia serve finishes it at its next start", c.newPath(), c.KEKFile)
+	}
+	return s.lockedState(c)
 }
 
 // state is what the bootstrap found, under the lock.
@@ -319,7 +338,7 @@ func (s *state) lockedState(c Config) error {
 		return locked(ErrNotInitialized, "no secrets")
 	case s.kek == nil && !s.newPresent:
 		return locked(ErrKEKMissing,
-			"the database holds control secrets under the KEK %x, but %s does not exist; restore the volume keepia-kek from a backup or the KEK from an export, or restore the database that belongs to the lost KEK",
+			"the database holds control secrets under the KEK %x, but %s does not exist; restore the volume keepia-kek from a backup or the KEK from an export (./km secrets restore), or restore the database that belongs to the lost KEK",
 			s.keyring.KEKID, c.KEKFile)
 	case s.kek == nil:
 		return locked(ErrStrayKEKNew,

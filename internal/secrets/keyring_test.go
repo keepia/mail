@@ -20,7 +20,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/keepia/mail/internal/controlgate"
+	"github.com/keepia/mail/internal/gatebundle"
+	"github.com/keepia/mail/internal/join"
 	"github.com/keepia/mail/internal/pki"
+	"github.com/keepia/mail/internal/pki/pkitest"
 	"github.com/keepia/mail/internal/store"
 	"github.com/keepia/mail/internal/store/storetest"
 	"github.com/keepia/mail/internal/testwait"
@@ -524,9 +528,12 @@ func TestGeneratedSecrets(t *testing.T) {
 	}
 }
 
-// B10. A database dump reveals no secret: no column of the new tables,
-// read as text and as raw bytes, contains the KEK, a private key (DER,
-// its hex and base64, PEM, or the bare scalar) or the master password.
+// B10 (with #96 part 2's N7). A database dump reveals no secret: no
+// column of secret_keyring, control_secrets, certificates, anchor_crls
+// and join_tokens, read as text and as raw bytes, contains the KEK, a
+// private key (DER, its hex and base64, PEM, or the bare scalar; the
+// control gate's included), the master password, or a join token or its
+// secret.
 func TestDumpRevealsNoSecret(t *testing.T) {
 	st, dbURL := newDB(t)
 	c := testConfig(t)
@@ -572,12 +579,64 @@ func TestDumpRevealsNoSecret(t *testing.T) {
 	}
 	needles = append(needles, privPEM)
 
+	// #96 part 2 (N7): the lists, the control gate's certificate (its key
+	// stays in the bundle), two tokens, an agent certificate and a
+	// removal.
 	ctx := context.Background()
+	w := &controlgate.Writer{Store: st, Anchors: kr, Dir: t.TempDir()}
+	if err := w.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	gb, err := gatebundle.Read(w.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys = append(keys, gb.Key.(*ecdsa.PrivateKey))
+	service := kr.Anchor(pki.AnchorService).Cert
+	var tokens []join.Token
+	for _, name := range []string{"s1", "s2"} {
+		tok, err := join.AddServer(ctx, st, service, name, []string{"store"}, time.Hour, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		tokens = append(tokens, tok)
+		add(tok.Secret[:])
+		needles = append(needles, []byte(tok.String()), []byte(tok.String()[len(join.TokenPrefix):]))
+	}
+	csr, _ := pkitest.CSR(t)
+	if _, err := join.Redeem(ctx, st, kr, tokens[1], csr, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pki.RevokeServer(ctx, st, kr, "s1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range keys[len(keys)-1:] {
+		der, err := x509.MarshalPKCS8PrivateKey(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		add(der)
+		ec, err := x509.MarshalECPrivateKey(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		add(ec)
+		scalar, err := k.Bytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		add(scalar)
+		needles = append(needles, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	}
+
 	db := conn(t, dbURL)
 	var haystacks [][]byte
 	for _, q := range []string{
 		`SELECT t::text FROM secret_keyring t`,
 		`SELECT t::text FROM control_secrets t`,
+		`SELECT t::text FROM certificates t`,
+		`SELECT t::text FROM anchor_crls t`,
+		`SELECT t::text FROM join_tokens t`,
 	} {
 		rows, err := db.Query(ctx, q)
 		if err != nil {
@@ -595,6 +654,12 @@ func TestDumpRevealsNoSecret(t *testing.T) {
 	for _, q := range []string{
 		`SELECT kek_id, deployment_id, convert_to(created_at::text, 'UTF8'), convert_to(coalesce(last_export_at::text, ''), 'UTF8') FROM secret_keyring`,
 		`SELECT convert_to(name, 'UTF8'), int4send(version), coalesce(public, ''::bytea), kek_id, sealed FROM control_secrets`,
+		`SELECT serial, convert_to(anchor, 'UTF8'), convert_to(coalesce(server_id::text, ''), 'UTF8'), convert_to(purpose, 'UTF8'),
+			convert_to(coalesce(dns_name, ''), 'UTF8'), spki_sha256, convert_to(not_before::text || not_after::text, 'UTF8'), der,
+			convert_to(coalesce(revoked_at::text, '') || coalesce(revocation_reason::text, ''), 'UTF8') FROM certificates`,
+		`SELECT convert_to(anchor, 'UTF8'), int8send(number), convert_to(this_update::text || next_update::text, 'UTF8'), der FROM anchor_crls`,
+		`SELECT id, convert_to(server_id::text, 'UTF8'), secret_sha256, convert_to(created_at::text || expires_at::text
+			|| coalesce(used_at::text, '') || coalesce(invalidated_at::text, ''), 'UTF8') FROM join_tokens`,
 	} {
 		rows, err := db.Query(ctx, q)
 		if err != nil {
@@ -613,7 +678,11 @@ func TestDumpRevealsNoSecret(t *testing.T) {
 			t.Fatal(rows.Err())
 		}
 	}
-	if len(haystacks) < 2+6+4+6*5 {
+	if count(t, dbURL, "certificates") < 2 || count(t, dbURL, "anchor_crls") != 4 || count(t, dbURL, "join_tokens") != 2 {
+		t.Fatal("the part 2 tables are not filled")
+	}
+	// Text and lowercase text of 1+6+2+4+2 rows, and every column raw.
+	if len(haystacks) < 2*(1+6+2+4+2)+4+6*5+2*9+4*4+2*4 {
 		t.Fatalf("read only %d values", len(haystacks))
 	}
 	for _, h := range haystacks {

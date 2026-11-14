@@ -28,11 +28,16 @@ make build   # bin/keepia-mail
 | `KEEPIA_DATABASE_URL` | none (required) | `serve`, `migrate`; holds the password and is never logged. URL form only: it must start with exactly `postgres://` or `postgresql://`, without spaces around it (the keyword/value form `host=… password=…` is rejected). Percent-encode `@`, `/`, `?` and `#` in the user or password and `@` in a query value (`%40`, `%2F`, `%3F`, `%23`); a URL that breaks these rules is rejected without showing any part of it |
 | `KEEPIA_LISTEN` | `127.0.0.1:8080` | `serve` and `healthcheck`; flag `--listen` |
 | `KEEPIA_LOG_LEVEL` | `info` | `serve` (`debug`, `info`, `warn`, `error`) |
-| `KEEPIA_KEK_FILE` | `/var/lib/keepia/kek/kek` | `serve`: the key-encryption key ([Control secrets](#control-secrets)); its `kek.new` lives next to it |
+| `KEEPIA_KEK_FILE` | `/var/lib/keepia/kek/kek` | `serve`, `server`, `secrets`: the key-encryption key ([Control secrets](#control-secrets)); its `kek.new` lives next to it |
+| `KEEPIA_CONTROL_GATE_DIR` | `/var/lib/keepia/control-gate` | `serve`: the control gate's material ([The control gate's bundle](#the-control-gates-bundle)) |
 
 Commands: `serve` (migrate, create or load the [control
-secrets](#control-secrets), then answer `GET /healthz`), `migrate`,
-`migrate status`, `healthcheck` and `--version`.
+secrets](#control-secrets), write the [control gate's
+bundle](#the-control-gates-bundle), then answer `GET /healthz`),
+`migrate`, `migrate status`, [`server add`, `server token`, `server
+remove`, `server list`](#servers-and-join-tokens), [`secrets export`,
+`secrets restore`, `secrets status`](#export-restore-and-status),
+`healthcheck` and `--version`.
 
 ## Tests
 
@@ -66,7 +71,9 @@ is a no-op; `00003_control_secrets.sql` holds the control secrets (#96).
 which merged first, so 00002 stays unused): customer groups,
 domains, alias domains, servers, stores, mailboxes, aliases with their
 targets, send-as grants and the audit log, with the triggers that keep
-groups apart and addresses unique.
+groups apart and addresses unique. `00005_pki.sql` holds the issued
+certificates, the newest revocation list of each anchor and the join
+tokens (#96 part 2), with foreign keys to `servers`.
 
 - The queries are in `internal/store/queries/`; sqlc (version pinned in the
   Makefile) generates typed Go from them into `internal/store/db/`, reading
@@ -120,12 +127,15 @@ every later one, after the migrations and before it listens (#96 part 1;
   paired with another certificate does not open. The database holds only
   ciphertext: a dump without the KEK reveals no secret.
 - **Losing the KEK loses all mail** (the mail_crypt key is sealed under it)
-  and every certificate, and it is not in a database dump. Back up the
-  volume `keepia-kek` apart from the server; `secrets export` follows with
-  #96 part 2. At the first start `serve` logs, at WARN, `control secrets
-  created: the key-encryption key is /var/lib/keepia/kek/kek on the volume
-  keepia-kek. …`; while the secrets have never been exported, every later
-  start logs the same text as `control secrets never exported: …`.
+  and every certificate, and it is not in a database dump. Run `./km
+  secrets export` ([below](#export-restore-and-status)) and keep the export
+  and its passphrase apart from the server. At the first start `serve`
+  logs, at WARN, `control secrets created: the key-encryption key is
+  /var/lib/keepia/kek/kek on the volume keepia-kek. … Run ./km secrets
+  export now and keep the export and its passphrase apart from this
+  server.`; while the secrets have never been exported, every later start
+  logs the same text as `control secrets never exported: …`, and every
+  `server` and `secrets` command prints it to stderr.
 - **The first start** writes `kek.new` (`O_EXCL`, fsync), commits the
   keyring and the six secrets in one transaction, then links `kek.new` to
   `kek` (never over an existing file), removes `kek.new` and syncs the
@@ -138,26 +148,34 @@ every later one, after the migrations and before it listens (#96 part 1;
 and the database do not fit together, it logs one ERROR `control secrets
 locked: …`, keeps running and answers `/healthz` with 503 `secrets
 unavailable` (so `keepia` shows unhealthy, but `docker compose exec` still
-works). Fix the cause with `keepia` stopped, then start it again. There is
-no shell in the image: to look at or change the volume, use a one-shot
-container of an image the template already pulled, for example
+works, and so does `./km secrets restore`). Fix the cause, then start it
+again (`docker compose restart keepia`). There is no shell in the image: to
+look at or change the volume, stop `keepia` and use a one-shot container of
+the pinned `postgres` image of `docker-compose.yml`, which is present
+wherever `keepia` runs, with the volume mounted and no network:
 
 ```sh
 docker compose stop keepia
+PG_IMAGE=$(docker compose config --images postgres)
 docker run --rm --pull never --network none --user 65532:65532 \
-  -v keepia-mail_keepia-kek:/kek --entrypoint ls <the memcached image of docker-compose.yml> -la /kek
+  -v keepia-mail_keepia-kek:/kek --entrypoint ls "$PG_IMAGE" -la /kek
 docker compose up -d --no-build --pull never keepia
 ```
 
+Each locked state, its message and its recovery (C14; "one-shot" is the
+container above, with the `--entrypoint` and arguments given):
+
 | State | Message starts with | Recovery |
 |---|---|---|
-| No `kek`, secrets in the database | `KEK missing` | Restore `kek` from a backup of the volume `keepia-kek` (or, from #96 part 2 on, `./km secrets restore`), or restore the database that belongs to the lost KEK. |
-| No `kek`, a `kek.new` that is not the database's KEK (or does not load) | `stray kek.new` | It is kept. Restore the right `kek`; if `kek.new` is not a KEK you need (a partial write), remove it with `--entrypoint rm` as above. |
-| `kek` present, no secrets in the database | `KEK without secrets` | Restore the database that matches this KEK; for a fresh install, remove the volume `keepia-kek` (`docker volume rm keepia-mail_keepia-kek`). |
-| `kek` of another deployment (ids differ) | `wrong KEK`, naming both ids | Restore the `kek` whose id the database names, or the database that belongs to this `kek`. |
-| `kek` matches, `kek.new` differs | `stray kek.new` | It is kept: remove it once you know it is not needed. |
-| `kek` refused (mode, owner, link, format) | `KEK file refused` | Fix the file: mode 0400, owner 65532, one KEK line; or restore it from a backup. |
+| No `kek`, secrets in the database | `KEK missing` | With an export: `cat <passphrase-file> <export-file> \| ./km secrets restore`, then restart `keepia` ([below](#export-restore-and-status)). Otherwise restore `kek` from a backup of the volume `keepia-kek`, or restore the database that belongs to the lost KEK. |
+| No `kek`, a `kek.new` that is not the database's KEK (or does not load) | `stray kek.new` | It is kept. If it is not a KEK you need (a partial write), remove it: one-shot `--entrypoint rm … /kek/kek.new`. Then recover as for `KEK missing` (restore refuses while a `kek.new` is in the way). |
+| `kek` present, no secrets in the database | `KEK without secrets` | Restore the database that matches this KEK. For a fresh install, remove the volume `keepia-kek` with `keepia` stopped (`docker volume rm keepia-mail_keepia-kek`). |
+| `kek` of another deployment (ids differ) | `wrong KEK`, naming both ids | Restore the database that belongs to this `kek`, or remove the wrong `kek` (one-shot `--entrypoint rm … /kek/kek`, after you have a copy or know it is not needed) and recover as for `KEK missing`. |
+| `kek` matches, `kek.new` differs | `stray kek.new` | It is kept: remove it once you know it is not needed (one-shot `--entrypoint rm … /kek/kek.new`). |
+| `kek` refused for its owner or mode | `KEK file refused` | Repair it as root: one-shot with `--user 0 --entrypoint chown … 65532:65532 /kek/kek`, then `--user 0 --entrypoint chmod … 0400 /kek/kek`. |
+| `kek` refused for its form (a link, not one KEK line) | `KEK file refused` | Remove it (one-shot `--entrypoint rm … /kek/kek`) and recover as for `KEK missing`. |
 | A sealed row does not open, or a secret is missing | `sealed secret does not open` or `control secrets incomplete` | The database was changed or mixed with another one: restore it from a backup that matches the KEK. |
+| (commands only) `kek.new` matches the database, `kek` missing | `bootstrap in progress` | Start `keepia`: `serve` finishes the link at its start. |
 
 A `kek.new` is removed only when the keyring is empty and there is no
 `kek` (an interrupted first start, which then starts over), or when it is
@@ -165,6 +183,141 @@ identical to `kek`. A `kek.new` that matches the database while `kek` is
 missing (a crash between the commit and the link) is linked into place at
 the next start; a command that meets this state reports `bootstrap in
 progress`.
+
+### Export, restore and status
+
+#96 part 2 (`internal/secrets/export.go`). Every command reads the secrets
+under the bootstrap lock (shared; `restore` exclusive) and refuses in any
+locked state above.
+
+- **`./km secrets export < <passphrase-file> > <export-file>`** writes one
+  PEM block `KEEPIA MAIL SECRETS EXPORT` with the headers `Version: 1`,
+  `KDF: argon2id`, `KDF-Params: m=65536,t=3,p=4`, `Salt` (16 random bytes,
+  base64), `KEK-Id` and `Created`, in that order. The body is AES-256-GCM
+  under Argon2id(passphrase, salt) with the header text as additional
+  data, so a changed header does not open; it holds the KEK, the deployment
+  id and every `control_secrets` row as stored. The export plus its
+  passphrase hold every secret. It then sets `last_export_at`, which ends
+  the warning.
+- **The passphrase** is the first line of stdin, without its newline, 16
+  characters to 1024 bytes. It is never taken from an argument or the
+  environment (which `ps` and `docker inspect` show), and stdin from a
+  terminal or any other device is refused, because it would echo. Through
+  `km` stdin is a pipe or a file.
+- **`cat <passphrase-file> <export-file> | ./km secrets restore`** writes
+  only the KEK file, and only when it is missing, no `kek.new` is in the
+  way, and the database's keyring has the export's KEK id. It recomputes
+  the KEK id from the exported KEK and opens the database's sealed secrets
+  under it before it writes anything, so a forged header is refused. It
+  writes through the bootstrap's own path (`kek.new` with `O_EXCL`, fsync,
+  link, directory fsync), never replaces a KEK and never writes a database
+  row. Then restart `keepia`. A lost database as well (full restore) comes
+  with 0.6.0; the export already carries the sealed rows for it.
+- **Argon2id** (64 MiB) runs inside the hash lock (`store.WithHashLock`,
+  class 950204), taken after the bootstrap lock, so at most one Argon2id
+  runs at a time across every `keepia-mail` process (#95 CD-C4). After 60 s
+  the command exits 1 with `another keepia-mail command is hashing a
+  password; try again`.
+- **`./km secrets status`** prints the KEK id, the deployment id, when the
+  secrets were created, the last export (or `never`), each anchor's SPKI
+  SHA-256 and expiry, the SHA-256 of the mail_crypt public key, and whether
+  the store master credential is present. It prints no secret value.
+
+### Servers and join tokens
+
+#96 part 2 (`internal/join`, `cmd/keepia-mail/server.go`):
+
+- **`./km server add <name> --roles <role,…> [--ttl <duration>]`** adds a
+  server (a lowercase DNS label of 1–63 characters; roles `control`,
+  `edge`, `store`, `filter`, `groupware`, at least one, each once) that has
+  not joined, and prints its join token once on stdout. The token is
+  `keepia-join-v1.` and base64url (no padding) of a 16-byte id, a 32-byte
+  secret and the SHA-256 of the service anchor's SubjectPublicKeyInfo (the
+  pin). Control stores only the id and the SHA-256 of the secret, and never
+  logs the token. `--ttl` is 1 h by default, from 5 min to 24 h.
+- **`./km server token <name> [--ttl]`** prints a new token for a server
+  that has not joined and was not removed; its older unused tokens stop
+  working.
+- **A redeem** (N4's join handler calls `join.Redeem`) locks the server row,
+  then the token row (the order of `server remove`, so the two never
+  deadlock), checks that the token is unused, valid and unexpired and the
+  server neither removed nor joined, compares the secret in constant time,
+  and only then marks the token used, issues the agent certificate (URI
+  `keepia:agent:<server-id>`) and sets `joined_at`. A wrong secret does not
+  consume the token. It returns the agent certificate, the service anchor
+  and the service list.
+- **The agent's side** (`join.Join`, for N4's agent): it checks that the
+  join listener's leaf chains to the pinned anchor with the name
+  `control.keepia.internal`, fetches the lists without sending anything,
+  accepts the service list only if the pinned anchor signed it
+  (`join.VerifyFetchedLists`), checks the leaf against it, and only then
+  sends the token and its CSR.
+- **`./km server remove <name>`** revokes every certificate of the server
+  (`cessationOfOperation`), invalidates its tokens, sets `removed_at` and
+  reissues all four lists, in one READ COMMITTED transaction that locks the
+  server row first, then the CRL lock, then counts the mailboxes on the
+  server's stores. It refuses the control server and a store server whose
+  stores hold mailboxes (moves come in 1.1.0). A mailbox insert reads the
+  server row `FOR SHARE` (T7), so it either commits first and is counted,
+  or waits and is then refused. The row is kept, for the lists.
+- **`./km server list`** shows name, roles, joined, removed and the expiry
+  of the agent certificate, and no secret.
+
+### Certificates and revocation lists
+
+#96 part 2 (`internal/pki/issuer.go`, `crlissuer.go`). Every issued leaf is
+recorded in `certificates`. `pki.IssueForServer` issues only what the
+server's roles allow (CD13): `edge-dovecot` to an edge, a store gate's
+server certificate to a store, an agent certificate to any server; never
+the control gate's name. The newest list of each anchor is in
+`anchor_crls`, valid for 7 days. All four are reissued at every generation
+(N4), at once after a removal, and when the oldest is at least 23 h old
+(`serve` checks at its start and every hour). A reissue takes the CRL lock
+(class 9602) before it reads a number or the revoked set, signs number +
+1, stores it and sends `NOTIFY keepia_crl` in the same transaction, so no
+number has two contents and a listener hears only of committed lists.
+
+### The control gate's bundle
+
+#96 part 2, CD34 and CD35 (`internal/gatebundle`, `internal/controlgate`).
+`serve` issues the control gate's server certificate itself (service
+anchor, serverAuth, the one DNS name `control.keepia.internal`, recorded
+with purpose `control-gate` and no server) and writes it with its key, the
+agent and service anchors and their current lists into
+`KEEPIA_CONTROL_GATE_DIR`, the volume `control-gate-pki`. Only `keepia`
+mounts it, read-write; the control gate (#97 part 2) mounts it read-only.
+
+- **Files:** `bundle.pem` (mode 0400) holds, as PEM, the leaf, the service
+  anchor as presented, the leaf's key (PKCS#8), then each anchor's
+  certificate and its list with the header `Keepia-Anchor`. `generation`
+  (mode 0444) holds a decimal number. Both are owned by 65532 in a 0700
+  directory.
+- **The writer** is one goroutine of `serve`. A write removes a leftover
+  `bundle.pem.tmp` and `generation.tmp` (unlink), writes `bundle.pem.tmp`
+  with `O_EXCL|O_NOFOLLOW`, syncs and renames it, then does the same for
+  `generation`, then syncs the directory. The generation is the file's
+  value + 1 (1 on a new volume); when `generation` is missing or invalid
+  next to a bundle, it continues at the current Unix time. A reader sees
+  the old complete bundle or the new one, never a mix.
+- **When it writes:** at every start before `serve` listens (the first
+  start included, so before any server joins), at every hourly tick, after
+  every (re)connect of its own LISTEN connection, and at every `NOTIFY
+  keepia_crl` (also from a `server remove` in a CLI process). It rewrites
+  when the bundle is missing or invalid, when its leaf is due for renewal
+  (10 days after NotBefore: a new key and leaf), or when its anchors or
+  lists differ from the stored ones; otherwise it writes nothing. A
+  failure to write at the start stops `serve` before it listens.
+- **Readers** (`gatebundle.Read`, `gatebundle.ReadGeneration`) open both
+  files with `O_NOFOLLOW|O_NONBLOCK`, check by `fstat` that they are
+  regular files, read at most 64 KiB and 32 bytes, and never quote a
+  refused file. `generation` must match `^(0|[1-9][0-9]{0,18})\n?$`; a
+  reader applies any valid value that differs from the one it holds.
+  `Read` checks that the key belongs to the leaf, that the leaf chains to
+  the bundle's service anchor with serverAuth and exactly one DNS name (any
+  name: callers check it), and that each list is signed by its anchor. It
+  does not refuse a bundle because a list has passed its nextUpdate: each
+  holder verifies the lists itself with `pki.VerifyCRL` against the list
+  it holds. N4's agent writes the store gates' bundles in the same format.
 
 ## Wrapper
 
@@ -434,9 +587,11 @@ docker compose up -d --wait --no-build --pull never
 - **Static configuration** lives in [`deploy/`](../../deploy)
   (`deploy/<role>/<service>/`); the agent replaces it in 0.2.0.
 - **Volumes** are named; every image `VOLUME` is covered, so Compose
-  creates no anonymous volume. The ten are `keepia-kek` (the
+  creates no anonymous volume. The eleven are `keepia-kek` (the
   key-encryption key, mounted only into `keepia`; see [Control
-  secrets](#control-secrets)), `postgres-data`,
+  secrets](#control-secrets)), `control-gate-pki` (the control gate's
+  material, written by `keepia`; see [The control gate's
+  bundle](#the-control-gates-bundle)), `postgres-data`,
   `valkey-data`, `postfix-spool`, `edge-vmail` (stays empty),
   `store-mail`, `store-index`, `store-users`, `rspamd-data` and
   `sogo-spool`. Mail is in `store-mail` at exactly `/srv/vmail`, the

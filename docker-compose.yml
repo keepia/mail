@@ -100,6 +100,10 @@ services:
       # creates it at the first start and logs a warning. Losing it loses
       # all mail; it is not in a database dump. Back up this volume.
       - keepia-kek:/var/lib/keepia/kek
+      # The control gate's TLS material (#96, CD34): serve writes
+      # bundle.pem and generation here. Read-write only in keepia;
+      # control-gate (#97 part 2) mounts it read-only.
+      - control-gate-pki:/var/lib/keepia/control-gate
     depends_on:
       postgres:
         condition: service_healthy
@@ -614,6 +618,7 @@ networks:
 
 volumes:
   keepia-kek:
+  control-gate-pki:
   postgres-data:
   valkey-data:
   postfix-spool:

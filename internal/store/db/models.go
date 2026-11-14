@@ -32,6 +32,14 @@ type AliasTarget struct {
 	CreatedAt pgtype.Timestamptz
 }
 
+type AnchorCrl struct {
+	Anchor     string
+	Number     int64
+	ThisUpdate pgtype.Timestamptz
+	NextUpdate pgtype.Timestamptz
+	Der        []byte
+}
+
 type AuditLog struct {
 	ID      int64
 	At      pgtype.Timestamptz
@@ -39,6 +47,21 @@ type AuditLog struct {
 	Action  string
 	Object  string
 	Details []byte
+}
+
+type Certificate struct {
+	Serial           []byte
+	Anchor           string
+	ServerID         *int64
+	Purpose          string
+	DnsName          *string
+	SpkiSha256       []byte
+	NotBefore        pgtype.Timestamptz
+	NotAfter         pgtype.Timestamptz
+	Der              []byte
+	RevokedAt        pgtype.Timestamptz
+	RevocationReason *int16
+	CreatedAt        pgtype.Timestamptz
 }
 
 type ControlSecret struct {
@@ -62,6 +85,16 @@ type Domain struct {
 	Name      string
 	Active    bool
 	CreatedAt pgtype.Timestamptz
+}
+
+type JoinToken struct {
+	ID            []byte
+	ServerID      int64
+	SecretSha256  []byte
+	CreatedAt     pgtype.Timestamptz
+	ExpiresAt     pgtype.Timestamptz
+	UsedAt        pgtype.Timestamptz
+	InvalidatedAt pgtype.Timestamptz
 }
 
 type Mailbox struct {

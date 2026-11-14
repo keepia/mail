@@ -90,15 +90,28 @@ func oneAnchor(purposes []Purpose) error {
 // certificate with exactly one EKU, serverAuth, and exactly one SAN, the
 // DNS name dnsName, and is not on crl, which must be valid at now.
 func VerifyServer(peer []*x509.Certificate, anchor *x509.Certificate, dnsName string, crl *CRL, now time.Time) error {
-	leaf, err := verifyChain(peer, anchor, x509.ExtKeyUsageServerAuth, dnsName, now)
+	leaf, err := VerifyServerChain(peer, anchor, dnsName, now)
 	if err != nil {
 		return err
 	}
+	return crl.checkCurrent(anchor, leaf.SerialNumber, now)
+}
+
+// VerifyServerChain is VerifyServer without the revocation check, and
+// returns the leaf: for the first step of a join (#96 C5), which checks
+// the leaf against the pinned anchor before it has a list, and then
+// against the fetched list (join.CheckLeaf). Every other caller uses
+// VerifyServer.
+func VerifyServerChain(peer []*x509.Certificate, anchor *x509.Certificate, dnsName string, now time.Time) (*x509.Certificate, error) {
+	leaf, err := verifyChain(peer, anchor, x509.ExtKeyUsageServerAuth, dnsName, now)
+	if err != nil {
+		return nil, err
+	}
 	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != dnsName ||
 		len(leaf.URIs) != 0 || len(leaf.IPAddresses) != 0 || len(leaf.EmailAddresses) != 0 {
-		return fmt.Errorf("%w: a server certificate needs exactly one SAN, the DNS name %s", ErrPeer, dnsName)
+		return nil, fmt.Errorf("%w: a server certificate needs exactly one SAN, the DNS name %s", ErrPeer, dnsName)
 	}
-	return crl.checkCurrent(anchor, leaf.SerialNumber, now)
+	return leaf, nil
 }
 
 // verifyChain verifies the chain peer against anchor alone at now, for
