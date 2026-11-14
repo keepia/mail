@@ -1,0 +1,51 @@
+#!/bin/bash
+# keepia-reload-ready: the Postfix image's ready command for the reload
+# watcher (KEEPIA_READY_COMMAND; #45 plan revision 2, B1). The watcher runs
+# it before its first reload only. Green once the master handles SIGHUP:
+# `postfix reload` sends a HUP to the pid in master.pid, and the master
+# writes that file (master.c:498-508 in Postfix 3.10.13) before it installs
+# its SIGHUP handler (master_sigsetup(), master.c:546, master_sig.c:267-269),
+# so a HUP in between would end the master instead of reloading it. Unlike
+# keepia-health it does not need smtpd: a config under which every smtpd
+# dies (chroot = y) can still be reloaded and so repaired.
+set -u
+LC_ALL=C
+
+if ! qdir=$(postconf -h queue_directory); then
+	echo "postconf -h queue_directory failed"
+	exit 1
+fi
+pidfile=$qdir/pid/master.pid
+# The master writes the pid right-aligned in a 32-character field and a
+# newline ("%*lu\n").
+if ! IFS= read -r -n 64 pid <"$pidfile"; then
+	echo "no master pid in $pidfile"
+	exit 1
+fi
+pid=${pid//[[:space:]]/}
+if ! [[ $pid =~ ^[1-9][0-9]{0,9}$ ]]; then
+	echo "no master pid in $pidfile"
+	exit 1
+fi
+# One read of /proc/<pid>/status for both fields. The name guards against a
+# stale pid file on the spool volume.
+if ! status=$(<"/proc/$pid/status"); then
+	echo "pid $pid from $pidfile does not run"
+	exit 1
+fi
+re_name=$'(^|\n)Name:[ \t]*([^\n]*)'
+re_sig=$'(^|\n)SigCgt:[ \t]*([0-9a-fA-F]{1,16})(\n|$)'
+name= sig=
+[[ $status =~ $re_name ]] && name=${BASH_REMATCH[2]}
+[[ $status =~ $re_sig ]] && sig=${BASH_REMATCH[2]}
+if [ "$name" != master ]; then
+	echo "pid $pid from $pidfile is '$name', not the Postfix master"
+	exit 1
+fi
+# Bit 0 of SigCgt is signal 1, SIGHUP.
+if [ -n "$sig" ] && (((16#$sig & 1) == 1)); then
+	echo "master $pid handles SIGHUP (SigCgt $sig)"
+	exit 0
+fi
+echo "master $pid does not handle SIGHUP yet (SigCgt ${sig:-?})"
+exit 1

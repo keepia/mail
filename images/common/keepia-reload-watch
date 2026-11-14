@@ -1,29 +1,86 @@
 #!/bin/bash
 # keepia-reload-watch: the entrypoint of the images whose service the agent
 # reconfigures (docs/development/architecture.md, section 5, "Reloads
-# without the Docker socket"; #5 coordinator decision C15). It runs under
-# tini as PID 1.
+# without the Docker socket"; #5 coordinator decision C15; #45). It runs
+# under tini as PID 1.
 #
 # Usage: keepia-reload-watch SERVICE [ARGS...]
 #
-# 1. It starts SERVICE [ARGS...] in the foreground, as its child.
-# 2. If the generation directory exists ($KEEPIA_GENERATION_DIR, default
-#    /run/keepia/generation: a read-only volume the agent writes from 0.2.0),
-#    it watches it with inotifywait for close_write and moved_to. A file
-#    named "generation" written there (the agent writes a temporary file
-#    and renames it) runs $KEEPIA_RELOAD_COMMAND, split into words, and
-#    logs "keepia-entrypoint: generation <value>, reloading". Without the
-#    directory the service runs alone, which is the 0.1.0 state.
-# 3. It exits when the service or the watcher stops (wait -n), so a dead
+# 1. If the generation directory exists ($KEEPIA_GENERATION_DIR, default
+#    /run/keepia/generation: a read-only volume the agent writes from
+#    0.2.0), it first watches it with inotifywait (close_write, moved_to)
+#    and waits until the watch is established; if it cannot watch, it
+#    exits 1 before the service starts. It then reads the file
+#    "generation" there and logs "keepia-entrypoint: watching DIR
+#    (generation at start: N|none)". Only then does it start the service,
+#    so a generation written before that line is already in the files the
+#    service reads, and one written after it is an event.
+# 2. It starts SERVICE [ARGS...] as its child, in a process group of its
+#    own, without the event pipe.
+# 3. An event for "generation" means "read the file again". The watcher
+#    reloads while the newest valid value differs from the one it applied:
+#    until $KEEPIA_READY_COMMAND (optional) has first succeeded it runs
+#    that first, then $KEEPIA_RELOAD_COMMAND; both are split into words
+#    and bounded by `timeout -k 5 30`. A failure is retried after 1 s,
+#    doubling to 30 s (an event resets the delay), for as long as the
+#    container runs. Without the directory the service runs alone, which
+#    is the 0.1.0 state.
+# 4. It exits when the service or the watcher stops (wait -n), so a dead
 #    watcher cannot silently drop reloads: with the service's status when
 #    the service stopped, with 1 (after stopping the service) when the
 #    watcher did.
 #
 # SIGTERM and SIGINT go to the service's process group (docker stop); the
 # script then exits 0 when the service exits 0 or on that SIGTERM, else
-# with the service's status.
+# with the service's status. A stop before the service has started exits
+# 0 at once.
+#
+# Contract for the agent (#45 plan; #98 writes the files):
+#  1. The directory is /run/keepia/generation/ in the role container, a
+#     volume the agent writes, mounted read-only. The file is "generation".
+#  2. The agent writes every config file of the new state first, each by
+#     write-and-rename, and "generation" last: a temporary file in the same
+#     directory, renamed over "generation".
+#  3. Format: decimal digits, no sign, no leading zero except "0", 1 to 19
+#     digits, optionally one trailing newline. Only a regular file counts.
+#     Anything else (a symlink, a FIFO, other content, an unreadable file)
+#     is refused and logged without its content, with no reload. The
+#     watcher reads at most 32 bytes, never follows a symlink and never
+#     blocks on the file. "generation" and the config files must be
+#     readable by the service user: root for Postfix, uid 10053 for
+#     Unbound.
+#  4. Values are never reused on a volume: every value written is greater
+#     than every value written to that volume before. The agent writes
+#     max(file + 1, control generation), which also covers a restore of
+#     control. The watcher reloads on any valid value that differs from the
+#     one it applied and ignores an equal value
+#     ("generation N ignored: already applied").
+#  5. While the container runs, the service is reloaded at least once
+#     after the newest valid "generation" that differs from the applied
+#     one. Until the image's ready command has first succeeded, reloads
+#     wait for it (for Postfix: the master handles SIGHUP); after that they
+#     run directly. A failed reload is retried at 1 s, doubling to 30 s,
+#     and several writes may collapse into one reload. A generation written
+#     before or during start-up is covered (1. above).
+#  6. A config the service refuses is retried for as long as the container
+#     runs, while the old config keeps serving. The agent validates before
+#     it writes.
+#  7. There is no acknowledgement: only the container log shows
+#     "reload of generation N done"; the watcher writes nothing back.
+#  8. Data changes (socketmap, Lua) need no generation.
+#  9. If the watcher dies, the container exits with 1, and the restart
+#     reads the current files. The applied value lives in memory: a
+#     restart starts again from the file's value.
+# 10. For the watcher images (Postfix, Unbound) the agent can report only
+#     the generation it wrote, not the one the service applied (rule 7).
+#     Architecture section 5's "the agent reports the generation it
+#     applied" holds for Dovecot (doveadm answers the reload), not for
+#     these images in 0.2.0.
 set -euo pipefail
-set -f # the reload command is split into words, never globbed
+set -f # the commands are split into words, never globbed
+# Byte semantics for the format check and the byte count (not exported:
+# the service keeps its own environment).
+LC_ALL=C
 
 log() { echo "keepia-entrypoint: $*" >&2; }
 
@@ -34,44 +91,175 @@ fi
 dir=${KEEPIA_GENERATION_DIR:-/run/keepia/generation}
 # shellcheck disable=SC2206 # split into words on purpose (globbing is off)
 reload=(${KEEPIA_RELOAD_COMMAND:?KEEPIA_RELOAD_COMMAND is not set})
+# shellcheck disable=SC2206 # the same
+ready=(${KEEPIA_READY_COMMAND:-})
 
-# The service gets a process group of its own (job control on), so a stop
-# signal reaches the whole service: `postfix start-fg` is a shell that
-# runs the master as its child when it is not PID 1.
-set -m
-"$@" &
-service=$!
-set +m
+# read_generation: sets gen to the value of $dir/generation and returns 0,
+# or logs why the file is refused and returns 1. The content of a refused
+# file is never logged. dd runs before the lstat on purpose: nonblock keeps
+# a FIFO from blocking it, nofollow refuses a symlink swapped in between.
+read_generation() {
+	local raw rc st m
+	gen=
+	# At most 32 bytes, NUL turned into "?", a sentinel that keeps trailing
+	# newlines, and dd's exit status after it.
+	raw=$(
+		LC_ALL=C dd if="$dir/generation" bs=32 count=1 iflag=nofollow,nonblock status=none | tr '\000' '?'
+		printf '.%s' "${PIPESTATUS[0]}"
+	)
+	rc=${raw##*.}
+	raw=${raw%.*}
+	# One lstat for the raw mode (hex) and the type's name in the log.
+	if ! st=$(LC_ALL=C stat -c '%f %F' -- "$dir/generation") || [ -z "$st" ]; then
+		log "generation file refused: unreadable"
+		return 1
+	fi
+	m=${st%% *}
+	# The file type from the mode bits (S_IFMT, S_IFREG): the same for an
+	# empty and a non-empty file, whatever the locale.
+	if ! [[ $m =~ ^[0-9a-f]+$ ]] || ! (((16#$m & 0xF000) == 0x8000)); then
+		log "generation file refused: ${st#* }"
+		return 1
+	fi
+	if [ "$rc" != 0 ]; then
+		log "generation file refused: unreadable"
+		return 1
+	fi
+	local n=${#raw}
+	raw=${raw%$'\n'}
+	if [[ $raw =~ ^(0|[1-9][0-9]{0,18})$ ]]; then
+		gen=$raw
+		return 0
+	fi
+	log "generation file refused: not a decimal generation ($n bytes)"
+	return 1
+}
 
-watcher=
-if [ -d "$dir" ]; then
-	log "watching $dir for generation; reload command: ${reload[*]}"
-	(
-		# inotifywait prints "Watches established." on stderr once it
-		# watches; tests wait for that line before they write.
-		inotifywait -m -e close_write,moved_to --format '%f' "$dir" |
-			while IFS= read -r name; do
-				[ "$name" = generation ] || continue
-				gen=$(head -c 64 "$dir/generation" 2>/dev/null | tr -cd '[:alnum:]._-' || true)
-				log "generation ${gen:-?}, reloading"
-				if "${reload[@]}"; then
-					log "reload of generation ${gen:-?} done"
-				else
-					log "reload of generation ${gen:-?} failed (exit $?)"
-				fi
-			done
-	) &
-	watcher=$!
-else
-	log "no $dir: reloads are not watched"
-fi
+# The delivery loop's state (in the background subshell).
+applied=none
+target=none
+ready_seen=0
+delay=1
+
+# on_event <line>: one line of inotifywait; only "generation" counts.
+on_event() {
+	[ "$1" = generation ] || return 0
+	read_generation || return 0
+	if [ "$gen" = "$applied" ]; then
+		log "generation $gen ignored: already applied"
+	fi
+	target=$gen
+}
+
+# attempt: one try to bring the service to $target. Returns 1 to retry.
+attempt() {
+	local out rc=0
+	if [ "$ready_seen" = 0 ]; then
+		out=$(timeout -k 5 30 "${ready[@]}" {ev}<&- 2>&1) || rc=$?
+		if [ "$rc" != 0 ]; then
+			log "generation $target: service not ready, retry in ${delay}s (${ready[*]}: exit $rc${out:+: ${out//$'\n'/ | }})"
+			return 1
+		fi
+		ready_seen=1
+	fi
+	log "generation $target, reloading"
+	timeout -k 5 30 "${reload[@]}" {ev}<&- || rc=$?
+	if [ "$rc" != 0 ]; then
+		log "reload of generation $target failed (exit $rc), retry in ${delay}s"
+		return 1
+	fi
+	applied=$target
+	log "reload of generation $applied done"
+}
+
+# deliver: reads events from $ev until the stream ends.
+deliver() {
+	local line rc
+	target=$applied
+	[ ${#ready[@]} -gt 0 ] || ready_seen=1
+	while :; do
+		if [ "$target" != "$applied" ]; then
+			if attempt; then
+				delay=1
+				continue
+			fi
+			rc=0
+			IFS= read -r -t "$delay" -u "$ev" line || rc=$?
+			if [ "$rc" -gt 128 ]; then
+				# A timeout: try again, later each time.
+				delay=$((delay * 2))
+				[ "$delay" -le 30 ] || delay=30
+				continue
+			fi
+			# The end of the stream (or an error) ends the loop, so the
+			# container stops instead of retrying without a watch.
+			[ "$rc" = 0 ] || return 0
+			delay=1
+		else
+			IFS= read -r -u "$ev" line || return 0
+		fi
+		on_event "$line"
+	done
+}
 
 stopping=0
 stop_service() {
 	stopping=1
+	if [ -z "${service:-}" ]; then
+		# Set-up: no service has started. A trapped signal does not
+		# interrupt the blocking read below (bash 5.2), so end here.
+		exit 0
+	fi
 	kill -TERM -- "-$service" 2>/dev/null || true
 }
 trap stop_service TERM INT
+
+ev=
+if [ -d "$dir" ]; then
+	# inotifywait's stderr joins the event stream: its set-up lines come
+	# first, then "Watches established.", then one line per event.
+	exec {ev}< <(exec inotifywait -m -e close_write,moved_to --format '%f' "$dir" 2>&1)
+	established=0
+	while IFS= read -r -u "$ev" line; do
+		if [ "$line" = "Watches established." ]; then
+			established=1
+			break
+		fi
+		log "inotifywait: $line"
+	done
+	if [ "$established" != 1 ]; then
+		log "could not watch $dir"
+		exit 1
+	fi
+	if [ -e "$dir/generation" ] || [ -L "$dir/generation" ]; then
+		if read_generation; then
+			applied=$gen
+		fi
+	fi
+	log "watching $dir (generation at start: $applied); reload command: ${reload[*]}; ready command: ${ready[*]:-none}"
+else
+	log "no $dir: reloads are not watched"
+fi
+
+# The service gets a process group of its own (job control on), so a stop
+# signal reaches the whole service: `postfix start-fg` is a shell that
+# runs the master as its child when it is not PID 1. It does not inherit
+# the event pipe.
+set -m
+if [ -n "$ev" ]; then
+	"$@" {ev}<&- &
+else
+	"$@" &
+fi
+service=$!
+set +m
+
+watcher=
+if [ -n "$ev" ]; then
+	deliver &
+	watcher=$!
+	exec {ev}<&-
+fi
 
 set +e
 while :; do

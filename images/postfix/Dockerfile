@@ -41,9 +41,12 @@ RUN --network=none postconf -F '*/*/chroot = n' \
 
 COPY --chmod=0755 common/keepia-reload-watch /usr/local/bin/keepia-reload-watch
 COPY --chmod=0755 postfix/keepia-health /usr/local/bin/keepia-health
+COPY --chmod=0755 postfix/keepia-reload-ready /usr/local/bin/keepia-reload-ready
 
-# The reload watcher (C15): a new generation file runs `postfix reload`.
+# The reload watcher (C15): a new generation file runs `postfix reload`,
+# the first time only once the master handles SIGHUP (#45).
 ENV KEEPIA_RELOAD_COMMAND="postfix reload"
+ENV KEEPIA_READY_COMMAND=/usr/local/bin/keepia-reload-ready
 EXPOSE 25
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/keepia-reload-watch"]
 CMD ["postfix", "start-fg"]

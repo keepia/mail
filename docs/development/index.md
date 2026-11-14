@@ -228,19 +228,45 @@ make image-scripts-test           # check-source, source-listing.sh, keepia-sogo
 - **Reload watcher.** Postfix and Unbound start under `tini` with
   [`images/common/keepia-reload-watch`](../../images/common/keepia-reload-watch):
   when `/run/keepia/generation/` exists (the agent's read-only volume from
-  0.2.0), a `generation` file written there (write, then rename) runs the
-  image's reload command (`postfix reload`, `unbound-control reload`). The
-  container exits when the service or the watcher stops, so a dead watcher
-  cannot silently drop reloads (architecture section 5). Without the
-  directory the service runs alone.
+  0.2.0), it first watches the directory, reads `generation` and logs
+  `watching … (generation at start: N|none)`, and only then starts the
+  service. A `generation` file written there (write, then rename) runs the
+  image's reload command (`postfix reload`, `unbound-control reload`); the
+  first reload waits for the image's ready command
+  (`keepia-reload-ready`: the Postfix master handles SIGHUP;
+  `unbound-control status`). The container exits when the service or the
+  watcher stops, so a dead watcher cannot silently drop reloads
+  (architecture section 5). Without the directory the service runs alone.
+  The contract for the agent (#45; the full text is the watcher's header):
+  - write every config file first, then `generation` last, by rename;
+  - `generation` holds 1 to 19 decimal digits with no leading zero
+    (except `0`) and at most one trailing newline, in a regular file that
+    the service user can read (root for Postfix, uid 10053 for Unbound);
+    a symlink, a FIFO, other content or an unreadable file is refused and
+    logged without its content, with no reload;
+  - values are never reused on a volume: the agent writes
+    `max(file + 1, control generation)`. The watcher reloads on any valid
+    value that differs from the one it applied and ignores an equal one;
+  - a failed reload is retried (1 s, doubling to 30 s) for as long as the
+    container runs; several writes may collapse into one reload;
+  - there is no acknowledgement: only the log shows
+    `reload of generation N done`, so for Postfix and Unbound the agent can
+    report only the generation it wrote.
 - **Image tests** ([`scripts/image-test.sh`](../../scripts/image-test.sh)):
   the smoke command; user, capabilities and `NoNewPrivs`; the healthcheck
   green, then red with every process of the container stopped (and, for
   Postfix, red with Debian's `chroot = y`, while `postfix status` still says
-  running); the reload watcher (a write-and-rename from another container
-  gives the reload line; killing `inotifywait` stops the container with
-  status 1); and a clean `docker stop`. Every wait reads a Docker event or a
-  log line, bounded by a timeout.
+  running); the reload watcher (#45, T1 to T12: a generation written
+  before or during start-up, an equal value ignored and a lower one
+  reloaded, a symlink, a FIFO and bad content refused without a leak or a
+  hang, a failed reload retried, the ready gate only until its first
+  success, a config broken from the start still reloaded, a stop during the
+  set-up, no event pipe in the service, a watch that cannot be set up;
+  killing `inotifywait` stops the container with status 1, also during a
+  pending retry); and a clean `docker stop`. Every wait reads a Docker
+  event or a log line, bounded by a timeout. For a local run,
+  `IMAGE_TEST_CASES` limits the cases (`make image-test IMAGE=postfix
+  IMAGE_TEST_CASES="t1 t2"`; the names are in the script's header).
 
 ### The Compose template
 
