@@ -15,7 +15,7 @@ import (
 // would otherwise pass on whatever is left. The numbers are the current
 // counts.
 var minFixtures = map[string]int{
-	"dockerfile": 33,
+	"dockerfile": 35,
 	"compose":    20,
 	"workflow":   9,
 	"repos":      50,
@@ -137,6 +137,45 @@ func wantLines(src []byte) ([]int, bool) {
 	}
 	slices.Sort(want)
 	return want, len(want) > 0
+}
+
+// TestDockerfileBlankForms (#88) holds the line forms a fixture file cannot
+// show: lines of invisible whitespace and stray carriage returns. Lines
+// join as in BuildKit v0.35.0 (frontend/dockerfile/parser/parser.go): a
+// line that is empty by unicode.IsSpace is skipped, inside a continuation
+// too; each line loses its trailing CR and LF bytes; a backslash continues
+// the line only when it is not escaped (:175). want lists the finding
+// lines, as a fixture's `# want-lines:` does.
+func TestDockerfileBlankForms(t *testing.T) {
+	const head = "# syntax=docker/dockerfile:1.29.0@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183\n" +
+		"FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2\n"
+	cases := []struct {
+		name, body string
+		want       []int
+	}{
+		// The three forms of the READY comment's F1 in one file.
+		{"a form feed between instructions, a no-break space inside a RUN, a lone backslash last",
+			"\f\nRUN --network=none echo one \\\n\u00a0\n    FROM alpine:latest\n\\\n", nil},
+		{"a form-feed line between instructions", "\f\nRUN --network=none true\n", nil},
+		{"vertical tab and U+0085 lines between instructions", "\v\n\u0085\nRUN --network=none true\n", nil},
+		// The FROM line is an argument of echo in BuildKit.
+		{"a no-break space line inside a RUN", "RUN --network=none echo one \\\n\u00a0\n    FROM alpine:latest\n", nil},
+		{"a form-feed line inside a RUN", "RUN --network=none echo one \\\n\f\n    FROM alpine:latest\n", nil},
+		// CRLF is normalised before the split; the second CR is not.
+		{"a carriage return before CRLF continues the line", "RUN \\\r\r\n    --mount=type=bind,from=alpine:latest,target=/x ls\n", []int{3, 3}},
+		{"a lone backslash, then a blank and a backslash, at the end", "RUN --network=none true\n\\\n \\\n", nil},
+		// An escaped backslash ends the instruction, so the FROM is a stage.
+		{"an escaped backslash and blanks at the line end", "RUN --network=none echo \\\\  \nFROM alpine:latest\n", []int{4}},
+		{"three backslashes at the line end (BuildKit's quirk)", "RUN --network=none echo \\\\\\\nFROM alpine:latest\n", []int{4}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			src := []byte(head + c.body)
+			if got := gotLines(kindDockerfile, src); !slices.Equal(got, c.want) {
+				t.Errorf("reported lines %v, want %v:\n%s", got, c.want, fixtureReport(kindDockerfile, src))
+			}
+		})
+	}
 }
 
 // haveBuildx reports whether `docker buildx` runs. Rule 5 needs it. In CI

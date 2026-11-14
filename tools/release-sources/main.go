@@ -20,8 +20,9 @@
 // a licence in addLicences; every RUN of an image Dockerfile without
 // --network=none must be exactly `sh /tmp/keepia-apt-install
 // <package>...` with the helper's bind mount (and the optional ca
-// secret), read as the instruction joined over its continuation lines
-// (R1; the one named exception is the `go mod download` RUN of the root
+// secret), read as the instruction joined over its continuation lines as
+// BuildKit joins them, comment and empty lines inside skipped (R1; the one
+// named exception is the `go mod download` RUN of the root
 // Dockerfile's Go build stage, exactly goModDownload, once: every other
 // RUN of that stage needs --network=none as well);
 // each image must have its requiredComponents; and the target must have
@@ -85,6 +86,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 func main() {
@@ -822,37 +824,60 @@ func moduleEscape(s string) string {
 }
 
 // instruction is a Dockerfile instruction joined over its continuation
-// lines (comment lines inside are dropped, as Docker does).
+// lines; comment and empty lines inside are skipped, as BuildKit does. Keep
+// in step with tools/check-image-pins/dockerfile.go instructions.
 type instruction struct {
-	line int
-	text string
+	line int    // first physical line
+	text string // the joined text, trimmed
 }
 
+// continuation is BuildKit's line-continuation test for the backslash
+// escape (frontend/dockerfile/parser/parser.go:175, v0.35.0): a trailing
+// backslash, blanks after it allowed, that is not itself escaped. So a line
+// ending in `\\` (and, a quirk of that regex, `\\\`) ends the instruction.
+// Replacing the match by $1 drops the backslash.
+var continuation = regexp.MustCompile(`([^\\])\\[ \t]*$|^\\[ \t]*$`)
+
+// instructions joins the physical lines of a Dockerfile as BuildKit v0.35.0
+// does (parser.go Parse): each line loses its trailing CR and LF bytes
+// (trimNewline); a line that is empty or a comment once its leading
+// unicode.IsSpace characters are gone is skipped, outside an instruction
+// and inside a continuation alike (isComment, isEmptyContinuationLine); a
+// line continues while continuation matches. BuildKit joins the lines
+// directly where this joins them with a space; only a line break inside a
+// word tells the two apart. An instruction with no text (a lone backslash
+// at the end of the file) is dropped.
 func instructions(src []byte) []instruction {
 	var out []instruction
 	var cur strings.Builder
 	start := 0
+	open := false
+	flush := func() {
+		if text := strings.TrimSpace(cur.String()); text != "" {
+			out = append(out, instruction{start, text})
+		}
+		cur.Reset()
+		open = false
+	}
 	for i, l := range strings.Split(string(src), "\n") {
-		trimmed := strings.TrimSpace(l)
-		if cur.Len() == 0 {
-			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-				continue
-			}
-			start = i + 1
-		} else if strings.HasPrefix(trimmed, "#") {
+		l = strings.TrimRight(l, "\r\n")
+		trimmed := strings.TrimLeftFunc(l, unicode.IsSpace)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if strings.HasSuffix(l, "\\") {
-			cur.WriteString(strings.TrimSuffix(l, "\\"))
+		if !open {
+			start, open = i+1, true
+		}
+		if continuation.MatchString(l) {
+			cur.WriteString(continuation.ReplaceAllString(l, "$1"))
 			cur.WriteString(" ")
 			continue
 		}
 		cur.WriteString(l)
-		out = append(out, instruction{start, strings.TrimSpace(cur.String())})
-		cur.Reset()
+		flush()
 	}
-	if cur.Len() > 0 {
-		out = append(out, instruction{start, strings.TrimSpace(cur.String())})
+	if open {
+		flush()
 	}
 	return out
 }
