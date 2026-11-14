@@ -63,30 +63,40 @@ type NewMailbox struct {
 }
 
 // CreateMailbox adds a mailbox on the store n.StoreID. Its address must
-// not be an alias (T5, address_taken).
+// not be an alias (T5, address_taken). AddMailbox chooses the store by
+// placement instead.
 func (s *Store) CreateMailbox(ctx context.Context, n NewMailbox) (Mailbox, error) {
 	var m Mailbox
 	err := s.write(ctx, "mailbox.add", func(ctx context.Context, q *db.Queries) (audit, error) {
-		row, err := q.InsertMailbox(ctx, db.InsertMailboxParams{
-			DomainName: n.Address.Domain, LocalPart: n.Address.LocalPart, PasswordHash: n.PasswordHash,
-			QuotaBytes: n.QuotaBytes, ImapAccess: n.IMAP, Pop3Access: n.POP3, SmtpAccess: n.SMTP, StoreID: n.StoreID,
-		})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return audit{}, notFound("domain", n.Address.Domain)
-		}
-		if err != nil {
-			return audit{}, err
-		}
-		m = Mailbox{
-			ID: row.ID, Address: n.Address, Store: row.GateName, StoreID: n.StoreID, QuotaBytes: n.QuotaBytes,
-			IMAP: n.IMAP, POP3: n.POP3, SMTP: n.SMTP, State: MailboxActive, Scheme: hashScheme(n.PasswordHash),
-			CreatedAt: row.CreatedAt.Time,
-		}
-		return audit{object: n.Address.String(), details: map[string]any{
-			"store": row.GateName, "quota_bytes": n.QuotaBytes, "scheme": m.Scheme,
-		}}, nil
+		var a audit
+		var err error
+		m, a, err = insertMailbox(ctx, q, n)
+		return a, err
 	})
 	return m, err
+}
+
+// insertMailbox inserts n in a write's transaction and returns the
+// mailbox and its audit row.
+func insertMailbox(ctx context.Context, q *db.Queries, n NewMailbox) (Mailbox, audit, error) {
+	row, err := q.InsertMailbox(ctx, db.InsertMailboxParams{
+		DomainName: n.Address.Domain, LocalPart: n.Address.LocalPart, PasswordHash: n.PasswordHash,
+		QuotaBytes: n.QuotaBytes, ImapAccess: n.IMAP, Pop3Access: n.POP3, SmtpAccess: n.SMTP, StoreID: n.StoreID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Mailbox{}, audit{}, notFound("domain", n.Address.Domain)
+	}
+	if err != nil {
+		return Mailbox{}, audit{}, err
+	}
+	m := Mailbox{
+		ID: row.ID, Address: n.Address, Store: row.GateName, StoreID: n.StoreID, QuotaBytes: n.QuotaBytes,
+		IMAP: n.IMAP, POP3: n.POP3, SMTP: n.SMTP, State: MailboxActive, Scheme: hashScheme(n.PasswordHash),
+		CreatedAt: row.CreatedAt.Time,
+	}
+	return m, audit{object: n.Address.String(), details: map[string]any{
+		"store": row.GateName, "quota_bytes": n.QuotaBytes, "scheme": m.Scheme,
+	}}, nil
 }
 
 // MailboxChange is the change of UpdateMailbox; a nil field is kept.

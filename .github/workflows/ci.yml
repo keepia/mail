@@ -366,6 +366,21 @@ jobs:
           status=$(./km migrate status)
           echo "$status"
           grep -E '^00001_baseline\.sql +applied ' <<<"$status"
+      # Test 7b (#95 part 2): the operator CLI through ./km in the running
+      # template. A mailbox is placed on an active store with an Argon2id
+      # hash that the store's Dovecot verifies, and a hash that Dovecot
+      # writes is imported; a usage error exits 64; two password adds run
+      # at once; keepia is not OOM-killed and its cgroup's memory.peak
+      # stays under 192 MiB. Before the counter-case, which recreates
+      # postgres.
+      - name: ./km operator CLI (test 7b)
+        env:
+          KEEPIA_IMAGE: ${{ steps.keepia.outputs.image }}
+          KEEPIA_POSTFIX_IMAGE: ${{ steps.postfix.outputs.image }}
+          KEEPIA_UNBOUND_IMAGE: ${{ steps.unbound.outputs.image }}
+          KEEPIA_OLEFY_IMAGE: ${{ steps.olefy.outputs.image }}
+          KEEPIA_SOGO_IMAGE: ${{ steps.sogo.outputs.image }}
+        run: bash scripts/km-cli-test.sh
       # Test 7's counter-case: with a wrong database password km must fail.
       # Compose recreates postgres (same volume, so the old password
       # stays) and keepia, whose serve then cannot log in, so Docker

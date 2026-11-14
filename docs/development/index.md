@@ -25,14 +25,16 @@ make build   # bin/keepia-mail
 
 | Variable | Default | Used by |
 |---|---|---|
-| `KEEPIA_DATABASE_URL` | none (required) | `serve`, `migrate`; holds the password and is never logged. URL form only: it must start with exactly `postgres://` or `postgresql://`, without spaces around it (the keyword/value form `host=… password=…` is rejected). Percent-encode `@`, `/`, `?` and `#` in the user or password and `@` in a query value (`%40`, `%2F`, `%3F`, `%23`); a URL that breaks these rules is rejected without showing any part of it |
+| `KEEPIA_DATABASE_URL` | none (required) | `serve`, `migrate`, the [operator CLI](#operator-cli); holds the password and is never logged. URL form only: it must start with exactly `postgres://` or `postgresql://`, without spaces around it (the keyword/value form `host=… password=…` is rejected). Percent-encode `@`, `/`, `?` and `#` in the user or password and `@` in a query value (`%40`, `%2F`, `%3F`, `%23`); a URL that breaks these rules is rejected without showing any part of it |
 | `KEEPIA_LISTEN` | `127.0.0.1:8080` | `serve` and `healthcheck`; flag `--listen` |
 | `KEEPIA_LOG_LEVEL` | `info` | `serve` (`debug`, `info`, `warn`, `error`) |
 | `KEEPIA_KEK_FILE` | `/var/lib/keepia/kek/kek` | `serve`: the key-encryption key ([Control secrets](#control-secrets)); its `kek.new` lives next to it |
 
 Commands: `serve` (migrate, create or load the [control
 secrets](#control-secrets), then answer `GET /healthz`), `migrate`,
-`migrate status`, `healthcheck` and `--version`.
+`migrate status`, `healthcheck`, `--version`, and the [operator
+CLI](#operator-cli) (`group`, `domain`, `alias-domain`, `mailbox`, `alias`,
+`send-as`).
 
 ## Tests
 
@@ -176,6 +178,96 @@ missing (a crash between the commit and the link) is linked into place at
 the next start; a command that meets this state reports `bootstrap in
 progress`.
 
+## Operator CLI
+
+`keepia-mail` manages the data model (#95 part 2): customer groups,
+domains, alias domains, mailboxes, aliases and send-as grants, each with
+`add`, `list` and `set`. In the template they run through the
+[wrapper](#wrapper), for example `./km mailbox list`. They read
+`KEEPIA_DATABASE_URL` as `migrate` does. Every write is one transaction of
+the store API with an `audit_log` row (the 30-day purge runs with each
+write), and the hash never appears in an audit row, an output or an error.
+
+| Command | Flags | Output |
+|---|---|---|
+| `group add <name>` | | `group <name> added` |
+| `group list` | | `GROUP  DOMAINS` |
+| `group set <name>` | `--name <new>` | `group <new> updated` |
+| `domain add <domain>` | `--group <g>` (required) | `domain <domain> added to group <g>` |
+| `domain list` | `--group` | `DOMAIN  GROUP  ACTIVE` |
+| `domain set <domain>` | `--active=<bool>` (the group never changes) | `domain <domain> updated` |
+| `alias-domain add <name>` | `--domain <d>` (required) | `alias domain <name> added for <d>` |
+| `alias-domain list` | `--domain`, `--group` | `ALIAS DOMAIN  DOMAIN  GROUP  ACTIVE` |
+| `alias-domain set <name>` | `--domain <d>` (same group), `--active=<bool>` | `alias domain <name> updated` |
+| `mailbox add <addr>` | `--quota` (required), `--store <gate-name>`, `--imap`, `--pop3`, `--smtp` (default true), `--password-stdin` or `--password-hash-stdin` | `mailbox <addr> added on store <gate-name>` |
+| `mailbox list` | `--domain`, `--group`, `--store` | `ADDRESS  GROUP  STORE  QUOTA  IMAP  POP3  SMTP  STATE  SCHEME` (the scheme only, never the hash) |
+| `mailbox set <addr>` | `--quota`, `--imap`, `--pop3`, `--smtp`, `--state active\|disabled`, `--password-stdin` or `--password-hash-stdin`; no `--store` | `mailbox <addr> updated` |
+| `alias add <alias-addr>` | `--target <addr>`, repeatable, at least one | `alias <alias-addr> added (<n> targets)` |
+| `alias list` | `--domain`, `--group` | `ALIAS  TARGETS  ACTIVE` (targets sorted, comma-separated) |
+| `alias set <alias-addr>` | `--add-target`, `--remove-target` (repeatable), `--active=<bool>` | `alias <alias-addr> updated` |
+| `send-as add <addr> <addr-or-@domain>` | | `<addr> may send as <x>` |
+| `send-as list` | `--mailbox`, `--group` | `MAILBOX  SEND AS  ACTIVE` |
+| `send-as set <addr> <addr-or-@domain>` | `--active=<bool>` (revokes or restores) | `send-as <addr> <x> updated` |
+
+- **Values.** Names are lowercased (ASCII only) and must match the
+  schema's patterns: a group is one DNS label; a domain two or more, with
+  IDNs as A-labels (`xn--…`); a local part is `a-z`, `0-9`, `.`, `_` and
+  `-`, at most 64 characters, without `..`, `+` or `*`; an address is at
+  most 254 characters. `<addr>` is `local@domain` on a domain, never on an
+  alias domain; `<alias-addr>` may also be `@domain`, the domain's
+  catch-all. Alias targets are mailboxes of the alias's own group, so
+  aliases never chain. `--quota` takes `unlimited` or `0`, a number of
+  bytes, or a number with `KiB`, `MiB`, `GiB` or `TiB`; `list` shows the
+  largest unit that divides it exactly. Boolean flags take `--flag=false`.
+  A `set` needs at least one change flag. A disabled mailbox has no login
+  and its mail is refused as for an unknown address (maintainer decision on
+  #95 Q1; #99 implements it).
+- **Exit codes.** 0 success; 1 refused or failed (not found, a rule of the
+  schema, no eligible store, a lock timeout, the database); 3 already
+  exists (so an import can be re-run); 64 (`EX_USAGE`) a usage error: an
+  unknown command or flag (`mailbox delete`, `mailbox set --store`,
+  `--password`), a wrong number of arguments, or an invalid value. Usage
+  errors are found before the database is contacted. Exit 2 is only ever
+  the Go runtime's, for a panic. `serve`, `migrate` and `healthcheck` exit
+  0 or 1, and 64 for a usage error.
+- **Passwords never come from argv.**
+  - `--password-stdin` reads stdin to its end (at most 4 KiB) and strips
+    one trailing newline or CRLF: for pipes and files.
+  - On a terminal, `mailbox add` without a password flag, and
+    `--password-stdin`, prompt twice without echo on stderr instead; the
+    two entries must match. Through `./km` this needs km's stdin and stdout
+    at a terminal ([Wrapper](#wrapper)).
+  - A new password has 12 to 256 characters of valid UTF-8 without control
+    characters. keepia-mail stores it as Argon2id with 64 MiB, 3 passes
+    and one lane, a 16-byte salt and a 32-byte tag, in Dovecot's form:
+    `{ARGON2ID}$argon2id$v=19$m=65536,t=3,p=1$<salt>$<hash>`.
+  - `--password-hash-stdin` imports a stored hash as given, after a check
+    of its scheme and cost (`internal/password`): `{ARGON2ID}` (m ≤ 65536
+    KiB, t ≤ 10, p ≤ 4), `{BLF-CRYPT}` (cost 04 to 13), `{SHA512-CRYPT}`
+    and `{SHA256-CRYPT}` (1000 to 500000 rounds), `{SSHA}`, `{SSHA256}` and
+    `{SSHA512}`. Anything else, `{PLAIN}` and `{MD5-CRYPT}` included, is
+    refused. A hash from `doveadm pw -s ARGON2ID` with its default cost
+    passes; `-r 3` asks libsodium for 256 MiB and is refused.
+  - One Argon2id runs at a time across every keepia-mail process on the
+    database (the hash lock, `internal/store/locks.go`), and its memory is
+    handed back to the system before the next one starts, so concurrent
+    commands queue instead of adding up in keepia's 256 MiB. A command that
+    waits more than 60 s exits 1: "another keepia-mail command is hashing
+    a password; try again".
+- **Placement.** `mailbox add` puts the mailbox on an eligible store (state
+  active, on a server that is not removed) with the lowest sum of
+  placement weights, then the fewest mailboxes, then the lowest gate name
+  in byte order. A mailbox weighs its quota; an unlimited one weighs a
+  fixed 10 GiB (`store.UnlimitedPlacementWeight`, the migration's
+  `keepia_placement_weight`). Disabled mailboxes count. `--store` names an
+  eligible store instead. The choice runs under one advisory lock, so two
+  concurrent adds never choose from the same sums. Before it hashes, the
+  command checks that the domain exists and a store is eligible; a store
+  whose server is removed between the choice and the insert makes it exit
+  1 ("the store's server was removed; try again") without adding the
+  mailbox. A mailbox never moves in 0.2.0; servers and stores are added by
+  `server add` and the store activation of later tickets.
+
 ## Wrapper
 
 `km` runs `keepia-mail` commands through Docker Compose, for example
@@ -205,7 +297,14 @@ and it pulls them by that digest. In order:
    never keepia`). Every image, including those of all dependencies, is in
    the local store by now, so neither call builds or pulls.
 4. It runs the command in the running container (`docker compose exec -T
-   keepia keepia-mail …`). Its exit status is the command's.
+   keepia keepia-mail …`). Its exit status is the command's. Only when
+   km's own stdin **and** stdout are terminals does it leave out `-T`, so
+   that keepia-mail gets a terminal for its no-echo password prompt
+   ([Operator CLI](#operator-cli)). Piped or in CI it keeps `-T`: that
+   exec line is km's last line, unchanged, because
+   `scripts/km-failure-cause.sh` matches its trace. With stdin at a
+   terminal but stdout piped, km keeps `-T` and the host terminal echoes
+   what is typed: use `--password-stdin` there.
 
 That is the contract the Compose template of #5 meets; the image's health
 probe is `keepia-mail healthcheck` (exit 0 when `/healthz` answers 200),
@@ -534,7 +633,12 @@ addresses on loopback.
   `KEEPIA_POSTFIX_IMAGE`, `KEEPIA_UNBOUND_IMAGE`, `KEEPIA_OLEFY_IMAGE`,
   `KEEPIA_SOGO_IMAGE`), so nothing after the verification goes by tag. Then
   `scripts/compose-test.sh` (tests 6 and 8–14), `./km migrate` and `./km
-  migrate status` (test 7: version 1 applied), `./km` with a wrong database
+  migrate status` (test 7: version 1 applied), `scripts/km-cli-test.sh`
+  (test 7b: the [operator CLI](#operator-cli) through `./km`, with a store
+  added by psql, Dovecot verifying keepia-mail's Argon2id hash and
+  keepia-mail importing Dovecot's, exit 64 for `mailbox set --store`, two
+  password adds at once, and keepia not OOM-killed with its cgroup's
+  `memory.peak` under 192 MiB), `./km` with a wrong database
   password (it must fail at its exec, and `scripts/km-failure-cause.sh`
   names why: the exec found the recreated keepia restarting, met a run of
   it as that run exited, or migrate's own login failed with SQLSTATE

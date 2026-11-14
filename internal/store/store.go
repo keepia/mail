@@ -45,6 +45,9 @@ type Store struct {
 	lockTimeout, hashLockTimeout time.Duration
 	// actor is the audit_log actor of every write (WithAuditActor).
 	actor string
+	// afterChoose is a test seam of AddMailbox (WithAfterChoose); nil
+	// outside tests.
+	afterChoose func(gateName string)
 }
 
 // The defaults of the lock timeouts (plan sections 2 and 4) and of the
@@ -64,6 +67,15 @@ type openConfig struct {
 	lockOptions []lock.SessionLockerOption
 	lockTimeout time.Duration
 	actor       string
+	afterChoose func(gateName string)
+}
+
+// WithAfterChoose is a test seam: f runs in AddMailbox's placement
+// transaction after the store is chosen (its gate name) and before the
+// mailbox is inserted, while the placement lock is held. Only tests set
+// it, to block a placement there.
+func WithAfterChoose(f func(gateName string)) Option {
+	return func(c *openConfig) { c.afterChoose = f }
 }
 
 // WithLockTimeout sets the lock_timeout of every write and of
@@ -192,6 +204,7 @@ func Open(ctx context.Context, url string, opts ...Option) (*Store, error) {
 	if oc.lockTimeout > 0 {
 		st.lockTimeout, st.hashLockTimeout = oc.lockTimeout, oc.lockTimeout
 	}
+	st.afterChoose = oc.afterChoose
 	if oc.actor != "" {
 		st.actor = oc.actor
 	}

@@ -31,7 +31,8 @@
 #    before its exec, and that fails the test whatever the message. The
 #    exec is km's last command, so a traced line after it can only come
 #    from a traced value with a newline in it: that fails too (#70, N1).
-# 2. keepia-mail did not crash: its main exits only 0 or 1, and the Go
+# 2. keepia-mail did not crash: its main exits 0, 1, 3 or 64 (#95: 3 for
+#    "already exists", 64 for a usage error), and the Go
 #    runtime exits 2 on a panic or a fatal error, with a "panic: ",
 #    "fatal error: " or "goroutine N [" line. Exit 2 or such a line fails
 #    the test (#70, B1); no runtime answer to the loop exits 2.

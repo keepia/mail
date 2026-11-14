@@ -37,6 +37,11 @@ type options struct {
 	ready func(net.Addr)
 	// storeOptions are added to every store.Open.
 	storeOptions []store.Option
+	// stdin is the commands' standard input (nil: the process's), and
+	// terminal says whether it is a terminal and reads a password from it
+	// without echo (nil: the process's standard input).
+	stdin    io.Reader
+	terminal terminal
 }
 
 func newRootCmd(o options) *cobra.Command {
@@ -51,17 +56,15 @@ func newRootCmd(o options) *cobra.Command {
 		newServeCmd(o),
 		newMigrateCmd(o),
 		newHealthcheckCmd(),
+		newGroupCmd(o),
+		newDomainCmd(o),
+		newAliasDomainCmd(o),
+		newMailboxCmd(o),
+		newAliasCmd(o),
+		newSendAsCmd(o),
 	)
+	setUsageErrors(root)
 	return root
-}
-
-// exitStatus is the exit code of a command that returned err, and the
-// message to print: 0 and nothing on success, 1 and the error otherwise.
-func exitStatus(err error) (int, string) {
-	if err == nil {
-		return 0, ""
-	}
-	return 1, err.Error()
 }
 
 // newLogger is the text logger on w at level.

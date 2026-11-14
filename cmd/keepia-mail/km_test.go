@@ -46,6 +46,50 @@ type fakeDocker struct {
 	images, missing    []string
 	pullExit, execExit string
 	execOut            string
+	// tty runs km under script(1) (util-linux), on a pseudo-terminal:
+	// ttyBoth with stdin and stdout on it, ttyStdin with stdout piped to
+	// cat, ttyStdout with stdin piped from true.
+	tty ttyMode
+}
+
+// ttyMode says which of km's stdin and stdout are a terminal.
+type ttyMode int
+
+const (
+	ttyNone ttyMode = iota
+	ttyBoth
+	ttyStdin
+	ttyStdout
+)
+
+// shellQuote quotes s as one word for sh.
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// underScript returns the command that runs km with args under script(1)
+// in mode: `script -qec <command> /dev/null` gives the command a
+// pseudo-terminal as stdin and stdout (/dev/null is the typescript file
+// script writes, not a redirection). Without script the test skips
+// locally and fails in CI, like the database tests.
+func underScript(t *testing.T, ctx context.Context, mode ttyMode, km string, args []string) *exec.Cmd {
+	t.Helper()
+	if _, err := exec.LookPath("script"); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("no script (util-linux) in CI: the km TTY tests must run there")
+		}
+		t.Skip("no script (util-linux)")
+	}
+	words := []string{"sh", shellQuote(km)}
+	for _, a := range args {
+		words = append(words, shellQuote(a))
+	}
+	line := strings.Join(words, " ")
+	switch mode {
+	case ttyStdin:
+		line += " | cat"
+	case ttyStdout:
+		line = "true | " + line
+	}
+	return exec.CommandContext(ctx, "script", "-qec", line, "/dev/null") //nolint:gosec // the repository's own script
 }
 
 // imageList returns the images the fake prints.
@@ -113,6 +157,9 @@ func runKm(t *testing.T, fake fakeDocker, args ...string) (int, string, [][]stri
 	cmd := exec.CommandContext(ctx, km, args...) //nolint:gosec // a copy of the repository's own script
 	if fake.trace {
 		cmd = exec.CommandContext(ctx, "sh", append([]string{"-x", km}, args...)...) //nolint:gosec // a copy of the repository's own script
+	}
+	if fake.tty != ttyNone {
+		cmd = underScript(t, ctx, fake.tty, km, args)
 	}
 	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"PS4=+ ", "FAKE_EXEC_OUT="+fake.execOut)
@@ -311,6 +358,64 @@ func TestKmFailureCause(t *testing.T) {
 			}
 			if got := err == nil; got != c.ok {
 				t.Errorf("accepted %v, want %v: %s\nkm exited %d:\n%s", got, c.ok, verdict, code, out)
+			}
+		})
+	}
+}
+
+// The two exec lines of km (#95 revision 2, N2): with a TTY, and the
+// non-terminal one, which must stay byte-identical, since
+// scripts/km-failure-cause.sh matches its trace.
+const (
+	kmExecTTY   = `exec docker compose --progress quiet exec keepia keepia-mail "$@"`
+	kmExecNoTTY = `exec docker compose --progress quiet exec -T keepia keepia-mail "$@"`
+)
+
+// Test 13: km has exactly the two literal exec lines, and the
+// non-terminal one is its last line, as km-failure-cause.sh expects.
+func TestKmExecLines(t *testing.T) {
+	src, err := os.ReadFile("../../km")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var execs []string
+	for line := range strings.Lines(string(src)) {
+		if l := strings.TrimSpace(line); strings.HasPrefix(l, "exec ") {
+			execs = append(execs, l)
+		}
+	}
+	if !slices.Equal(execs, []string{kmExecTTY, kmExecNoTTY}) {
+		t.Errorf("km's exec lines:\n%s\nwant:\n%s\n%s", strings.Join(execs, "\n"), kmExecTTY, kmExecNoTTY)
+	}
+	if !strings.HasSuffix(string(src), "\n"+kmExecNoTTY+"\n") {
+		t.Errorf("km's last line is not, unindented, %s", kmExecNoTTY)
+	}
+}
+
+// Test 13: km gives keepia-mail a TTY (exec without -T) only when its own
+// stdin and stdout are both terminals (CD11): under script(1), for the
+// no-echo password prompt. With stdout or stdin piped, and with neither a
+// terminal (CI, test 7), the exec keeps -T.
+func TestKmTTY(t *testing.T) {
+	args := []string{"mailbox", "add", "alice@example.org", "--quota", "1GiB"}
+	for _, c := range []struct {
+		name string
+		mode ttyMode
+		tty  bool
+	}{
+		{"stdin and stdout a terminal", ttyBoth, true},
+		{"stdout piped", ttyStdin, false},
+		{"stdin piped", ttyStdout, false},
+		{"no terminal", ttyNone, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			code, out, calls := runKm(t, fakeDocker{tty: c.mode}, args...)
+			want := kmCalls(allPresent, args...)
+			if c.tty {
+				want[len(want)-1] = append([]string{"compose", "--progress", "quiet", "exec", "keepia", "keepia-mail"}, args...)
+			}
+			if code != 0 || !slices.EqualFunc(calls, want, slices.Equal) {
+				t.Errorf("exit %d\n%s\ndocker calls:\n%swant:\n%s", code, out, show(calls), show(want))
 			}
 		})
 	}

@@ -3,6 +3,7 @@
 #
 #   ./km migrate
 #   ./km migrate status
+#   ./km mailbox add alice@example.org --quota 5GiB   (prompts for the password)
 #
 # Starts PostgreSQL (Compose service postgres) and the Compose service
 # keepia if needed, then runs `keepia-mail <arguments>` in the running
@@ -53,4 +54,11 @@ set +f
 # Every image is now in the local store, so neither up builds or pulls.
 docker compose --progress quiet up -d --wait --no-build --pull never postgres
 docker compose --progress quiet up -d --no-build --pull never keepia
+# A terminal for keepia-mail only when km's own stdin and stdout are both
+# terminals (an operator typing a password at the no-echo prompt, #95):
+# then exec allocates a TTY. Piped or in CI it runs with -T, the last line,
+# whose trace scripts/km-failure-cause.sh matches; keep it unchanged.
+if [ -t 0 ] && [ -t 1 ]; then
+	exec docker compose --progress quiet exec keepia keepia-mail "$@"
+fi
 exec docker compose --progress quiet exec -T keepia keepia-mail "$@"
