@@ -744,6 +744,15 @@ func TestTriggersRefuseInvisibleRows(t *testing.T) {
 			bad:        fmt.Sprintf("SELECT count(*) FROM alias_targets WHERE mailbox_id = %d", f.bob),
 		},
 		{
+			name: "T4: an uncommitted mailbox of another group as a target",
+			a:    fmt.Sprintf("INSERT INTO mailboxes (domain_id, local_part, password_hash, quota_bytes, store_id) VALUES (%d, 'race4m', '%s', 0, %d) RETURNING id", f.com, testHash, f.active),
+			b: func(id int64) string {
+				return fmt.Sprintf("INSERT INTO alias_targets (alias_id, mailbox_id) SELECT %d, %d"+second, f.sales, id, "0, 0")
+			},
+			constraint: "alias_targets_mailbox_id_fkey",
+			bad:        "SELECT count(*) FROM alias_targets t JOIN mailboxes m ON m.id = t.mailbox_id WHERE m.local_part = 'race4m'",
+		},
+		{
 			name: "T3: a grant across groups for an uncommitted mailbox",
 			a:    fmt.Sprintf("INSERT INTO mailboxes (domain_id, local_part, password_hash, quota_bytes, store_id) VALUES (%d, 'race3', '%s', 0, %d) RETURNING id", f.org, testHash, f.active),
 			b: func(id int64) string {
@@ -751,6 +760,25 @@ func TestTriggersRefuseInvisibleRows(t *testing.T) {
 			},
 			constraint: "send_as_mailbox_id_fkey",
 			bad:        fmt.Sprintf("SELECT count(*) FROM send_as WHERE domain_id = %d", f.com),
+		},
+		{
+			name: "T3: a grant on an uncommitted domain of another group",
+			a:    fmt.Sprintf("INSERT INTO domains (group_id, name) VALUES (%d, 'race-t3.example') RETURNING id", f.other),
+			b: func(id int64) string {
+				return fmt.Sprintf("INSERT INTO send_as (mailbox_id, domain_id) SELECT %d, %d"+second, f.alice, id, "0, 0")
+			},
+			constraint: "send_as_domain_id_fkey",
+			bad:        "SELECT count(*) FROM send_as s JOIN domains d ON d.id = s.domain_id WHERE d.name = 'race-t3.example'",
+		},
+		{
+			name: "T5: a 64-character local part on an uncommitted 253-character domain",
+			a:    fmt.Sprintf("INSERT INTO domains (group_id, name) VALUES (%d, '%s') RETURNING id", f.acme, labels(3, 61)),
+			b: func(id int64) string {
+				return fmt.Sprintf("INSERT INTO mailboxes (domain_id, local_part, password_hash, quota_bytes, store_id) SELECT %d, '%s', '%s', 0, %d"+second,
+					id, strings.Repeat("l", 64), testHash, f.active, fmt.Sprintf("0, 'x', '%s', 0, 0", testHash))
+			},
+			constraint: "mailboxes_domain_id_fkey",
+			bad:        "SELECT count(*) FROM mailboxes m JOIN domains d ON d.id = m.domain_id WHERE char_length(m.local_part) + 1 + char_length(d.name) > 254",
 		},
 		{
 			name: "T7: a mailbox on an uncommitted joining store",
