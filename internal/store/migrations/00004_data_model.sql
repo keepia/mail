@@ -264,8 +264,12 @@ CREATE TRIGGER domains_t1_name BEFORE INSERT ON domains
 CREATE TRIGGER alias_domains_t1_name BEFORE INSERT ON alias_domains
 	FOR EACH ROW EXECUTE FUNCTION keepia_t1_domain_name();
 
--- T2: an alias domain moves only within its group. An unknown target is
--- left to the foreign key.
+-- A row that T2, T3, T4, T7 or T8 looks up and does not see is refused
+-- with the foreign key's SQLSTATE and name, never left to the foreign key:
+-- a row committed between the trigger's snapshot and the foreign key's
+-- check would otherwise skip the trigger's rule (Review A, N1).
+
+-- T2: an alias domain moves only within its group.
 -- +goose StatementBegin
 CREATE FUNCTION keepia_t2_alias_domain_group() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -276,7 +280,11 @@ BEGIN
 		RETURN NEW;
 	END IF;
 	SELECT group_id INTO new_group FROM domains WHERE id = NEW.domain_id;
-	IF FOUND AND new_group IS DISTINCT FROM (SELECT group_id FROM domains WHERE id = OLD.domain_id) THEN
+	IF NOT FOUND THEN
+		RAISE EXCEPTION 'the referenced row does not exist'
+			USING ERRCODE = '23503', CONSTRAINT = 'alias_domains_domain_id_fkey';
+	END IF;
+	IF new_group IS DISTINCT FROM (SELECT group_id FROM domains WHERE id = OLD.domain_id) THEN
 		RAISE EXCEPTION 'an alias domain can only point to a domain of the same group'
 			USING ERRCODE = '23514', CONSTRAINT = 'alias_domain_group';
 	END IF;
@@ -288,8 +296,7 @@ CREATE TRIGGER alias_domains_t2_group BEFORE UPDATE OF domain_id ON alias_domain
 	FOR EACH ROW EXECUTE FUNCTION keepia_t2_alias_domain_group();
 
 -- T3: a send-as grant stays inside the mailbox's group. With a local part,
--- the address is at most 254 characters (T5's rule for send_as). An
--- unknown mailbox or domain is left to the foreign keys.
+-- the address is at most 254 characters (T5's rule for send_as).
 -- +goose StatementBegin
 CREATE FUNCTION keepia_t3_send_as() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -300,11 +307,13 @@ DECLARE
 BEGIN
 	SELECT d.group_id INTO mailbox_group FROM mailboxes m JOIN domains d ON d.id = m.domain_id WHERE m.id = NEW.mailbox_id;
 	IF NOT FOUND THEN
-		RETURN NEW;
+		RAISE EXCEPTION 'the referenced row does not exist'
+			USING ERRCODE = '23503', CONSTRAINT = 'send_as_mailbox_id_fkey';
 	END IF;
 	SELECT group_id, name INTO grant_group, grant_domain FROM domains WHERE id = NEW.domain_id;
 	IF NOT FOUND THEN
-		RETURN NEW;
+		RAISE EXCEPTION 'the referenced row does not exist'
+			USING ERRCODE = '23503', CONSTRAINT = 'send_as_domain_id_fkey';
 	END IF;
 	IF mailbox_group <> grant_group THEN
 		RAISE EXCEPTION 'a mailbox can only send as an address of its own group'
@@ -322,7 +331,7 @@ CREATE TRIGGER send_as_t3_group BEFORE INSERT ON send_as
 	FOR EACH ROW EXECUTE FUNCTION keepia_t3_send_as();
 
 -- T4: an alias (catch-alls included) delivers only to mailboxes of its
--- own group. An unknown alias or mailbox is left to the foreign keys.
+-- own group.
 -- +goose StatementBegin
 CREATE FUNCTION keepia_t4_alias_target_group() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -332,11 +341,13 @@ DECLARE
 BEGIN
 	SELECT d.group_id INTO alias_group FROM aliases a JOIN domains d ON d.id = a.domain_id WHERE a.id = NEW.alias_id;
 	IF NOT FOUND THEN
-		RETURN NEW;
+		RAISE EXCEPTION 'the referenced row does not exist'
+			USING ERRCODE = '23503', CONSTRAINT = 'alias_targets_alias_id_fkey';
 	END IF;
 	SELECT d.group_id INTO mailbox_group FROM mailboxes m JOIN domains d ON d.id = m.domain_id WHERE m.id = NEW.mailbox_id;
 	IF NOT FOUND THEN
-		RETURN NEW;
+		RAISE EXCEPTION 'the referenced row does not exist'
+			USING ERRCODE = '23503', CONSTRAINT = 'alias_targets_mailbox_id_fkey';
 	END IF;
 	IF alias_group <> mailbox_group THEN
 		RAISE EXCEPTION 'an alias can only point to a mailbox of its own group'
@@ -434,7 +445,8 @@ DECLARE
 BEGIN
 	SELECT server_id INTO store_server FROM stores WHERE id = NEW.store_id;
 	IF NOT FOUND THEN
-		RETURN NEW; -- the foreign key refuses it
+		RAISE EXCEPTION 'the referenced row does not exist'
+			USING ERRCODE = '23503', CONSTRAINT = 'mailboxes_store_id_fkey';
 	END IF;
 	SELECT removed_at INTO removed FROM servers WHERE id = store_server FOR SHARE;
 	IF removed IS NOT NULL THEN
@@ -467,7 +479,8 @@ BEGIN
 	IF TG_TABLE_NAME = 'stores' THEN
 		SELECT roles, removed_at INTO server_roles, removed FROM servers WHERE id = NEW.server_id FOR SHARE;
 		IF NOT FOUND THEN
-			RETURN NEW; -- the foreign key refuses it
+			RAISE EXCEPTION 'the referenced row does not exist'
+				USING ERRCODE = '23503', CONSTRAINT = 'stores_server_id_fkey';
 		END IF;
 		IF removed IS NOT NULL THEN
 			RAISE EXCEPTION 'the server was removed'
@@ -498,7 +511,8 @@ CREATE TRIGGER servers_t8_roles BEFORE UPDATE OF roles ON servers
 
 -- T9: immutable columns, named in TG_ARGV; without arguments every update
 -- is refused. The constraint is <table>_<column>_immutable, or
--- <table>_immutable.
+-- <table>_immutable. Every id is frozen too: UPDATE ... SET id = DEFAULT
+-- would otherwise move a row to a fresh id (Review A, N4).
 -- +goose StatementBegin
 CREATE FUNCTION keepia_refuse_change() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -519,20 +533,22 @@ BEGIN
 END
 $$;
 -- +goose StatementEnd
+CREATE TRIGGER customer_groups_t9_immutable BEFORE UPDATE ON customer_groups
+	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('id');
 CREATE TRIGGER domains_t9_immutable BEFORE UPDATE ON domains
-	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('group_id', 'name');
+	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('id', 'group_id', 'name');
 CREATE TRIGGER alias_domains_t9_immutable BEFORE UPDATE ON alias_domains
-	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('name');
+	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('id', 'name');
 CREATE TRIGGER servers_t9_immutable BEFORE UPDATE ON servers
-	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('name');
+	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('id', 'name');
 CREATE TRIGGER stores_t9_immutable BEFORE UPDATE ON stores
-	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('server_id', 'gate_name');
+	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('id', 'server_id', 'gate_name');
 CREATE TRIGGER mailboxes_t9_immutable BEFORE UPDATE ON mailboxes
-	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('domain_id', 'local_part', 'store_id');
+	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('id', 'domain_id', 'local_part', 'store_id');
 CREATE TRIGGER aliases_t9_immutable BEFORE UPDATE ON aliases
-	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('domain_id', 'local_part');
+	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('id', 'domain_id', 'local_part');
 CREATE TRIGGER send_as_t9_immutable BEFORE UPDATE ON send_as
-	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('mailbox_id', 'domain_id', 'local_part');
+	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change('id', 'mailbox_id', 'domain_id', 'local_part');
 CREATE TRIGGER alias_targets_t9_immutable BEFORE UPDATE ON alias_targets
 	FOR EACH ROW EXECUTE FUNCTION keepia_refuse_change();
 

@@ -589,6 +589,17 @@ func TestTriggers(t *testing.T) {
 		{"T9 send_as.local_part", one("UPDATE send_as SET local_part = 'info' WHERE mailbox_id = %d", f.alice), false, check, "send_as_local_part_immutable"},
 		{"T9 alias_targets.mailbox_id", one("UPDATE alias_targets SET mailbox_id = %d WHERE alias_id = %d AND mailbox_id = %d", f.carol, f.sales, f.alice), false, check, "alias_targets_immutable"},
 		{"T9 alias_targets.created_at", one("UPDATE alias_targets SET created_at = now() WHERE alias_id = %d", f.sales), false, check, "alias_targets_immutable"},
+		// T9 freezes every id, also of rows nothing references (where a
+		// foreign key cannot refuse the change): SET id = DEFAULT would move
+		// the row to a fresh id (Review A, N4).
+		{"T9 customer_groups.id", []string{"INSERT INTO customer_groups (name) VALUES ('lonely')", "UPDATE customer_groups SET id = DEFAULT WHERE name = 'lonely'"}, false, check, "customer_groups_id_immutable"},
+		{"T9 domains.id", []string{fmt.Sprintf("INSERT INTO domains (group_id, name) VALUES (%d, 'example.biz')", f.acme), "UPDATE domains SET id = DEFAULT WHERE name = 'example.biz'"}, false, check, "domains_id_immutable"},
+		{"T9 alias_domains.id", one("UPDATE alias_domains SET id = DEFAULT WHERE name = 'example.info'"), false, check, "alias_domains_id_immutable"},
+		{"T9 servers.id", one("UPDATE servers SET id = DEFAULT WHERE id = %d", f.srv2), false, check, "servers_id_immutable"},
+		{"T9 stores.id", one("UPDATE stores SET id = DEFAULT WHERE id = %d", f.joining), false, check, "stores_id_immutable"},
+		{"T9 mailboxes.id", one("UPDATE mailboxes SET id = DEFAULT WHERE id = %d", f.dave), false, check, "mailboxes_id_immutable"},
+		{"T9 aliases.id", []string{fmt.Sprintf("INSERT INTO aliases (domain_id, local_part) VALUES (%d, 'info')", f.org), "UPDATE aliases SET id = DEFAULT WHERE local_part = 'info'"}, false, check, "aliases_id_immutable"},
+		{"T9 send_as.id", one("UPDATE send_as SET id = DEFAULT WHERE mailbox_id = %d", f.alice), false, check, "send_as_id_immutable"},
 		{"T9 mutable domain column", one("UPDATE domains SET active = false WHERE id = %d", f.org), false, "", ""},
 		{"T9 immutable column set to its value", one("UPDATE domains SET name = name, group_id = group_id WHERE id = %d", f.org), false, "", ""},
 		{"T9 mutable mailbox columns", one("UPDATE mailboxes SET quota_bytes = 1, state = 'disabled', imap_access = false, password_hash = '{SSHA}cGxhY2Vob2xkZXI=' WHERE id = %d", f.alice), false, "", ""},
@@ -654,6 +665,169 @@ func waitForLockWait(t *testing.T, obs *pgx.Conn, done <-chan error, what string
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s to wait for a lock", what)
+		}
+	}
+}
+
+// doneOrLockWait returns B's result once B (done) finishes, with waited
+// false; or, once a backend of the test's database other than obs's
+// waits for a lock (pg_stat_activity), it returns with waited true and B
+// still running. It fails the test after testwait.Limit.
+func doneOrLockWait(t *testing.T, obs *pgx.Conn, done <-chan error) (err error, waited bool) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(testwait.Limit(t))
+	for {
+		select {
+		case err := <-done:
+			return err, false
+		default:
+		}
+		var waiting bool
+		if err := obs.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			return nil, true
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for B to finish or to wait for a lock")
+		}
+	}
+}
+
+// Review A, N1: T2, T3, T4, T7 and T8 refuse a referenced row they do
+// not see, with the foreign key's SQLSTATE and name, instead of leaving
+// it to the foreign key. Otherwise a row that commits between the
+// trigger's snapshot and the foreign key's check (at the end of the
+// statement) passes the foreign key and skips the trigger's rule.
+//
+// The sequence is Review A's: A takes advisory lock (1, 42), inserts the
+// referenced row and stays open. B's statement writes its first row
+// against A's uncommitted row, then waits for lock (1, 42) in a second
+// row through keepia_test_probe_wait(), so its foreign key check runs
+// only after A's commit. With the fix B fails at its first row and never
+// waits; without it B waits (pg_stat_activity shows it), A commits, and
+// B's write commits past the rule, which the test reports.
+func TestTriggersRefuseInvisibleRows(t *testing.T) {
+	ctx := context.Background()
+	d := newTestDB(t)
+	f := seed(t, d)
+	exec(t, d.conn, `CREATE FUNCTION keepia_test_probe_wait() RETURNS boolean LANGUAGE plpgsql AS $$
+		BEGIN PERFORM pg_advisory_xact_lock(1, 42); RETURN false; END $$`)
+	const second = " UNION ALL SELECT %s FROM (VALUES (1)) v WHERE keepia_test_probe_wait()"
+	for _, c := range []struct {
+		name string
+		// a inserts A's row and returns its id; then is A's next statement
+		// for that id, if any.
+		a    string
+		then func(id int64) string
+		// b is B's statement for A's id.
+		b func(id int64) string
+		// constraint is the foreign key B's error must name.
+		constraint string
+		// bad counts the rows that broke the trigger's rule.
+		bad string
+	}{
+		{
+			name: "T4: a target in another group for an uncommitted alias",
+			a:    fmt.Sprintf("INSERT INTO aliases (domain_id, local_part) VALUES (%d, 'race') RETURNING id", f.org),
+			then: func(id int64) string {
+				return fmt.Sprintf("INSERT INTO alias_targets (alias_id, mailbox_id) VALUES (%d, %d)", id, f.alice)
+			},
+			b: func(id int64) string {
+				return fmt.Sprintf("INSERT INTO alias_targets (alias_id, mailbox_id) SELECT %d, %d"+second, id, f.bob, "0, 0")
+			},
+			constraint: "alias_targets_alias_id_fkey",
+			bad:        fmt.Sprintf("SELECT count(*) FROM alias_targets WHERE mailbox_id = %d", f.bob),
+		},
+		{
+			name: "T3: a grant across groups for an uncommitted mailbox",
+			a:    fmt.Sprintf("INSERT INTO mailboxes (domain_id, local_part, password_hash, quota_bytes, store_id) VALUES (%d, 'race', '%s', 0, %d) RETURNING id", f.org, testHash, f.active),
+			b: func(id int64) string {
+				return fmt.Sprintf("INSERT INTO send_as (mailbox_id, domain_id) SELECT %d, %d"+second, id, f.com, "0, 0")
+			},
+			constraint: "send_as_mailbox_id_fkey",
+			bad:        fmt.Sprintf("SELECT count(*) FROM send_as WHERE domain_id = %d", f.com),
+		},
+		{
+			name: "T7: a mailbox on an uncommitted joining store",
+			a:    fmt.Sprintf("INSERT INTO stores (server_id, gate_name) VALUES (%d, 'race.store') RETURNING id", f.srv4),
+			b: func(id int64) string {
+				return fmt.Sprintf("INSERT INTO mailboxes (domain_id, local_part, password_hash, quota_bytes, store_id) SELECT %d, 'racer', '%s', 0, %d"+second,
+					f.org, testHash, id, fmt.Sprintf("%d, 'racer2', '%s', 0, %d", f.org, testHash, id))
+			},
+			constraint: "mailboxes_store_id_fkey",
+			bad:        "SELECT count(*) FROM mailboxes m JOIN stores s ON s.id = m.store_id WHERE s.state <> 'active'",
+		},
+		{
+			name: "T8: a store on an uncommitted server without the role store",
+			a:    "INSERT INTO servers (name, roles) VALUES ('race', '{edge}') RETURNING id",
+			b: func(id int64) string {
+				return fmt.Sprintf("INSERT INTO stores (server_id, gate_name) SELECT %d, 'race.store'"+second, id, "0, 'race2.store'")
+			},
+			constraint: "stores_server_id_fkey",
+			bad:        "SELECT count(*) FROM stores s JOIN servers sv ON sv.id = s.server_id WHERE NOT 'store' = ANY (sv.roles)",
+		},
+		{
+			name: "T2: an alias domain moved to an uncommitted domain of another group",
+			a:    fmt.Sprintf("INSERT INTO domains (group_id, name) VALUES (%d, 'example.biz') RETURNING id", f.other),
+			b: func(id int64) string {
+				// An UPDATE has no second row to wait in; a data-modifying CTE
+				// runs its row (and T2) first, the outer query then waits,
+				// and the foreign key is checked at the end of the statement.
+				return fmt.Sprintf("WITH u AS (UPDATE alias_domains SET domain_id = %d WHERE name = 'example.info' RETURNING 1) SELECT count(*) FROM u WHERE keepia_test_probe_wait()", id)
+			},
+			constraint: "alias_domains_domain_id_fkey",
+			bad:        fmt.Sprintf("SELECT count(*) FROM alias_domains a JOIN domains d ON d.id = a.domain_id WHERE a.name = 'example.info' AND d.group_id <> %d", f.acme),
+		},
+	} {
+		a, b := connect(t, d.url), connect(t, d.url)
+		txA, err := a.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var id int64
+		if _, err := txA.Exec(ctx, "SELECT pg_advisory_xact_lock(1, 42)"); err != nil {
+			t.Fatal(err)
+		}
+		if err := txA.QueryRow(ctx, c.a).Scan(&id); err != nil {
+			t.Fatalf("%s: A: %v", c.name, err)
+		}
+		if c.then != nil {
+			if _, err := txA.Exec(ctx, c.then(id)); err != nil {
+				t.Fatalf("%s: A: %v", c.name, err)
+			}
+		}
+		done := make(chan error, 1)
+		stmt := c.b(id)
+		go func() {
+			_, err := b.Exec(ctx, stmt)
+			done <- err
+		}()
+		errB, waited := doneOrLockWait(t, d.conn, done)
+		if waited {
+			// B passed its first row while A's row was invisible and now
+			// waits; let A commit and see where B's write ends up.
+			if err := txA.Commit(ctx); err != nil {
+				t.Fatalf("%s: A's commit: %v", c.name, err)
+			}
+			select {
+			case errB = <-done:
+			case <-time.After(testwait.Limit(t)):
+				t.Fatalf("%s: B still waits after A's commit", c.name)
+			}
+		} else {
+			_ = txA.Rollback(ctx)
+		}
+		var bad int
+		if err := d.conn.QueryRow(ctx, c.bad).Scan(&bad); err != nil {
+			t.Fatal(err)
+		}
+		if code, constraint := pgRule(errB); code != "23503" || constraint != c.constraint || bad != 0 {
+			t.Errorf("%s: B waited %v, B: %v, rows that broke the rule: %d; want 23503 %s and none", c.name, waited, errB, bad, c.constraint)
 		}
 	}
 }
