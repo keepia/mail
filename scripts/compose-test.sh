@@ -62,6 +62,9 @@
 #     the helper image as uid 65532, the volume read-only); keepia logged
 #     the first-start warning once; after `docker compose restart keepia`
 #     it is healthy again, with no second "created" line.
+# 16  the PostgreSQL log (#95): a mailboxes row refused by a CHECK is logged
+#     without its DETAIL ("Failing row contains", which would quote the
+#     password hash): postgres runs with log_error_verbosity=terse.
 #
 # Every test runs, also after a failure, and names what failed; the exit
 # status is 1 if any failed. Every wait is `--wait` or bounded by a timeout.
@@ -941,6 +944,34 @@ else
 	fi
 fi
 
+# ---- test 16: a refused row stays out of the PostgreSQL log --------------------
+
+# A CHECK that refuses a row makes PostgreSQL log the row as DETAIL
+# ("Failing row contains (...)"), and a mailboxes row holds the password
+# hash. postgres runs with log_error_verbosity=terse, which logs no DETAIL
+# (#95, Review B F1). The probe inserts, in one transaction that the
+# refusal rolls back, an active store and a mailbox with quota -1, so the
+# mailbox passes the triggers and fails mailboxes_quota_bytes_range. The
+# refusal must be in the log (the probe reached the server and its error
+# was logged), without a "Failing row" line. The hash is a placeholder.
+echo "---- test 16: a refused mailbox row is not in the PostgreSQL log"
+probe_sql="INSERT INTO customer_groups (name) VALUES ('compose-probe');
+INSERT INTO domains (group_id, name) SELECT id, 'compose-probe.example' FROM customer_groups WHERE name = 'compose-probe';
+INSERT INTO servers (name, roles) VALUES ('compose-probe', '{store}');
+INSERT INTO stores (server_id, gate_name, gate_ipv4, egress_port, state) SELECT id, 'compose-probe.store.keepia.internal', '192.0.2.99', 65000, 'active' FROM servers WHERE name = 'compose-probe';
+INSERT INTO mailboxes (domain_id, local_part, password_hash, quota_bytes, store_id) SELECT d.id, 'probe', '{SSHA512}cGxhY2Vob2xkZXItY29tcG9zZS1wcm9iZQ==', -1, s.id FROM domains d, stores s WHERE d.name = 'compose-probe.example' AND s.gate_name = 'compose-probe.store.keepia.internal';"
+out=$(timeout 60 docker compose exec -T postgres psql -X -q -v ON_ERROR_STOP=1 -U keepia -d keepia -c "$probe_sql" 2>&1 || true)
+logs=$(timeout 60 docker compose logs --no-color postgres 2>&1 || true)
+if [[ $out != *mailboxes_quota_bytes_range* ]]; then
+	fail "test 16: the probe was not refused by mailboxes_quota_bytes_range: $(head -n1 <<<"$out" | cut -c1-200)"
+elif [[ $logs != *mailboxes_quota_bytes_range* ]]; then
+	fail "test 16: the PostgreSQL log has no line for the refused probe"
+elif grep -q 'Failing row' <<<"$logs"; then
+	fail "test 16: the PostgreSQL log quotes the refused row ('Failing row contains'), want log_error_verbosity=terse"
+else
+	pass "test 16: the refusal is logged without the row (log_error_verbosity=terse)"
+fi
+
 # ---- resources ----------------------------------------------------------------
 
 echo "---- resources (docker stats; image size in MB)"
@@ -1002,4 +1033,4 @@ if [ "$failed" != 0 ]; then
 	echo "FAIL compose-test: $failed failure(s)" >&2
 	exit 1
 fi
-echo "ok   compose-test: tests 6, 8-13, 14, 14b and 15 passed"
+echo "ok   compose-test: tests 6, 8-13, 14, 14b, 15 and 16 passed"
