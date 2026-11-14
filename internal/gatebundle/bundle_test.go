@@ -227,12 +227,18 @@ func TestReadRefusesUnsafeFiles(t *testing.T) {
 	if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "not a regular file") {
 		t.Errorf("FIFO: %v", err)
 	}
+	// A valid bundle padded with white space past 64 KiB: only the size
+	// bound refuses it.
+	raw, err := os.ReadFile(filepath.Join(good, BundleFile))
+	if err != nil {
+		t.Fatal(err)
+	}
 	big := t.TempDir()
-	secret := "SECRETCONTENT"
-	replace(t, big, strings.Repeat(secret, maxBundle/len(secret)+1))
-	if _, err := Read(big); !errors.Is(err, ErrRefused) || strings.Contains(err.Error(), secret) {
+	replace(t, big, string(raw)+strings.Repeat(" ", maxBundle))
+	if _, err := Read(big); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "longer than") {
 		t.Errorf("oversized: %v", err)
 	}
+	secret := "SECRETCONTENT"
 	junk := t.TempDir()
 	replace(t, junk, secret)
 	if _, err := Read(junk); !errors.Is(err, ErrRefused) || strings.Contains(err.Error(), secret) {
