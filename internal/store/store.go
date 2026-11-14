@@ -131,7 +131,13 @@ func WithMigrationLockTimeout(period, tries uint64) Option {
 //     '@', '/', '?' or '#' in the user or password, which would put part
 //     of the password into the host, the database name or the query,
 //     where pgx's errors print it;
-//   - a URL that does not parse.
+//   - a URL that does not parse;
+//   - a URL whose default_query_exec_mode is not pgx's default,
+//     cache_statement (simple_protocol, exec, describe_exec or
+//     cache_describe): only the default is used and tested, and
+//     simple_protocol puts the values of a query, password hashes
+//     included, into the SQL text that PostgreSQL logs for a refused
+//     write. This is checked after parsing, before connecting.
 //
 // A password that is percent-encoded as it must be (%40 for '@', %2F,
 // %3F, %23) is used as given.
@@ -151,6 +157,9 @@ func Open(ctx context.Context, url string, opts ...Option) (*Store, error) {
 		// pgx's parse error quotes the URL (with the password masked);
 		// say only what is wrong with it.
 		return nil, errors.New("parse database URL: invalid connection string")
+	}
+	if cfg.ConnConfig.DefaultQueryExecMode != pgx.QueryExecModeCacheStatement {
+		return nil, errExecMode
 	}
 	if settings := oc.settings; len(settings) > 0 {
 		cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
@@ -193,6 +202,10 @@ func Open(ctx context.Context, url string, opts ...Option) (*Store, error) {
 var (
 	errNotURL      = errors.New("parse database URL: it must start with postgres:// or postgresql://, without spaces around it")
 	errUnescapedAt = errors.New("parse database URL: '@', '/', '?' and '#' in the user name or password, and '@' in a query value, must be percent-encoded (%40, %2F, %3F, %23)")
+	// In another mode, such as simple_protocol, pgx can put the values of
+	// a query, password hashes included, into its SQL text, which
+	// PostgreSQL logs for a refused write (#95, Review A).
+	errExecMode = errors.New("parse database URL: default_query_exec_mode must be left at its default, cache_statement, so that values are sent as bound parameters")
 )
 
 // isURL tells whether s starts with exactly postgres:// or postgresql://

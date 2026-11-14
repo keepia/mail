@@ -224,6 +224,32 @@ func TestOpenRejectsUnsafeURL(t *testing.T) {
 	}
 }
 
+// Open refuses every default_query_exec_mode but pgx's default,
+// cache_statement, before it connects, with a text that names no part of
+// the URL: in simple_protocol mode pgx puts a query's values, password
+// hashes included, into the SQL text that PostgreSQL logs for a refused
+// write (#95, Review A). The default, also given explicitly, is accepted.
+func TestOpenRefusesQueryExecMode(t *testing.T) {
+	for _, mode := range []string{"simple_protocol", "exec", "describe_exec", "cache_describe"} {
+		dbURL := "postgres://keepia:sec-not-real@127.0.0.1:1/keepia?default_query_exec_mode=" + mode
+		_, err := store.Open(context.Background(), dbURL)
+		if err == nil || !strings.Contains(err.Error(), "default_query_exec_mode must be left at its default") {
+			t.Errorf("%s: %v, want the refusal of the mode", mode, err)
+			continue
+		}
+		for _, s := range []string{"sec-not-real", "127.0.0.1"} {
+			if strings.Contains(err.Error(), s) {
+				t.Errorf("%s: error %q contains %q", mode, err, s)
+			}
+		}
+	}
+	dbURL := storetest.NewUnmigrated(t)
+	st := open(t, dbURL+"&default_query_exec_mode=cache_statement")
+	if err := st.Ping(context.Background()); err != nil {
+		t.Errorf("explicit cache_statement: %v", err)
+	}
+}
+
 func TestPing(t *testing.T) {
 	st := storetest.New(t)
 	if err := st.Ping(context.Background()); err != nil {
