@@ -745,7 +745,7 @@ func TestTriggersRefuseInvisibleRows(t *testing.T) {
 		},
 		{
 			name: "T3: a grant across groups for an uncommitted mailbox",
-			a:    fmt.Sprintf("INSERT INTO mailboxes (domain_id, local_part, password_hash, quota_bytes, store_id) VALUES (%d, 'race', '%s', 0, %d) RETURNING id", f.org, testHash, f.active),
+			a:    fmt.Sprintf("INSERT INTO mailboxes (domain_id, local_part, password_hash, quota_bytes, store_id) VALUES (%d, 'race3', '%s', 0, %d) RETURNING id", f.org, testHash, f.active),
 			b: func(id int64) string {
 				return fmt.Sprintf("INSERT INTO send_as (mailbox_id, domain_id) SELECT %d, %d"+second, id, f.com, "0, 0")
 			},
@@ -754,7 +754,7 @@ func TestTriggersRefuseInvisibleRows(t *testing.T) {
 		},
 		{
 			name: "T7: a mailbox on an uncommitted joining store",
-			a:    fmt.Sprintf("INSERT INTO stores (server_id, gate_name) VALUES (%d, 'race.store') RETURNING id", f.srv4),
+			a:    fmt.Sprintf("INSERT INTO stores (server_id, gate_name) VALUES (%d, 'race7.store') RETURNING id", f.srv4),
 			b: func(id int64) string {
 				return fmt.Sprintf("INSERT INTO mailboxes (domain_id, local_part, password_hash, quota_bytes, store_id) SELECT %d, 'racer', '%s', 0, %d"+second,
 					f.org, testHash, id, fmt.Sprintf("%d, 'racer2', '%s', 0, %d", f.org, testHash, id))
@@ -764,9 +764,9 @@ func TestTriggersRefuseInvisibleRows(t *testing.T) {
 		},
 		{
 			name: "T8: a store on an uncommitted server without the role store",
-			a:    "INSERT INTO servers (name, roles) VALUES ('race', '{edge}') RETURNING id",
+			a:    "INSERT INTO servers (name, roles) VALUES ('race8', '{edge}') RETURNING id",
 			b: func(id int64) string {
-				return fmt.Sprintf("INSERT INTO stores (server_id, gate_name) SELECT %d, 'race.store'"+second, id, "0, 'race2.store'")
+				return fmt.Sprintf("INSERT INTO stores (server_id, gate_name) SELECT %d, 'race8.store'"+second, id, "0, 'race8b.store'")
 			},
 			constraint: "stores_server_id_fkey",
 			bad:        "SELECT count(*) FROM stores s JOIN servers sv ON sv.id = s.server_id WHERE NOT 'store' = ANY (sv.roles)",
