@@ -62,7 +62,8 @@ CI runs the jobs `test` (against a `postgres:18` service), `lint` and
 Migrations are SQL files for [goose](https://github.com/pressly/goose) in
 `internal/store/migrations/`, embedded in the binary. `00001_baseline.sql`
 is a no-op; `00003_control_secrets.sql` holds the control secrets (#96).
-`00002_data_model.sql` holds the data model (#95): customer groups,
+`00004_data_model.sql` holds the data model (#95; numbered after 00003,
+which merged first, so 00002 stays unused): customer groups,
 domains, alias domains, servers, stores, mailboxes, aliases with their
 targets, send-as grants and the audit log, with the triggers that keep
 groups apart and addresses unique.
