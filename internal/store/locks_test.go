@@ -159,7 +159,7 @@ func TestWithHashLock(t *testing.T) {
 	check := func(step string, wantFrees int) {
 		t.Helper()
 		if frees != wantFrees {
-			t.Errorf("%s: FreeOSMemory called %d times in all, want %d", step, frees, wantFrees)
+			t.Fatalf("%s: FreeOSMemory called %d times in all, want %d", step, frees, wantFrees)
 		}
 	}
 
