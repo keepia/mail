@@ -286,6 +286,11 @@ func TestReconnectCatchesUp(t *testing.T) {
 		}
 	}
 	e.run(t, nil)
+	// Registered after run's cleanup, so it runs first: a failed test
+	// never leaves the writer blocked in its hook.
+	var once sync.Once
+	open := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(open)
 	e.mu.Lock()
 	pid := e.listenPID
 	e.listenPID = 0
@@ -306,7 +311,7 @@ func TestReconnectCatchesUp(t *testing.T) {
 	if err := pki.Reissue(ctx, e.st, e.keys, start); err != nil {
 		t.Fatal(err)
 	}
-	close(release)
+	open()
 	testwait.Until(t, &e.sig, "the bundle after the reconnect", func() bool {
 		g, err := gatebundle.ReadGeneration(e.w.Dir)
 		return err == nil && g == 2

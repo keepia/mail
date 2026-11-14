@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -267,16 +268,22 @@ func TestRedeemRefusals(t *testing.T) {
 	}
 }
 
-// heldAt runs f in a goroutine whose hook signals reached and then waits
-// for release.
+// gate holds a hook: hook signals reached and waits until open. It opens
+// at the latest when the test ends, before the store closes, so a failed
+// test never leaves a hook blocked on a connection.
 type gate struct {
 	reached chan struct{}
 	release chan struct{}
+	once    sync.Once
 }
 
-func newGate(n int) *gate {
-	return &gate{reached: make(chan struct{}, n), release: make(chan struct{})}
+func newGate(t *testing.T, n int) *gate {
+	g := &gate{reached: make(chan struct{}, n), release: make(chan struct{})}
+	t.Cleanup(g.open)
+	return g
 }
+
+func (g *gate) open() { g.once.Do(func() { close(g.release) }) }
 
 func (g *gate) hook() { g.reached <- struct{}{}; <-g.release }
 
@@ -294,7 +301,7 @@ func (g *gate) wait(t *testing.T, what string) {
 func TestConcurrentRedeems(t *testing.T) {
 	e := newEnv(t)
 	tok := e.add(t, "s1", "store")
-	g := newGate(2)
+	g := newGate(t, 2)
 	ctx := join.WithHooks(context.Background(), join.Hooks{AfterLock: g.hook})
 	done := make(chan error, 2)
 	for range 2 {
@@ -310,7 +317,7 @@ func TestConcurrentRedeems(t *testing.T) {
 		}
 	}()
 	storetest.WaitFor(t, e.obs, second, "the second redeem", storetest.LockWaitQuery)
-	close(g.release)
+	g.open()
 	var ok, refused int
 	for range 2 {
 		if err := <-done; err == nil {
@@ -335,7 +342,7 @@ func TestConcurrentRedeems(t *testing.T) {
 func TestRedeemAndRemoveDoNotDeadlock(t *testing.T) {
 	e := newEnv(t)
 	tok := e.add(t, "s1", "store")
-	g := newGate(1)
+	g := newGate(t, 1)
 	ctx := join.WithHooks(context.Background(), join.Hooks{AfterServerLock: g.hook})
 	redeemDone := make(chan error, 1)
 	var serial atomic.Pointer[big.Int]
@@ -353,7 +360,7 @@ func TestRedeemAndRemoveDoNotDeadlock(t *testing.T) {
 	removeDone := make(chan error, 1)
 	go func() { _, err := pki.RevokeServer(context.Background(), e.st, e.keys, "s1", now); removeDone <- err }()
 	storetest.WaitFor(t, e.obs, removeDone, "the removal", storetest.LockWaitQuery)
-	close(g.release)
+	g.open()
 	if err := <-redeemDone; err != nil {
 		t.Errorf("redeem: %v", err)
 	}

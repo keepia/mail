@@ -381,6 +381,17 @@ func TestReissueSchedule(t *testing.T) {
 	}
 }
 
+// releaser returns a channel that a hook waits on and the function that
+// closes it. It is also closed when the test ends, before the store
+// closes, so a failed test never leaves a hook blocked on a connection.
+func releaser(t *testing.T) (chan struct{}, func()) {
+	ch := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(ch) }) }
+	t.Cleanup(release)
+	return ch, release
+}
+
 // published is a list as a test hook saw it signed.
 type published struct {
 	by      string
@@ -421,9 +432,10 @@ func TestRevocationAndReissueSerialize(t *testing.T) {
 	}
 	agent := e.issue(t, "s1", pki.PurposeAgent, "")
 	var rec recorder
-	reached, release := make(chan struct{}), make(chan struct{})
+	reached := make(chan struct{})
+	gate, release := releaser(t)
 	aCtx := pki.WithHooks(ctx, pki.Hooks{
-		AfterRead: func() { close(reached); <-release },
+		AfterRead: func() { close(reached); <-gate },
 		Signed:    rec.hook("A"),
 	})
 	aDone := make(chan error, 1)
@@ -440,7 +452,7 @@ func TestRevocationAndReissueSerialize(t *testing.T) {
 		bDone <- pki.Reissue(pki.WithHooks(ctx, pki.Hooks{Signed: rec.hook("B")}), e.st, e.keys, dbNow)
 	}()
 	storetest.WaitFor(t, e.obs, bDone, "B waiting for the CRL lock", storetest.AdvisoryWaitQuery, int64(store.LockClassCRL))
-	close(release)
+	release()
 	for _, c := range []chan error{aDone, bDone} {
 		if err := <-c; err != nil {
 			t.Fatal(err)
@@ -469,9 +481,9 @@ func TestFirstReissuesSerialize(t *testing.T) {
 	ctx := context.Background()
 	var rec recorder
 	reached := make(chan struct{}, 2)
-	release := make(chan struct{})
+	gate, release := releaser(t)
 	hctx := pki.WithHooks(ctx, pki.Hooks{
-		AfterRead: func() { reached <- struct{}{}; <-release },
+		AfterRead: func() { reached <- struct{}{}; <-gate },
 		Signed:    rec.hook(""),
 	})
 	done := make(chan error, 2)
@@ -488,11 +500,11 @@ func TestFirstReissuesSerialize(t *testing.T) {
 		select {
 		case <-reached:
 			second <- errors.New("the second Reissue read without the lock")
-		case <-release:
+		case <-gate:
 		}
 	}()
 	storetest.WaitFor(t, e.obs, second, "the second Reissue waiting for the CRL lock", storetest.AdvisoryWaitQuery, int64(store.LockClassCRL))
-	close(release)
+	release()
 	for range 2 {
 		if err := <-done; err != nil {
 			t.Fatal(err)
@@ -556,8 +568,9 @@ func TestRemoveRacesNoMailbox(t *testing.T) {
 	e.addServer(t, "s1", pki.RoleStore)
 	mailboxStore(t, e, "s1")
 	sid := storeID(t, e, "s1")
-	reached, release := make(chan struct{}), make(chan struct{})
-	rctx := pki.WithHooks(ctx, pki.Hooks{AfterMailboxCount: func() { close(reached); <-release }})
+	reached := make(chan struct{})
+	gate, release := releaser(t)
+	rctx := pki.WithHooks(ctx, pki.Hooks{AfterMailboxCount: func() { close(reached); <-gate }})
 	removeDone := make(chan error, 1)
 	go func() { _, err := pki.RevokeServer(rctx, e.st, e.keys, "s1", dbNow); removeDone <- err }()
 	select {
@@ -575,7 +588,7 @@ func TestRemoveRacesNoMailbox(t *testing.T) {
 		addDone <- err
 	}()
 	storetest.WaitFor(t, e.obs, addDone, "the mailbox insert waiting for the server row", storetest.LockWaitQuery)
-	close(release)
+	release()
 	if err := <-removeDone; err != nil {
 		t.Fatalf("remove: %v", err)
 	}
