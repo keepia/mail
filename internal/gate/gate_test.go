@@ -88,7 +88,10 @@ func TestIngressBindsIPv6(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = ln.Close()
-	h := newHarness(t, RoleStore, func(h *harness) { h.cfg.Mesh = append(h.cfg.Mesh, v6) })
+	h := newHarness(t, RoleStore, func(h *harness) {
+		h.cfg.Mesh = append(h.cfg.Mesh, v6)
+		h.cfg.MeshNet = append(h.cfg.MeshNet, netip.MustParsePrefix("::1/128"))
+	})
 	h.target(143)
 	h.startWith()
 	client := h.f.edgeDovecot(7, h.fc.Now())
