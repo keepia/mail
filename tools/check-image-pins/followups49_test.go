@@ -64,6 +64,12 @@ func TestImageUses49(t *testing.T) {
 // TestCheckMakefile49: the Makefile forms of point 8 are reported; the
 // repository's own forms are not. The GO rule of #51 item 4 has its own
 // table, TestCheckMakefileGO51.
+//
+// The include rule reads a path as make does (#92): quotes and
+// backslashes are part of the name, so `include "x.mk"` and
+// `include x.m\k` are reported, and so is a ~, which make expands to a
+// home directory. `SHE""LL := x` guards the other side: the SHELL, GO*
+// and computed-name rules still read the line after quote removal.
 func TestCheckMakefile49(t *testing.T) {
 	cases := map[string]bool{
 		"SHELL := ./evil-sh":                   true,
@@ -81,6 +87,13 @@ func TestCheckMakefile49(t *testing.T) {
 		"export PA$(E)TH := x":                 true,
 		"$(eval PA$(E)TH := x)":                true,
 		"export PA$(E)TH":                      true,
+		"include `x`.mk":                       true,
+		`include "x.mk"`:                       true,
+		"-include 'tools/lint.mk'":             true,
+		`include x.m\k`:                        true,
+		"include ~/x.mk":                       true,
+		"include ./~/x.mk":                     true,
+		`SHE""LL := x`:                         true,
 		"GO ?= go":                             false,
 		"include tools/lint.mk":                false,
 		"\t$(GO) run ./tools/check-image-pins": false,
@@ -92,6 +105,21 @@ func TestCheckMakefile49(t *testing.T) {
 		if got := len(CheckMakefile([]byte(line+"\n"))) > 0; got != want {
 			t.Errorf("CheckMakefile(%q) reported %v, want %v", line, got, want)
 		}
+	}
+}
+
+// TestReadMakeTildeInclude92: make expands a leading ~ in an include
+// path to a home directory, so a step that runs make and includes
+// ~/x.mk is a problem, even when the repository has a file ~/x.mk that
+// the check could read instead (#92, coordinator decision 6874322252).
+func TestReadMakeTildeInclude92(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "Makefile", "include ~/x.mk\nall:\n\t@echo ok\n")
+	write(t, root, "~/x.mk", "x:\n\t@echo x\n")
+	const want = "it runs make, but Makefile includes ~/x.mk, which the check cannot resolve"
+	_, problems := referencedTexts(root, "make", "", true)
+	if !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, want) }) {
+		t.Errorf("referencedTexts(make) problems %q, want one with %q", problems, want)
 	}
 }
 

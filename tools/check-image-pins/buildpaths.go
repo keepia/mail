@@ -295,9 +295,16 @@ func isBuildAction(uses string) bool {
 // -bake-local` itself or hides lines from this rule (#49 point 8): SHELL
 // or .SHELLFLAGS set; GOFLAGS, GOENV or GOWORK set or exported (CI fixes
 // them in the check steps' prefix); any text that sets GO outside the
-// allowlisted lines of checkMakeGo (#51 item 4); an
-// include of a file that is not a literal *.mk path the walk reads; and a
-// variable name that is computed (`export PA$(E)TH`).
+// allowlisted lines of checkMakeGo (#51 item 4); an include whose path,
+// as make reads it (quotes included), is not a literal *.mk path, or is
+// absolute, under ../ or in a skipped directory (#92); and a variable
+// name that is computed (`export PA$(E)TH`).
+//
+// The include rule reads the line before quote removal: make takes
+// quotes and backslashes in an include path literally, so
+// `include "x.mk"` reads a file named `"x.mk"`. The walk does not
+// classify that name as a Makefile, so this function's rules would never
+// run on it (readMake still reads its text when a job runs make).
 //
 // These rules are a fast filter that fails closed on the forms they
 // know, not a proof that a Makefile is safe (see checkMakeGo and
@@ -319,7 +326,7 @@ func CheckMakefile(src []byte) []Finding {
 			out = append(out, Finding{l.line, "a Makefile may not set or export " + m[1] + m[2] + ": `check-image-pins -bake-local` passes it to docker"})
 			continue
 		}
-		if msg := makeToolInputs(raw); msg != "" {
+		if msg := makeToolInputs(raw, l.text); msg != "" {
 			out = append(out, Finding{l.line, msg})
 			continue
 		}
@@ -404,18 +411,23 @@ var (
 )
 
 // makeToolInputs returns the finding for one Makefile line under the
-// rules of #49 point 8, or "".
-func makeToolInputs(raw string) string {
+// rules of #49 point 8, or "". raw is the logical line with shell quoting
+// removed, so the SHELL, GO* and computed-name rules see `SHE""LL`; text
+// is the same line before quote removal, which the include rule reads
+// because make takes quotes in an include path literally (#92). A `~` is
+// not literal: make expands `~` and `~user` at the start of a path, also
+// after a leading `./`.
+func makeToolInputs(raw, text string) string {
 	if m := makeShell.FindStringSubmatch(raw); m != nil {
 		return "a Makefile may not set " + m[1] + m[2] + ": every recipe, `check-image-pins -bake-local` included, would run through it"
 	}
 	if m := makeGoEnv.FindStringSubmatch(raw); m != nil {
 		return "a Makefile may not set or export " + m[1] + m[2] + ": it changes how `go run` builds `check-image-pins` itself"
 	}
-	if m := makeInclude.FindStringSubmatch(raw); m != nil {
+	if m := makeInclude.FindStringSubmatch(text); m != nil {
 		for _, f := range strings.Fields(m[1]) {
-			if strings.ContainsAny(f, "$`*?[") || !strings.HasSuffix(f, ".mk") || skippedPath(f) {
-				return "a Makefile may include only literal *.mk files the check reads (got " + strconv.Quote(f) + ")"
+			if strings.ContainsAny(f, "$`*?[~") || !strings.HasSuffix(f, ".mk") || skippedPath(f) {
+				return "a Makefile may include only a literal path ending in .mk (no $, ~, backquote or glob character), not absolute, not under ../ and not in a skipped directory (got " + strconv.Quote(f) + ")"
 			}
 		}
 	}

@@ -1122,7 +1122,9 @@ func makeUnmodelled(src string) string {
 
 // readMake returns a Makefile's text with its literal includes inlined
 // (relative to make's directory), and adds every file it read to files.
-// An include the check cannot resolve is a problem.
+// An include the check cannot resolve is a problem: a path outside the
+// root, or one with a `$`, a `~` (make expands it to a home directory,
+// #92), a backquote or a glob character.
 func (w *refWalk) readMake(p, makeDir string, files *[]string, depth int) string {
 	p = filepath.Clean(p)
 	if slices.Contains(*files, p) || depth > 5 {
@@ -1148,7 +1150,7 @@ func (w *refWalk) readMake(p, makeDir string, files *[]string, depth int) string
 			inc := filepath.Join(makeDir, filepath.FromSlash(f))
 			st, err := os.Stat(inc) //nolint:gosec // checked below to be under the root
 			switch {
-			case strings.ContainsAny(f, "$`*?[") || !w.inRoot(inc):
+			case strings.ContainsAny(f, "$`*?[~") || !w.inRoot(inc):
 				w.problem("it runs make, but %s includes %s, which the check cannot resolve", mustRel(w.root, p), f)
 			case err == nil && st.Mode().IsRegular():
 				b.WriteString(w.readMake(inc, makeDir, files, depth+1))

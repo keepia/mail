@@ -726,8 +726,9 @@ lives, also under a skipped path.
        docker, and make passes its own value of an environment variable
        to a recipe even without `export`); setting `SHELL` or
        `.SHELLFLAGS`; setting or exporting `GOFLAGS`, `GOENV` or
-       `GOWORK`; an include whose path is not literal (a `$`, a
-       backquote or a glob character), does not end in `.mk`, or lies
+       `GOWORK`; an include whose path (read as make reads it, quotes
+       included) is not literal (a `$`, a `~`, a backquote or a glob
+       character), does not end in `.mk`, or lies
        in a skipped directory, under `../` or at an absolute path (the
        check does not verify that the file exists or that the walk read
        it; generated includes are a known limit); and a variable name it
