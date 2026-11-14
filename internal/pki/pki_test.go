@@ -594,6 +594,9 @@ func TestPolicyAndNames(t *testing.T) {
 		{storeGate, []string{"edge"}},
 		{edgeGate, []string{"edge"}},
 		{pki.ControlGateLeaf(), []string{"control"}},
+		// A store gate leaf that names the control gate (CD34: never
+		// issued to a server).
+		{pki.Leaf{Purpose: pki.PurposeGate, Role: pki.RoleStore, DNSName: pki.ControlGateName, CommonName: "x"}, []string{"store"}},
 	}
 	for _, r := range refused {
 		if err := pki.CheckPolicy(r.l, r.roles); !errors.Is(err, pki.ErrPolicy) {

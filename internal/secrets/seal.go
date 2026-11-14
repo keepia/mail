@@ -68,7 +68,6 @@ func (s *sealer) seal(name string, version int, public, plaintext []byte) []byte
 	// NewGCMWithRandomNonce takes no nonce: it draws a random one and
 	// prepends it to the output.
 	return s.aead.Seal(nil, nil, plaintext, aad(name, version, s.id, public)) //nolint:gosec // G407: the nonce is random, see above
-
 }
 
 // open opens a row sealed as version of name with its public part, sealed

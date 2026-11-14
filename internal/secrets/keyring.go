@@ -89,8 +89,8 @@ func (e *LockedError) Unwrap() []error {
 	return []error{e.Reason}
 }
 
-func locked(reason error, cause error, format string, args ...any) *LockedError {
-	return &LockedError{Reason: reason, cause: cause, msg: reason.Error() + ": " + fmt.Sprintf(format, args...)}
+func locked(reason error, format string, args ...any) *LockedError {
+	return &LockedError{Reason: reason, msg: reason.Error() + ": " + fmt.Sprintf(format, args...)}
 }
 
 // Defaults of Config.
@@ -247,9 +247,9 @@ func Read(ctx context.Context, st *store.Store, c Config) (*Keyring, error) {
 	}
 	switch {
 	case s.kek == nil && s.kekErr == nil && s.keyring == nil:
-		return nil, locked(ErrNotInitialized, nil, "the database holds no control secrets and %s does not exist; is keepia running?", c.KEKFile)
+		return nil, locked(ErrNotInitialized, "the database holds no control secrets and %s does not exist; is keepia running?", c.KEKFile)
 	case s.kek == nil && s.kekErr == nil && s.newMatchesKeyring():
-		return nil, locked(ErrBootstrapInProgress, nil,
+		return nil, locked(ErrBootstrapInProgress,
 			"%s is not linked to %s yet; keepia serve finishes it at its next start", c.newPath(), c.KEKFile)
 	}
 	if err := s.lockedState(c); err != nil {
@@ -316,25 +316,25 @@ func (s *state) lockedState(c Config) error {
 			msg: s.kekErr.Error() + "; fix or restore the KEK file (docs/development/index.md, \"Control secrets\")"}
 	case s.kek == nil && s.keyring == nil:
 		// Handled by the generate case; unreachable.
-		return locked(ErrNotInitialized, nil, "no secrets")
+		return locked(ErrNotInitialized, "no secrets")
 	case s.kek == nil && !s.newPresent:
-		return locked(ErrKEKMissing, nil,
+		return locked(ErrKEKMissing,
 			"the database holds control secrets under the KEK %x, but %s does not exist; restore the volume keepia-kek from a backup or the KEK from an export, or restore the database that belongs to the lost KEK",
 			s.keyring.KEKID, c.KEKFile)
 	case s.kek == nil:
-		return locked(ErrStrayKEKNew, nil,
+		return locked(ErrStrayKEKNew,
 			"%s does not exist, and %s holds %s, not the database's KEK %x; it is kept: restore the right KEK, or remove that kek.new if it is not one",
 			c.KEKFile, c.newPath(), newDesc(), s.keyring.KEKID)
 	case s.keyring == nil:
-		return locked(ErrKEKWithoutSecrets, nil,
+		return locked(ErrKEKWithoutSecrets,
 			"%s holds the KEK %s, but the database holds no control secrets; restore the matching database, or remove the volume keepia-kek for a fresh install",
 			c.KEKFile, s.kek.id)
 	case !slices.Equal(s.kek.id[:], s.keyring.KEKID):
-		return locked(ErrWrongKEK, nil,
+		return locked(ErrWrongKEK,
 			"%s holds the KEK %s, but the database's secrets are sealed under the KEK %x; restore the KEK file or the database that belongs to the other",
 			c.KEKFile, s.kek.id, s.keyring.KEKID)
 	case s.newPresent && (s.kekNew == nil || s.kekNew.id != s.kek.id):
-		return locked(ErrStrayKEKNew, nil,
+		return locked(ErrStrayKEKNew,
 			"%s holds %s, not the KEK %s of %s; it is kept: remove it once you know it is not needed",
 			c.newPath(), newDesc(), s.kek.id, c.KEKFile)
 	}
@@ -405,7 +405,8 @@ func loadKeyring(ctx context.Context, sess *store.SecretsSession, kr *store.Keyr
 		default:
 			reason = ErrSecretsIncomplete
 		}
-		return nil, locked(reason, err, "%v", err)
+		// err's text already starts with the reason's.
+		return nil, &LockedError{Reason: reason, cause: err, msg: err.Error()}
 	}
 	return &Keyring{kekID: kek.id, deploymentID: kr.DeploymentID, createdAt: kr.CreatedAt, lastExportAt: kr.LastExportAt, m: m}, nil
 }
