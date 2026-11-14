@@ -144,9 +144,9 @@ func (s *Store) SetStoreState(ctx context.Context, gateName, state string) error
 	})
 }
 
-// StoreRouting is where a store's gate is reached: its addresses (the
+// GateRouting is where a store's gate is reached: its addresses (the
 // zero Addr is none) and its egress port (0 is none).
-type StoreRouting struct {
+type GateRouting struct {
 	GateIPv4, GateIPv6 netip.Addr
 	EgressPort         int32
 }
@@ -154,7 +154,7 @@ type StoreRouting struct {
 // SetStoreRouting replaces the routing of the store with the gate name
 // gateName. An active store keeps a port and at least one address
 // (stores_active_routable). For N4 and tests.
-func (s *Store) SetStoreRouting(ctx context.Context, gateName string, r StoreRouting) error {
+func (s *Store) SetStoreRouting(ctx context.Context, gateName string, r GateRouting) error {
 	return s.write(ctx, "store.set", func(ctx context.Context, q *db.Queries) (audit, error) {
 		n, err := q.SetStoreRouting(ctx, db.SetStoreRoutingParams{
 			GateName: gateName, GateIpv4: optionalAddr(r.GateIPv4), GateIpv6: optionalAddr(r.GateIPv6), EgressPort: optionalPort(r.EgressPort),
